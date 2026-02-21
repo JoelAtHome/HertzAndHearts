@@ -21,6 +21,7 @@ class SensorScanner(QObject):
     def __init__(self):
         super().__init__()
         self.scanner = QBluetoothDeviceDiscoveryAgent()
+        self.scanner.setLowEnergyDiscoveryTimeout(10000)
         self.scanner.finished.connect(self._handle_scan_result)
         self.scanner.errorOccurred.connect(self._handle_scan_error)
 
@@ -28,8 +29,8 @@ class SensorScanner(QObject):
         if self.scanner.isActive():
             self.status_update.emit("Already searching for sensors.")
             return
-        self.status_update.emit("Searching for sensors (this might take a while).")
-        self.scanner.start()
+        self.status_update.emit("Scanning for BLE sensors...")
+        self.scanner.start(QBluetoothDeviceDiscoveryAgent.LowEnergyMethod)
 
     def _handle_scan_result(self):
         sensors: list[QBluetoothDeviceInfo] = [
@@ -147,6 +148,7 @@ class SensorClient(QObject):
         if not self.hr_notification.isValid():
             print("HR characteristic is invalid.")
         self.hr_service.writeDescriptor(self.hr_notification, self.ENABLE_NOTIFICATION)
+        self.status_update.emit(f"Connected to {self._sensor_address()}")
 
     def _reset_connection(self):
         print(f"Discarding sensor at {self._sensor_address()}.")
@@ -204,6 +206,8 @@ class SensorClient(QObject):
             on presence of uint16 HR format and energy expenditure.
         """
         heart_rate_measurement_bytes: bytes = data.data()
+
+        # self.status_update.emit("Sensor Connected and Streaming Data")
 
         byte0: int = heart_rate_measurement_bytes[0]
         uint8_format: bool = (byte0 & 1) == 0
