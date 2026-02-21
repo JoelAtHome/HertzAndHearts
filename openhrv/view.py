@@ -1,5 +1,6 @@
 from datetime import datetime
 import json
+import statistics
 import time
 from pathlib import Path
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QSplineSeries, QValueAxis, QAreaSeries
@@ -59,11 +60,12 @@ class PacerWidget(QChartView):
         self.plot.legend().setVisible(False)
         self.plot.setBackgroundRoundness(0)
         self.plot.setMargins(QMargins(0, 0, 0, 0))
-        self.disc_circumference_coord = QSplineSeries()
+        self.outline = QLineSeries()
         for x, y in zip(x_values, y_values):
-            self.disc_circumference_coord.append(x, y)
-        self.disk = QAreaSeries(self.disc_circumference_coord)
+            self.outline.append(x, y)
+        self.disk = QAreaSeries(self.outline)
         self.disk.setColor(color)
+        self.disk.setBorderColor(QColor(0, 0, 0, 0))
         self.plot.addSeries(self.disk)
         
         self.x_axis = QValueAxis()
@@ -80,15 +82,16 @@ class PacerWidget(QChartView):
         self.setChart(self.plot)
 
     def update_series(self, x_values, y_values):
-        for i, (x, y) in enumerate(zip(x_values, y_values)):
-            self.disc_circumference_coord.replace(i, x, y)
+        self.outline.clear()
+        for x, y in zip(x_values, y_values):
+            self.outline.append(x, y)
 
     def sizeHint(self):
         height = self.size().height()
         return QSize(height, height)
     
 class XYSeriesWidget(QChartView):
-    def __init__(self, x_values, y_values, line_color=BLUE):
+    def __init__(self, x_values, y_values, line_color=QColor(0, 0, 0)):
         super().__init__()
         self.plot = QChart()
         self.plot.legend().setVisible(False)
@@ -98,7 +101,7 @@ class XYSeriesWidget(QChartView):
         self.time_series = QLineSeries()
         self.plot.addSeries(self.time_series)
         pen = self.time_series.pen()
-        pen.setWidth(4)
+        pen.setWidth(2)
         pen.setColor(line_color)
         self.time_series.setPen(pen)
 
@@ -139,6 +142,11 @@ class View(QMainWindow):
         self._hr_ewma = None
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
+        self._hrv_axis_ceiling = None
+        self._sdnn_axis_ceiling = None
+        self._hr_smooth_buf = []
+        self._rmssd_smooth_buf = []
+        self._sdnn_smooth_buf = []
 
         self.setWindowTitle(f"OpenHRV ({version})")
         self.setWindowIcon(QIcon(":/logo.png"))
@@ -188,9 +196,9 @@ class View(QMainWindow):
 
         self.hr_trend_series = QLineSeries()
         self.hr_trend_series.setName("Averaged Heart Rate (bpm)")
-        pen = QPen(QColor(255, 165, 0))
+        pen = QPen(QColor(30, 100, 220))
         pen.setStyle(Qt.DotLine)
-        pen.setWidth(3)
+        pen.setWidth(2)
         self.hr_trend_series.setPen(pen)
         self.ibis_widget.plot.addSeries(self.hr_trend_series)
         self.hr_trend_series.attachAxis(self.ibis_widget.x_axis)
@@ -199,14 +207,29 @@ class View(QMainWindow):
         self.ibis_widget.plot.legend().setVisible(True)
         self.ibis_widget.plot.legend().setAlignment(Qt.AlignTop)
 
-        self.hrv_widget = XYSeriesWidget(self.model.hrv_seconds, self.model.hrv_buffer, BLUE)
-        self.hrv_widget.y_axis.setRange(0, 200)
+        self.hrv_widget = XYSeriesWidget(self.model.hrv_seconds, self.model.hrv_buffer)
+        self.hrv_widget.y_axis.setRange(0, 60)
         self.hrv_widget.time_series.setName("RMSSD (ms)")
         self.hrv_widget.plot.legend().setVisible(True)
         self.hrv_widget.plot.legend().setAlignment(Qt.AlignTop)
-        
-        self.pacer_widget = PacerWidget(self.pacer.cos_theta, self.pacer.sin_theta)
-        self.pacer_widget.setFixedSize(200, 200) 
+
+        self.sdnn_series = QLineSeries()
+        self.sdnn_series.setName("HRV/SDNN (ms)")
+        pen = QPen(QColor(30, 100, 220))
+        pen.setWidth(2)
+        self.sdnn_series.setPen(pen)
+
+        self.hrv_y_axis_right = QValueAxis()
+        self.hrv_y_axis_right.setTitleText("HRV/SDNN (ms)")
+        self.hrv_y_axis_right.setRange(0, 50)
+        self.hrv_widget.plot.addAxis(self.hrv_y_axis_right, Qt.AlignRight)
+
+        self.hrv_widget.plot.addSeries(self.sdnn_series)
+        self.sdnn_series.attachAxis(self.hrv_widget.x_axis)
+        self.sdnn_series.attachAxis(self.hrv_y_axis_right)
+
+        self.pacer_widget = PacerWidget(self.pacer.lung_x, self.pacer.lung_y)
+        self.pacer_widget.setFixedSize(200, 200)
         
         self.recording_statusbar = QProgressBar()
         self.recording_statusbar.setMinimumHeight(30)
@@ -217,10 +240,29 @@ class View(QMainWindow):
         # Labels
         self.current_hr_label = QLabel("Heart Rate: --")
         self.rmssd_label = QLabel("RMSSD: --")
-        self.stress_ratio_label = QLabel("Stress Ratio: --")
+        self.sdnn_label = QLabel("HRV/SDNN: --")
+        self.stress_ratio_label = QLabel("Stress Ratio (LF/HF): --")
         self.health_indicator = QLabel("●")
         self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
         self.health_label = QLabel("Signal: Identifying...")
+
+        # Pacer controls
+        self.pacer_label = QLabel("Rate: 7")
+        self.pacer_rate = QSlider(Qt.Horizontal)
+        self.pacer_rate.setRange(1, 15)
+        self.pacer_rate.setValue(7)
+        self.pacer_rate.setTickPosition(QSlider.TicksBelow)
+        self.pacer_rate.setTickInterval(1)
+        self.pacer_rate.setSingleStep(1)
+        self.pacer_rate.valueChanged.connect(self._update_breathing_rate)
+        self.pacer_toggle = QCheckBox("Show Pacer")
+        self.pacer_toggle.setChecked(True)
+        self.pacer_toggle.stateChanged.connect(self.toggle_pacer)
+
+        self.pacer_group = QGroupBox("Breathing Pacer")
+        self.pacer_config = QFormLayout(self.pacer_group)
+        self.pacer_config.addRow(self.pacer_label, self.pacer_rate)
+        self.pacer_config.addRow(self.pacer_toggle)
 
         # Buttons
         self.scan_button = QPushButton("Scan")
@@ -252,14 +294,18 @@ class View(QMainWindow):
         self.setCentralWidget(self.central_widget)
         self.vlayout0 = QVBoxLayout(self.central_widget)
 
-        # TOP: IBI + Pacer
+        # TOP: HR Chart + Pacer
         self.hlayout_top = QHBoxLayout()
-        self.hlayout_top.addWidget(self.ibis_widget, stretch=70)
-        self.hlayout_top.addWidget(self.pacer_widget, stretch=30)
+        self.hlayout_top.addWidget(self.ibis_widget)
+        self.hlayout_top.addWidget(self.pacer_widget)
         self.vlayout0.addLayout(self.hlayout_top, stretch=40)
 
-        # MIDDLE: HRV Chart
-        self.vlayout0.addWidget(self.hrv_widget, stretch=40)
+        # MIDDLE: HRV Chart + Pacer Controls (aligned to pacer orb above)
+        self.hlayout_mid = QHBoxLayout()
+        self.hlayout_mid.addWidget(self.hrv_widget)
+        self.pacer_group.setFixedWidth(200)
+        self.hlayout_mid.addWidget(self.pacer_group)
+        self.vlayout0.addLayout(self.hlayout_mid, stretch=40)
 
         # BOTTOM: Controls Layout
         self.controls_layout = QHBoxLayout()
@@ -272,17 +318,11 @@ class View(QMainWindow):
         self.device_grid.addWidget(self.connect_button, 1, 0)
         self.device_grid.addWidget(self.disconnect_button, 1, 1)
         self.device_grid.addWidget(self.reset_button, 2, 0, 1, 2)
-        
-        self.device_grid.addWidget(self.current_hr_label, 3, 0)
-        
-        # Sub-layout for LED + RMSSD
-        rmssd_container = QHBoxLayout()
-        rmssd_container.addWidget(self.health_indicator)
-        rmssd_container.addWidget(self.rmssd_label)
-        self.device_grid.addLayout(rmssd_container, 3, 1)
-        
-        self.device_grid.addWidget(self.stress_ratio_label, 4, 0)
-        self.device_grid.addWidget(self.health_label, 4, 1)
+
+        self.device_grid.addWidget(self.rmssd_label, 3, 0)
+        self.device_grid.addWidget(self.stress_ratio_label, 3, 1)
+        self.device_grid.addWidget(self.current_hr_label, 4, 0)
+        self.device_grid.addWidget(self.sdnn_label, 5, 0)
 
         # PANEL B: Recording & Status
         self.rec_group = QGroupBox("Recording & Status")
@@ -291,8 +331,8 @@ class View(QMainWindow):
         self.rec_grid.addWidget(self.save_recording_button, 0, 1)
         self.rec_grid.addWidget(self.annotation, 1, 0, 1, 2)
         self.rec_grid.addWidget(self.annotation_button, 1, 2)
-        self.rec_grid.addWidget(self.recording_statusbar, 2, 0, 1, 3) 
-        
+        self.rec_grid.addWidget(self.recording_statusbar, 2, 0, 1, 3)
+
         self.controls_layout.addWidget(self.device_group, stretch=45)
         self.controls_layout.addWidget(self.rec_group, stretch=55)
         
@@ -300,6 +340,12 @@ class View(QMainWindow):
 
         # Initialize
         self.statusbar = self.statusBar()
+        signal_status_widget = QWidget()
+        signal_status_layout = QHBoxLayout(signal_status_widget)
+        signal_status_layout.setContentsMargins(8, 0, 8, 0)
+        signal_status_layout.addWidget(self.health_indicator)
+        signal_status_layout.addWidget(self.health_label)
+        self.statusbar.addPermanentWidget(signal_status_widget)
         self.logger_thread.start()
         self.pacer_timer.start()
 
@@ -338,7 +384,13 @@ class View(QMainWindow):
         self._hr_ewma = None
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
+        self._hrv_axis_ceiling = None
+        self._sdnn_axis_ceiling = None
+        self._hr_smooth_buf = []
+        self._rmssd_smooth_buf = []
+        self._sdnn_smooth_buf = []
         self.hr_trend_series.clear()
+        self.sdnn_series.clear()
         
         if hasattr(self, 'baseline_series'):
             self.hrv_widget.chart().removeSeries(self.baseline_series)
@@ -391,8 +443,14 @@ class View(QMainWindow):
         self._hr_ewma = None
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
+        self._hrv_axis_ceiling = None
+        self._sdnn_axis_ceiling = None
+        self._hr_smooth_buf = []
+        self._rmssd_smooth_buf = []
+        self._sdnn_smooth_buf = []
         self.ibis_widget.time_series.clear()
         self.hr_trend_series.clear()
+        self.sdnn_series.clear()
         self.show_status("Baseline Reset. Waiting for data...")
         if hasattr(self, 'baseline_series'):
             self.baseline_series.clear()
@@ -413,22 +471,48 @@ class View(QMainWindow):
                 self.hrv_widget.time_series.clear()
                 self.ibis_widget.time_series.clear()
                 self.hr_trend_series.clear()
+                self.sdnn_series.clear()
                 print("DEBUG: Timer Started")
 
             elapsed = time.time() - self.start_time
             x = elapsed 
             total_calibration_time = SETTLING_DURATION + BASELINE_DURATION 
 
-            # 3. Add to Chart
-            self.hrv_widget.time_series.append(x, y)
+            # 3. Add smoothed RMSSD to Chart
+            self._rmssd_smooth_buf.append(y)
+            if len(self._rmssd_smooth_buf) > 3:
+                self._rmssd_smooth_buf.pop(0)
+            smoothed_rmssd = sum(self._rmssd_smooth_buf) / len(self._rmssd_smooth_buf)
+            self.hrv_widget.time_series.append(x, smoothed_rmssd)
 
-            # 4. Smart Scale (Point to the correct buffer)
-            ceiling = 50 
-            if len(self.model.hrv_buffer) > 5: # No [1] here!
-                current_max = max(list(self.model.hrv_buffer)[-50:]) 
-                ceiling = min(max(50, current_max * 1.2), 250)
-            
-            self.hrv_widget.y_axis.setRange(0, ceiling)
+            # 3b. Compute and plot SDNN from IBI buffer
+            ibis = list(self.model.ibis_buffer)
+            if len(ibis) >= 10:
+                sdnn = statistics.stdev(ibis[-30:])
+                self._sdnn_smooth_buf.append(sdnn)
+                if len(self._sdnn_smooth_buf) > 3:
+                    self._sdnn_smooth_buf.pop(0)
+                smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
+                self.sdnn_series.append(x, smoothed_sdnn)
+                self.sdnn_label.setText(f"HRV/SDNN: {sdnn:.1f} ms")
+
+            # 4. Expand-only Y-axes — grow to fit peaks, never shrink
+            # Left axis: RMSSD
+            if self._hrv_axis_ceiling is None:
+                self._hrv_axis_ceiling = 60
+            rmssd_padded = int(-(-smoothed_rmssd * 1.2 // 10)) * 10
+            if rmssd_padded > self._hrv_axis_ceiling:
+                self._hrv_axis_ceiling = rmssd_padded
+            self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
+
+            # Right axis: HRV/SDNN
+            if self._sdnn_axis_ceiling is None:
+                self._sdnn_axis_ceiling = 50
+            if len(self._sdnn_smooth_buf) > 0:
+                sdnn_padded = int(-(-self._sdnn_smooth_buf[-1] * 1.3 // 5)) * 5
+                if sdnn_padded > self._sdnn_axis_ceiling:
+                    self._sdnn_axis_ceiling = sdnn_padded
+            self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
 
             # --- CONTINUOUS PHASE ENGINE ---
             
@@ -468,9 +552,9 @@ class View(QMainWindow):
                     
                     self.baseline_series = QLineSeries()
                     self.baseline_series.setName("Baseline RMSSD (ms)")
-                    pen = QPen(Qt.black)
+                    pen = QPen(QColor(220, 40, 40))
                     pen.setStyle(Qt.DotLine)
-                    pen.setWidth(3)
+                    pen.setWidth(2)
                     self.baseline_series.setPen(pen)
                     self.hrv_widget.chart().addSeries(self.baseline_series)
                     self.baseline_series.attachAxis(self.hrv_widget.x_axis)
@@ -491,6 +575,8 @@ class View(QMainWindow):
         self.address_menu.addItems(addresses.value)
 
     def plot_pacer_disk(self):
+        if not self.pacer_toggle.isChecked():
+            return
         coordinates = self.pacer.update(self.model.breathing_rate)
         self.pacer_widget.update_series(*coordinates)
 
@@ -502,8 +588,17 @@ class View(QMainWindow):
         self.hrv_target_label.setText(f"Target: {target.value}")
 
     def toggle_pacer(self):
-        visible = self.pacer_widget.isVisible()
-        self.pacer_widget.setVisible(not visible)
+        if self.pacer_toggle.isChecked():
+            self.pacer_widget.disk.setColor(BLUE)
+            self.pacer_widget.disk.setBorderColor(QColor(0, 0, 0, 0))
+        else:
+            self.pacer_widget.update_series(self.pacer.lung_x, self.pacer.lung_y)
+            self.pacer_widget.disk.setColor(QColor(200, 210, 225))
+            self.pacer_widget.disk.setBorderColor(QColor(0, 0, 0, 0))
+
+    def _update_breathing_rate(self, value):
+        self.model.breathing_rate = float(value)
+        self.pacer_label.setText(f"Rate: {value}")
 
     def show_recording_status(self, status: int):
         """Indicate busy state if `status` is 0."""
@@ -584,7 +679,7 @@ class View(QMainWindow):
         
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":
-            self.stress_ratio_label.setText(f"Stress Ratio: {data.value[0]:.2f}")
+            self.stress_ratio_label.setText(f"Stress Ratio (LF/HF): {data.value[0]:.2f}")
 
         # 3. AVERAGED DATA (RMSSD & Stability)
         elif data.name == "hrv":
@@ -592,7 +687,7 @@ class View(QMainWindow):
                 return
             raw_rmssd = float(data.value[1][-1])
             rmssd_val = max(0, min(raw_rmssd, 250))
-            self.rmssd_label.setText(f"RMSSD: {rmssd_val:.2f}")
+            self.rmssd_label.setText(f"RMSSD: {rmssd_val:.2f} ms")
             
             if self._fault_active:
                 return
@@ -625,7 +720,12 @@ class View(QMainWindow):
                 return
 
             elapsed = time.time() - self.start_time
-            self.ibis_widget.time_series.append(elapsed, hr)
+
+            self._hr_smooth_buf.append(hr)
+            if len(self._hr_smooth_buf) > 3:
+                self._hr_smooth_buf.pop(0)
+            smoothed_hr = sum(self._hr_smooth_buf) / len(self._hr_smooth_buf)
+            self.ibis_widget.time_series.append(elapsed, smoothed_hr)
 
             # EWMA trend line (weight 0.05 = smooth rolling average)
             if self._hr_ewma is None:
