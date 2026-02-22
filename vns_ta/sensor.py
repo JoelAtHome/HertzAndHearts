@@ -115,23 +115,34 @@ class SensorClient(QObject):
         self.client.connectToDevice()
 
     def disconnect_client(self):
-        self.stop_ecg_stream()
-        if self.pmd_data_notification is not None and self.pmd_service is not None:
-            if self.pmd_data_notification.isValid():
-                self.pmd_service.writeDescriptor(
-                    self.pmd_data_notification, self.DISABLE_NOTIFICATION
-                )
-        if self.hr_notification is not None and self.hr_service is not None:
-            if not self.hr_notification.isValid():
-                return
-            self.hr_service.writeDescriptor(
-                self.hr_notification, self.DISABLE_NOTIFICATION
-            )
+        try:
+            self.stop_ecg_stream()
+        except Exception:
+            pass
+        try:
+            if self.pmd_data_notification is not None and self.pmd_service is not None:
+                if self.pmd_data_notification.isValid():
+                    self.pmd_service.writeDescriptor(
+                        self.pmd_data_notification, self.DISABLE_NOTIFICATION
+                    )
+        except Exception:
+            pass
+        try:
+            if self.hr_notification is not None and self.hr_service is not None:
+                if self.hr_notification.isValid():
+                    self.hr_service.writeDescriptor(
+                        self.hr_notification, self.DISABLE_NOTIFICATION
+                    )
+        except Exception:
+            pass
         if self.client is not None:
-            self.status_update.emit(
-                f"Disconnecting from sensor at {self._sensor_address()}."
-            )
-            self.client.disconnectFromDevice()
+            try:
+                self.status_update.emit(
+                    f"Disconnecting from sensor at {self._sensor_address()}."
+                )
+                self.client.disconnectFromDevice()
+            except Exception:
+                self._reset_connection()
 
     def _discover_services(self):
         if self.client is not None:
@@ -289,7 +300,12 @@ class SensorClient(QObject):
             print(f"PMD write confirmed: char={char.uuid().toString()}")
 
     def _pmd_error(self, error):
-        print(f"PMD service error: {error}")
+        print(f"PMD service error: {error}. ECG will be unavailable.")
+        self._pmd_ready = False
+        self._ecg_streaming = False
+        self._ecg_start_pending = False
+        self._ecg_data_received = False
+        self._remove_pmd_service()
 
     def _pmd_data_handler(self, char: QLowEnergyCharacteristic, data: QByteArray):
         raw = data.data()
@@ -312,11 +328,16 @@ class SensorClient(QObject):
             self.ecg_update.emit(samples)
 
     def _reset_connection(self):
-        print(f"Discarding sensor at {self._sensor_address()}.")
+        try:
+            addr = self._sensor_address()
+        except Exception:
+            addr = "unknown"
+        print(f"Discarding sensor at {addr}.")
         self._ecg_streaming = False
         self._pmd_ready = False
         self._ecg_start_pending = False
         self._ecg_data_received = False
+        self._pmd_descriptors_pending = 0
         self._remove_pmd_service()
         self._remove_service()
         self._remove_client()
@@ -324,6 +345,14 @@ class SensorClient(QObject):
     def _remove_pmd_service(self):
         if self.pmd_service is None:
             return
+        try:
+            self.pmd_service.stateChanged.disconnect()
+            self.pmd_service.characteristicChanged.disconnect()
+            self.pmd_service.characteristicWritten.disconnect()
+            self.pmd_service.descriptorWritten.disconnect()
+            self.pmd_service.errorOccurred.disconnect()
+        except (RuntimeError, TypeError):
+            pass
         try:
             self.pmd_service.deleteLater()
         except Exception as e:
@@ -336,6 +365,11 @@ class SensorClient(QObject):
         if self.hr_service is None:
             return
         try:
+            self.hr_service.stateChanged.disconnect()
+            self.hr_service.characteristicChanged.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        try:
             self.hr_service.deleteLater()
         except Exception as e:
             print(f"Couldn't remove service: {e}")
@@ -347,7 +381,16 @@ class SensorClient(QObject):
         if self.client is None:
             return
         try:
+            self.client.errorOccurred.disconnect()
+            self.client.connected.disconnect()
+            self.client.discoveryFinished.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        try:
             self.client.disconnected.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        try:
             self.client.deleteLater()
         except Exception as e:
             print(f"Couldn't remove client: {e}")
@@ -355,8 +398,19 @@ class SensorClient(QObject):
             self.client = None
 
     def _catch_error(self, error):
-        self.status_update.emit(f"An error occurred: {error}. Disconnecting sensor.")
-        self._reset_connection()
+        try:
+            self.status_update.emit(f"An error occurred: {error}. Disconnecting sensor.")
+        except Exception:
+            pass
+        try:
+            self._reset_connection()
+        except Exception as e:
+            print(f"Error during cleanup: {e}")
+            self.pmd_service = None
+            self.pmd_data_notification = None
+            self.hr_service = None
+            self.hr_notification = None
+            self.client = None
 
     def _data_handler(self, _, data: QByteArray):  # _ is unused but mandatory argument
         """

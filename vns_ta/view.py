@@ -308,6 +308,8 @@ class View(QMainWindow):
         self.model = model
         self.baseline_values = []
         self.baseline_rmssd = None
+        self.baseline_hr_values = []
+        self.baseline_hr = None
         self.start_time = None 
         self.is_phase_active = False # The "Shield" flag
         self._fault_active = False
@@ -579,6 +581,8 @@ class View(QMainWindow):
         self.start_time = None
         self.baseline_values = []
         self.baseline_rmssd = None
+        self.baseline_hr_values = []
+        self.baseline_hr = None
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -595,6 +599,9 @@ class View(QMainWindow):
         if hasattr(self, 'baseline_series'):
             self.hrv_widget.chart().removeSeries(self.baseline_series)
             del self.baseline_series
+        if hasattr(self, 'hr_baseline_series'):
+            self.ibis_widget.plot.removeSeries(self.hr_baseline_series)
+            del self.hr_baseline_series
             
         self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(False)
@@ -674,6 +681,8 @@ class View(QMainWindow):
         self.start_time = None
         self.baseline_rmssd = None
         self.baseline_values = []
+        self.baseline_hr = None
+        self.baseline_hr_values = []
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -693,6 +702,8 @@ class View(QMainWindow):
         self.show_status("Baseline Reset. Waiting for data...")
         if hasattr(self, 'baseline_series'):
             self.baseline_series.clear()
+        if hasattr(self, 'hr_baseline_series'):
+            self.hr_baseline_series.clear()
 
     def direct_chart_update(self, hrv_data: NamedSignal):
         try:
@@ -721,14 +732,31 @@ class View(QMainWindow):
             while len(self._rmssd_smooth_buf) > smooth_n:
                 self._rmssd_smooth_buf.pop(0)
             smoothed_rmssd = sum(self._rmssd_smooth_buf) / len(self._rmssd_smooth_buf)
-            self.hrv_widget.time_series.append(x, smoothed_rmssd)
 
             # 3b. Compute and plot SDNN from IBI buffer
+            sdnn = None
             if len(ibis) >= 10:
                 sdnn = statistics.stdev(ibis[-30:])
                 self._sdnn_smooth_buf.append(sdnn)
                 while len(self._sdnn_smooth_buf) > smooth_n:
                     self._sdnn_smooth_buf.pop(0)
+
+            if elapsed < self.settings.SETTLING_DURATION:
+                self.is_phase_active = True
+                remaining = int(self.settings.SETTLING_DURATION - elapsed)
+                self.recording_statusbar.setRange(0, self.settings.SETTLING_DURATION)
+                self.recording_statusbar.setValue(int(elapsed))
+                self.recording_statusbar.setFormat(f"Settling... {remaining}s")
+                return
+
+            if self._rmssd_smooth_buf and not self.hrv_widget.time_series.count():
+                self._rmssd_smooth_buf.clear()
+                self._sdnn_smooth_buf.clear()
+                self._rmssd_smooth_buf.append(y)
+                smoothed_rmssd = y
+
+            self.hrv_widget.time_series.append(x, smoothed_rmssd)
+            if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
                 smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
                 self.sdnn_series.append(x, smoothed_sdnn)
                 self.sdnn_label.setText(f"HRV/SDNN: {sdnn:.1f} ms")
@@ -753,34 +781,37 @@ class View(QMainWindow):
 
             # --- CONTINUOUS PHASE ENGINE ---
             
-            # PHASE 0 & 1: CALIBRATION (0 to 45 seconds)
+            # PHASE 1: BASELINE COLLECTION
             if elapsed < total_calibration_time:
                 self.is_phase_active = True
-                self.recording_statusbar.setRange(0, total_calibration_time)
-                self.recording_statusbar.setValue(int(elapsed))
-                
-                if elapsed < self.settings.SETTLING_DURATION:
-                    remaining = int(self.settings.SETTLING_DURATION - elapsed)
-                    self.recording_statusbar.setFormat(f"Settling... {remaining}s")
-                else:
-                    # Baseline (15-45s)
-                    self.baseline_values.append(y)
-                    remaining = int(total_calibration_time - elapsed)
-                    self.recording_statusbar.setFormat(f"Baseline... {remaining}s")
+                baseline_elapsed = elapsed - self.settings.SETTLING_DURATION
+                baseline_duration = self.settings.BASELINE_DURATION
+                remaining = int(baseline_duration - baseline_elapsed)
+                self.recording_statusbar.setRange(0, baseline_duration)
+                self.recording_statusbar.setValue(int(baseline_elapsed))
+                self.recording_statusbar.setFormat(f"Establishing Baselines... {remaining}s")
+                self.baseline_values.append(y)
 
-            # PHASE 2: CALCULATE AVERAGE (Only once at 45s)
+            # PHASE 2: CALCULATE AVERAGES (Only once at end of baseline)
             elif self.baseline_rmssd is None and self.baseline_values:
                 self.baseline_rmssd = sum(self.baseline_values) / len(self.baseline_values)
                 self.reset_button.setEnabled(True)
-                self.statusbar.showMessage(f"Baseline locked at {self.baseline_rmssd:.1f} ms")
+                hr_text = f"{self.baseline_hr:.0f}" if self.baseline_hr is not None else "--"
+                self.statusbar.showMessage(
+                    f"Baselines locked — RMSSD: {self.baseline_rmssd:.1f} ms, HR: {hr_text} bpm"
+                )
                 if self.settings.DEBUG:
-                    print(f"--- BASELINE LOCKED: {self.baseline_rmssd:.2f} ms ---")
+                    print(f"--- BASELINES LOCKED: RMSSD={self.baseline_rmssd:.2f} ms, HR={hr_text} bpm ---")
 
             # PHASE 3: LOCKED STATE (45s+)
             if self.baseline_rmssd is not None:
                 self.is_phase_active = True
-                self.recording_statusbar.setFormat(f"LOCKED: {self.baseline_rmssd:.1f}ms")
-                self.recording_statusbar.setValue(total_calibration_time)
+                hr_val = f"{self.baseline_hr:.0f}" if self.baseline_hr is not None else "--"
+                self.recording_statusbar.setFormat(
+                    f"BASELINES LOCKED: RMSSD = {self.baseline_rmssd:.1f} ms  |  HR = {hr_val} bpm"
+                )
+                self.recording_statusbar.setRange(0, self.settings.BASELINE_DURATION)
+                self.recording_statusbar.setValue(self.settings.BASELINE_DURATION)
 
                 # Dotted Line Logic
                 if not hasattr(self, 'baseline_series'):
@@ -790,7 +821,7 @@ class View(QMainWindow):
                     
                     self.baseline_series = QLineSeries()
                     self.baseline_series.setName("Baseline RMSSD (ms)")
-                    pen = QPen(QColor(220, 40, 40))
+                    pen = QPen(QColor(80, 80, 80))
                     pen.setStyle(Qt.DotLine)
                     pen.setWidth(2)
                     self.baseline_series.setPen(pen)
@@ -994,7 +1025,35 @@ class View(QMainWindow):
                 self._hr_ewma = hr
             else:
                 self._hr_ewma = w * hr + (1.0 - w) * self._hr_ewma
+
+            if elapsed < self.settings.SETTLING_DURATION:
+                return
+
+            if not self.hr_trend_series.count():
+                self._hr_ewma = hr
+
             self.hr_trend_series.append(elapsed, self._hr_ewma)
+
+            total_cal = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
+            if elapsed < total_cal:
+                self.baseline_hr_values.append(self._hr_ewma)
+            elif self.baseline_hr is None and self.baseline_hr_values:
+                self.baseline_hr = sum(self.baseline_hr_values) / len(self.baseline_hr_values)
+
+            if self.baseline_hr is not None:
+                if not hasattr(self, 'hr_baseline_series'):
+                    self.hr_baseline_series = QLineSeries()
+                    self.hr_baseline_series.setName("Baseline HR (bpm)")
+                    pen = QPen(QColor(80, 80, 80))
+                    pen.setStyle(Qt.DotLine)
+                    pen.setWidth(2)
+                    self.hr_baseline_series.setPen(pen)
+                    self.ibis_widget.plot.addSeries(self.hr_baseline_series)
+                    self.hr_baseline_series.attachAxis(self.ibis_widget.x_axis)
+                    self.hr_baseline_series.attachAxis(self.ibis_widget.y_axis)
+                self.hr_baseline_series.clear()
+                self.hr_baseline_series.append(elapsed - 60, self.baseline_hr)
+                self.hr_baseline_series.append(elapsed + 2, self.baseline_hr)
 
             # Expand-only Y-axis: grows to fit extremes, never shrinks
             min_span = 40
