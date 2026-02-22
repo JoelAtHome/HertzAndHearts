@@ -1,6 +1,7 @@
 from typing import Final
 from math import ceil
 
+DEBUG: Final[bool] = False
 
 IBI_MEDIAN_WINDOW: Final[int] = 11  # samples
 EWMA_WEIGHT_CURRENT_SAMPLE: Final[float] = (

@@ -21,7 +21,7 @@ from vns_ta.model import Model
 from vns_ta.config import (
     breathing_rate_to_tick, HRV_HISTORY_DURATION, IBI_HISTORY_DURATION,
     MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
-    MIN_PLOT_IBI, MAX_PLOT_IBI
+    MIN_PLOT_IBI, MAX_PLOT_IBI, DEBUG
 )
 from vns_ta import __version__ as version, resources  # noqa
 import warnings
@@ -148,6 +148,7 @@ class View(QMainWindow):
         self._hr_smooth_buf = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._last_data_time = None
 
         self.setWindowTitle(f"VNS-TA ({version})")
         self.setWindowIcon(QIcon(":/logo.png"))
@@ -173,6 +174,10 @@ class View(QMainWindow):
         self.pacer_timer = QTimer()
         self.pacer_timer.setInterval(int(1000 / 8))
         self.pacer_timer.timeout.connect(self.plot_pacer_disk)
+
+        self._data_watchdog = QTimer()
+        self._data_watchdog.setInterval(5000)
+        self._data_watchdog.timeout.connect(self._check_data_timeout)
 
         self.scanner = SensorScanner()
         self.scanner.sensor_update.connect(self.model.update_sensors)
@@ -312,7 +317,7 @@ class View(QMainWindow):
         self.controls_layout = QHBoxLayout()
         
         # PANEL A: Device & Stats
-        self.device_group = QGroupBox("Device & Stats")
+        self.device_group = QGroupBox("Control Panel")
         self.device_grid = QGridLayout(self.device_group)
         self.device_grid.addWidget(self.scan_button, 0, 0)
         self.device_grid.addWidget(self.address_menu, 0, 1)
@@ -398,12 +403,14 @@ class View(QMainWindow):
             del self.baseline_series
             
         self.sensor.connect_client(*sensor)
+        self._last_data_time = None
+        self._data_watchdog.stop()
         self.show_status("Connecting to Sensor... Please wait.")
 
     def disconnect_sensor(self):
         """Safely disconnects from the Bluetooth sensor."""
+        self._data_watchdog.stop()
         self.sensor.disconnect_client()
-        # Ensure the shield is lowered so general status messages can appear again
         self.is_phase_active = False 
         self.recording_statusbar.setFormat("Sensor Disconnected")
 
@@ -441,6 +448,8 @@ class View(QMainWindow):
         self.baseline_rmssd = None
         self.baseline_values = []
         self.is_phase_active = False
+        self._fault_active = False
+        self._consecutive_good = 0
         self._hr_ewma = None
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
@@ -449,9 +458,13 @@ class View(QMainWindow):
         self._hr_smooth_buf = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._last_data_time = time.time()
+        self.model.clear_buffers()
         self.ibis_widget.time_series.clear()
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
+        self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
+        self.health_label.setText("Signal: Identifying...")
         self.show_status("Baseline Reset. Waiting for data...")
         if hasattr(self, 'baseline_series'):
             self.baseline_series.clear()
@@ -473,7 +486,8 @@ class View(QMainWindow):
                 self.ibis_widget.time_series.clear()
                 self.hr_trend_series.clear()
                 self.sdnn_series.clear()
-                print("DEBUG: Timer Started")
+                if DEBUG:
+                    print("Timer Started")
 
             elapsed = time.time() - self.start_time
             x = elapsed 
@@ -540,7 +554,8 @@ class View(QMainWindow):
             elif self.baseline_rmssd is None and self.baseline_values:
                 self.baseline_rmssd = sum(self.baseline_values) / len(self.baseline_values)
                 self.statusbar.showMessage(f"Baseline locked at {self.baseline_rmssd:.1f} ms")
-                print(f"--- BASELINE LOCKED: {self.baseline_rmssd:.2f} ms ---")
+                if DEBUG:
+                    print(f"--- BASELINE LOCKED: {self.baseline_rmssd:.2f} ms ---")
 
             # PHASE 3: LOCKED STATE (45s+)
             if self.baseline_rmssd is not None:
@@ -622,8 +637,7 @@ class View(QMainWindow):
         # ALWAYS update the tiny status bar at the very bottom
         self.statusbar.showMessage(status)
         
-        # ALWAYS print to the console for debugging
-        if print_to_terminal:
+        if print_to_terminal and DEBUG:
             print(status)
 
     def emit_annotation(self):
@@ -636,9 +650,23 @@ class View(QMainWindow):
         self.rmssd_label.setText("RMSSD: 45 ms")
         self.stress_ratio_label.setText("Stress Ratio (LF/HF): 1.2")
 
+    def _check_data_timeout(self):
+        if self._last_data_time is None:
+            return
+        silence = time.time() - self._last_data_time
+        if silence >= 5.0 and not self._fault_active:
+            self._fault_active = True
+            self._consecutive_good = 0
+            self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
+            self.health_label.setText("Signal: LOST (No data)")
+            self.model.clear_buffers()
+
     def update_ui_labels(self, data: NamedSignal):
         # 1. RAW BEAT DATA (Heart Rate & Instant Faults)
         if data.name == "ibis":
+            self._last_data_time = time.time()
+            if not self._data_watchdog.isActive():
+                self._data_watchdog.start()
             if len(data.value[1]) > 0:
                 last_ibi_ms = data.value[1][-1]
                 
@@ -663,23 +691,29 @@ class View(QMainWindow):
                     return
 
                 # LEVEL 3 FAULT: Adaptive — 30% deviation from rolling average
-                recent_ibis = list(data.value[1])[-30:]
-                if len(recent_ibis) >= 10:
-                    avg_ibi = sum(recent_ibis) / len(recent_ibis)
-                    deviation = abs(last_ibi_ms - avg_ibi) / avg_ibi
-                    if deviation > 0.30:
-                        self._fault_active = True
-                        self._consecutive_good = 0
-                        avg_hr = int(60000.0 / avg_ibi)
-                        self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
-                        self.health_label.setText(f"Signal: ERRATIC (avg {avg_hr})")
-                        return
+                # Skip during recovery: the rolling average is polluted by
+                # the bad data that caused the fault in the first place.
+                if not self._fault_active:
+                    recent_ibis = list(data.value[1])[-30:]
+                    if len(recent_ibis) >= 10:
+                        avg_ibi = sum(recent_ibis) / len(recent_ibis)
+                        deviation = abs(last_ibi_ms - avg_ibi) / avg_ibi
+                        if deviation > 0.30:
+                            self._fault_active = True
+                            self._consecutive_good = 0
+                            avg_hr = int(60000.0 / avg_ibi)
+                            self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
+                            self.health_label.setText(f"Signal: ERRATIC (avg {avg_hr})")
+                            return
 
                 # Normal beat — count towards recovery
                 if self._fault_active:
                     self._consecutive_good += 1
                     if self._consecutive_good >= 10:
                         self._fault_active = False
+                        self.model.clear_buffers()
+                        self.health_indicator.setStyleSheet("color: #00FF00; font-size: 18px;")
+                        self.health_label.setText("Signal: GOOD")
         
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":

@@ -28,6 +28,7 @@ from vns_ta.config import (
     MIN_HRV_TARGET,
     MAX_HRV_TARGET,
     EWMA_WEIGHT_CURRENT_SAMPLE,
+    DEBUG,
 )
 
 
@@ -45,7 +46,6 @@ class Model(QObject):
         self.hrv_buffer.clear()
         self.rr_intervals.clear()
         self.ewma_hrv = 1.0
-        print("DEBUG: Buffers cleared and reset for recovery.")
 
     def __init__(self):
         super().__init__()
@@ -150,7 +150,8 @@ class Model(QObject):
                 validated_ibi = MAX_IBI
             else:
                 validated_ibi = median_ibi
-            print(f"Correcting outlier IBI {ibi} to {validated_ibi}")
+            if DEBUG:
+                print(f"Correcting outlier IBI {ibi} to {validated_ibi}")
 
         return validated_ibi
 
@@ -158,7 +159,8 @@ class Model(QObject):
         validated_hrv: int = hrv
         if hrv > MAX_HRV_TARGET:
             validated_hrv = min(math.ceil(self.ewma_hrv), MAX_HRV_TARGET)
-            print(f"Correcting outlier HRV {hrv} to {validated_hrv}")
+            if DEBUG:
+                print(f"Correcting outlier HRV {hrv} to {validated_hrv}")
 
         return validated_hrv
 
@@ -174,8 +176,9 @@ class Model(QObject):
             # 4. This line defines 'stress_val' so Python knows what it is
             stress_val = features['lf_hf_ratio'] 
             # 5. This tells the terminal to show you it's working
-            print(f"--- FREQUENCY MATH UNLOCKED ---")
-            print(f"STRESS RATIO: {stress_val:.2f}")
+            if DEBUG:
+                print(f"--- FREQUENCY MATH UNLOCKED ---")
+                print(f"STRESS RATIO: {stress_val:.2f}")
             # 6. This tells the UI to update the number on your screen
             self.stress_ratio_update.emit(NamedSignal(name="stress_ratio", value=[stress_val]))
         except Exception as e:

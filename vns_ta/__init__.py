@@ -1,4 +1,7 @@
 # https://py-pkgs.org/04-package-structure
-from importlib.metadata import version
+from importlib.metadata import version, PackageNotFoundError
 
-__version__ = version("VNS-TA")  # read version from pyproject.toml
+try:
+    __version__ = version("VNS-TA")
+except PackageNotFoundError:
+    __version__ = "dev"

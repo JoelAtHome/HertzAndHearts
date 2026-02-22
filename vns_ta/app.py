@@ -17,7 +17,7 @@ class Application(QApplication):
         
 def main():
     app = Application(sys.argv)
-    app._view.show()
+    app._view.showMaximized()
     sys.exit(app.exec())
 
 if __name__ == "__main__":
