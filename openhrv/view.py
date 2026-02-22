@@ -30,7 +30,8 @@ warnings.filterwarnings("ignore", category=UserWarning)
 
 # --- SESSION SETTINGS ---
 SETTLING_DURATION = 15   
-BASELINE_DURATION = 30  
+BASELINE_DURATION = 30
+SMOOTH_SECONDS = 18
 
 BLUE = QColor(135, 206, 250)
 WHITE = QColor(255, 255, 255)
@@ -208,7 +209,7 @@ class View(QMainWindow):
         self.ibis_widget.plot.legend().setAlignment(Qt.AlignTop)
 
         self.hrv_widget = XYSeriesWidget(self.model.hrv_seconds, self.model.hrv_buffer)
-        self.hrv_widget.y_axis.setRange(0, 60)
+        self.hrv_widget.y_axis.setRange(0, 10)
         self.hrv_widget.time_series.setName("RMSSD (ms)")
         self.hrv_widget.plot.legend().setVisible(True)
         self.hrv_widget.plot.legend().setAlignment(Qt.AlignTop)
@@ -479,28 +480,31 @@ class View(QMainWindow):
             total_calibration_time = SETTLING_DURATION + BASELINE_DURATION 
 
             # 3. Add smoothed RMSSD to Chart
+            ibis = list(self.model.ibis_buffer)
+            cur_hr = 60000.0 / ibis[-1] if ibis and ibis[-1] > 0 else 70
+            smooth_n = max(5, round(cur_hr / 60 * SMOOTH_SECONDS))
+
             self._rmssd_smooth_buf.append(y)
-            if len(self._rmssd_smooth_buf) > 3:
+            while len(self._rmssd_smooth_buf) > smooth_n:
                 self._rmssd_smooth_buf.pop(0)
             smoothed_rmssd = sum(self._rmssd_smooth_buf) / len(self._rmssd_smooth_buf)
             self.hrv_widget.time_series.append(x, smoothed_rmssd)
 
             # 3b. Compute and plot SDNN from IBI buffer
-            ibis = list(self.model.ibis_buffer)
             if len(ibis) >= 10:
                 sdnn = statistics.stdev(ibis[-30:])
                 self._sdnn_smooth_buf.append(sdnn)
-                if len(self._sdnn_smooth_buf) > 3:
+                while len(self._sdnn_smooth_buf) > smooth_n:
                     self._sdnn_smooth_buf.pop(0)
                 smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
                 self.sdnn_series.append(x, smoothed_sdnn)
                 self.sdnn_label.setText(f"HRV/SDNN: {sdnn:.1f} ms")
 
             # 4. Expand-only Y-axes — grow to fit peaks, never shrink
-            # Left axis: RMSSD
+            # Left axis: RMSSD (start tight, grow in steps of 5)
             if self._hrv_axis_ceiling is None:
-                self._hrv_axis_ceiling = 60
-            rmssd_padded = int(-(-smoothed_rmssd * 1.2 // 10)) * 10
+                self._hrv_axis_ceiling = max(10, int(-(-smoothed_rmssd * 1.5 // 5)) * 5)
+            rmssd_padded = int(-(-smoothed_rmssd * 1.3 // 5)) * 5
             if rmssd_padded > self._hrv_axis_ceiling:
                 self._hrv_axis_ceiling = rmssd_padded
             self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
@@ -721,8 +725,9 @@ class View(QMainWindow):
 
             elapsed = time.time() - self.start_time
 
+            smooth_n = max(5, round(hr / 60 * SMOOTH_SECONDS))
             self._hr_smooth_buf.append(hr)
-            if len(self._hr_smooth_buf) > 3:
+            while len(self._hr_smooth_buf) > smooth_n:
                 self._hr_smooth_buf.pop(0)
             smoothed_hr = sum(self._hr_smooth_buf) / len(self._hr_smooth_buf)
             self.ibis_widget.time_series.append(elapsed, smoothed_hr)
