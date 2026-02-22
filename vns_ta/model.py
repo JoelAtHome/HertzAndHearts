@@ -1,14 +1,4 @@
-import asyncio
-from pyexpat import features
-from bleak import BleakClient
 import numpy as np
-
-# Set to 20 for faster testing, 56 for standard 1-min clinical baseline
-FREQUENCY_WINDOW_SIZE = 20  
-
-# Polar H10 Heart Rate Service UUID
-HR_UUID = "00002a37-0000-1000-8000-00805f9b34fb"
-
 from hrvanalysis import get_time_domain_features, get_frequency_domain_features
 import statistics
 import math
@@ -24,12 +14,10 @@ from vns_ta.config import (
     MAX_BREATHING_RATE,
     MIN_IBI,
     MAX_IBI,
-    IBI_MEDIAN_WINDOW,
     MIN_HRV_TARGET,
     MAX_HRV_TARGET,
-    EWMA_WEIGHT_CURRENT_SAMPLE,
-    DEBUG,
 )
+from vns_ta.settings import Settings
 
 
 class Model(QObject):
@@ -49,8 +37,7 @@ class Model(QObject):
 
     def __init__(self):
         super().__init__()
-        # Once a bounded length deque is full, when new items are added,
-        # a corresponding number of items are discarded from the opposite end.
+        self._settings = Settings()
         self.lf_hf_ratio = 0
         self.ibis_buffer: deque[int] = deque(maxlen=IBI_BUFFER_SIZE)
         self.ibis_seconds: deque[float] = deque(
@@ -131,7 +118,7 @@ class Model(QObject):
     def validate_ibi(self, ibi: int) -> int:
         # If the buffer is empty or too small, just return the raw IBI 
         # so we can establish the connection!
-        if len(self.ibis_buffer) < IBI_MEDIAN_WINDOW:
+        if len(self.ibis_buffer) < self._settings.IBI_MEDIAN_WINDOW:
             return ibi
         validated_ibi: int = ibi
         if ibi < MIN_IBI or ibi > MAX_IBI:
@@ -139,7 +126,7 @@ class Model(QObject):
                 statistics.median(
                     islice(
                         self.ibis_buffer,
-                        len(self.ibis_buffer) - IBI_MEDIAN_WINDOW,
+                        len(self.ibis_buffer) - self._settings.IBI_MEDIAN_WINDOW,
                         None,
                     )
                 )
@@ -150,7 +137,7 @@ class Model(QObject):
                 validated_ibi = MAX_IBI
             else:
                 validated_ibi = median_ibi
-            if DEBUG:
+            if self._settings.DEBUG:
                 print(f"Correcting outlier IBI {ibi} to {validated_ibi}")
 
         return validated_ibi
@@ -159,24 +146,20 @@ class Model(QObject):
         validated_hrv: int = hrv
         if hrv > MAX_HRV_TARGET:
             validated_hrv = min(math.ceil(self.ewma_hrv), MAX_HRV_TARGET)
-            if DEBUG:
+            if self._settings.DEBUG:
                 print(f"Correcting outlier HRV {hrv} to {validated_hrv}")
 
         return validated_hrv
 
     def compute_local_hrv(self):
     # 1. Wait until we have 56 samples (about 1 minute of data)
-        if len(self.rr_intervals) < FREQUENCY_WINDOW_SIZE:
+        if len(self.rr_intervals) < self._settings.FREQUENCY_WINDOW_SIZE:
             return
         try:
-            # 2. This line pulls in the math library we need
             from hrvanalysis import get_frequency_domain_features
-            # 3. This line does the heavy math and creates a 'features' dictionary
             features = get_frequency_domain_features(list(self.rr_intervals))
-            # 4. This line defines 'stress_val' so Python knows what it is
-            stress_val = features['lf_hf_ratio'] 
-            # 5. This tells the terminal to show you it's working
-            if DEBUG:
+            stress_val = features['lf_hf_ratio']
+            if self._settings.DEBUG:
                 print(f"--- FREQUENCY MATH UNLOCKED ---")
                 print(f"STRESS RATIO: {stress_val:.2f}")
             # 6. This tells the UI to update the number on your screen
@@ -187,10 +170,19 @@ class Model(QObject):
 
     def update_hrv_buffer(self, local_hrv: float):
         self.ewma_hrv = (
-            EWMA_WEIGHT_CURRENT_SAMPLE * self.validate_hrv(local_hrv)
-            + (1 - EWMA_WEIGHT_CURRENT_SAMPLE) * self.ewma_hrv
+            self._settings.EWMA_WEIGHT_CURRENT_SAMPLE * self.validate_hrv(local_hrv)
+            + (1 - self._settings.EWMA_WEIGHT_CURRENT_SAMPLE) * self.ewma_hrv
         )
-        self.hrv_buffer.append(self.ewma_hrv)
+
+        ibi_list = list(self.ibis_buffer)
+        if len(ibi_list) >= 3:
+            window = ibi_list[-self._settings.RMSSD_WINDOW:]
+            diffs = np.diff(window)
+            rmssd = float(np.sqrt(np.mean(np.square(diffs))))
+        else:
+            rmssd = self.ewma_hrv
+
+        self.hrv_buffer.append(rmssd)
         self.hrv_update.emit(
             NamedSignal("hrv", (self.hrv_seconds, self.hrv_buffer))
         )

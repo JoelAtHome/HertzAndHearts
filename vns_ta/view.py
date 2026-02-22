@@ -22,17 +22,14 @@ from vns_ta.model import Model
 from vns_ta.config import (
     breathing_rate_to_tick, HRV_HISTORY_DURATION, IBI_HISTORY_DURATION,
     MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
-    MIN_PLOT_IBI, MAX_PLOT_IBI, DEBUG
+    MIN_PLOT_IBI, MAX_PLOT_IBI,
+    ECG_SAMPLE_RATE,
 )
+from vns_ta.settings import Settings, SettingsDialog
 from vns_ta import __version__ as version, resources  # noqa
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
-
-# --- SESSION SETTINGS ---
-SETTLING_DURATION = 15   
-BASELINE_DURATION = 30
-SMOOTH_SECONDS = 18
 
 BLUE = QColor(135, 206, 250)
 WHITE = QColor(255, 255, 255)
@@ -124,12 +121,6 @@ class XYSeriesWidget(QChartView):
             self.time_series.append(x, y)        
 
 
-ECG_SAMPLE_RATE = 130
-ECG_DISPLAY_SECONDS = 5
-ECG_BUFFER_SIZE = ECG_SAMPLE_RATE * ECG_DISPLAY_SECONDS
-ECG_REFRESH_MS = 33
-
-
 class EcgWindow(QMainWindow):
     closed = Signal()
 
@@ -139,7 +130,9 @@ class EcgWindow(QMainWindow):
         self.setMinimumSize(600, 300)
         self.resize(900, 350)
 
-        self._buffer = deque(maxlen=ECG_BUFFER_SIZE)
+        self._settings = Settings()
+        display_sec = self._settings.ECG_DISPLAY_SECONDS
+        self._buffer = deque(maxlen=ECG_SAMPLE_RATE * display_sec)
         self._sample_count = 0
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
@@ -149,8 +142,8 @@ class EcgWindow(QMainWindow):
         self._sweep_complete = False
         self._prev_sample = None
         self._peak_tracker = 0.0
-        self._trigger_threshold = 0.3
-        self._samples_per_frame = ECG_SAMPLE_RATE * (ECG_REFRESH_MS / 1000.0)
+        self._trigger_threshold = self._settings.ECG_TRIGGER_THRESHOLD
+        self._samples_per_frame = ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
 
         chart = QChart()
         chart.legend().setVisible(False)
@@ -167,8 +160,8 @@ class EcgWindow(QMainWindow):
         chart.addSeries(self._series)
 
         self._x_axis = QValueAxis()
-        self._x_axis.setTitleText("Last 5 Seconds")
-        self._x_axis.setRange(0, ECG_DISPLAY_SECONDS)
+        self._x_axis.setTitleText(f"Last {display_sec} Seconds")
+        self._x_axis.setRange(0, display_sec)
         self._x_axis.setLabelsVisible(False)
         self._x_axis.setTickCount(6)
         chart.addAxis(self._x_axis, Qt.AlignBottom)
@@ -196,16 +189,22 @@ class EcgWindow(QMainWindow):
         self.setCentralWidget(chart_view)
 
         self._refresh_timer = QTimer()
-        self._refresh_timer.setInterval(ECG_REFRESH_MS)
+        self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
         self._refresh_timer.timeout.connect(self._redraw)
 
     def start(self):
+        display_sec = self._settings.ECG_DISPLAY_SECONDS
+        self._buffer = deque(maxlen=ECG_SAMPLE_RATE * display_sec)
         self._sweep_buffer = []
         self._reveal_pos = 0.0
         self._sweep_complete = False
         self._prev_sample = None
         self._peak_tracker = 0.0
-        self._trigger_threshold = 0.3
+        self._trigger_threshold = self._settings.ECG_TRIGGER_THRESHOLD
+        self._samples_per_frame = ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+        self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
+        self._x_axis.setRange(0, display_sec)
+        self._x_axis.setTitleText(f"Last {display_sec} Seconds")
         self._refresh_timer.start()
         self._statusbar.showMessage("ECG streaming...")
 
@@ -241,7 +240,7 @@ class EcgWindow(QMainWindow):
                 self._reveal_pos = 1.0
             elif not self._sweep_complete:
                 self._sweep_buffer.append(s)
-                if len(self._sweep_buffer) >= ECG_BUFFER_SIZE:
+                if len(self._sweep_buffer) >= ECG_SAMPLE_RATE * self._settings.ECG_DISPLAY_SECONDS:
                     self._sweep_complete = True
 
             if s > self._peak_tracker:
@@ -305,6 +304,7 @@ class View(QMainWindow):
         super().__init__()
 
         # 1. TRACKERS & STATE
+        self.settings = Settings()
         self.model = model
         self.baseline_values = []
         self.baseline_rmssd = None
@@ -317,7 +317,6 @@ class View(QMainWindow):
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
-        self._hr_smooth_buf = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self._last_data_time = None
@@ -375,12 +374,12 @@ class View(QMainWindow):
         self.ibis_widget = XYSeriesWidget(self.model.ibis_seconds, self.model.ibis_buffer)
         self.ibis_widget.y_axis.setRange(40, 160)
 
-        self.ibis_widget.time_series.setName("Actual Heart Rate (bpm)")
+        self.ibis_widget.plot.removeSeries(self.ibis_widget.time_series)
 
         self.hr_trend_series = QLineSeries()
         self.hr_trend_series.setName("Averaged Heart Rate (bpm)")
-        pen = QPen(QColor(30, 100, 220))
-        pen.setStyle(Qt.DotLine)
+        pen = QPen(QColor(0, 0, 0))
+        pen.setStyle(Qt.SolidLine)
         pen.setWidth(2)
         self.hr_trend_series.setPen(pen)
         self.ibis_widget.plot.addSeries(self.hr_trend_series)
@@ -395,7 +394,7 @@ class View(QMainWindow):
         self.hr_y_axis_right.setTitleText(" ")
         self.hr_y_axis_right.setRange(40, 160)
         self.ibis_widget.plot.addAxis(self.hr_y_axis_right, Qt.AlignRight)
-        self.ibis_widget.time_series.attachAxis(self.hr_y_axis_right)
+        self.hr_trend_series.attachAxis(self.hr_y_axis_right)
 
         self.hrv_widget = XYSeriesWidget(self.model.hrv_seconds, self.model.hrv_buffer)
         self.hrv_widget.y_axis.setRange(0, 10)
@@ -475,6 +474,9 @@ class View(QMainWindow):
         self.ecg_button.setEnabled(False)
         self.ecg_button.clicked.connect(self.toggle_ecg_window)
 
+        self.settings_button = QPushButton("Settings")
+        self.settings_button.clicked.connect(self._open_settings)
+
         self.start_recording_button = QPushButton("Start")
         self.start_recording_button.clicked.connect(self.get_filepath)
         self.save_recording_button = QPushButton("Save")
@@ -516,10 +518,12 @@ class View(QMainWindow):
         self.device_grid.addWidget(self.reset_button, 2, 0)
         self.device_grid.addWidget(self.ecg_button, 2, 1)
 
-        self.device_grid.addWidget(self.rmssd_label, 3, 0)
-        self.device_grid.addWidget(self.stress_ratio_label, 3, 1)
-        self.device_grid.addWidget(self.current_hr_label, 4, 0)
-        self.device_grid.addWidget(self.sdnn_label, 5, 0)
+        self.device_grid.addWidget(self.settings_button, 3, 0)
+
+        self.device_grid.addWidget(self.rmssd_label, 4, 0)
+        self.device_grid.addWidget(self.stress_ratio_label, 4, 1)
+        self.device_grid.addWidget(self.current_hr_label, 5, 0)
+        self.device_grid.addWidget(self.sdnn_label, 6, 0)
 
         # PANEL B: Recording & Status
         self.rec_group = QGroupBox("Recording & Status")
@@ -583,7 +587,6 @@ class View(QMainWindow):
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
-        self._hr_smooth_buf = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self.hr_trend_series.clear()
@@ -612,7 +615,8 @@ class View(QMainWindow):
         self.disconnect_button.setEnabled(False)
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (no sensor)")
-        self.is_phase_active = False 
+        self.is_phase_active = False
+        self.recording_statusbar.setValue(0)
         self.recording_statusbar.setFormat("Sensor Disconnected")
 
     def toggle_ecg_window(self):
@@ -631,6 +635,10 @@ class View(QMainWindow):
 
     def _on_ecg_window_closed(self):
         self.ecg_button.setText("ECG Monitor")
+
+    def _open_settings(self):
+        dlg = SettingsDialog(self.settings, parent=self)
+        dlg.exec()
 
     def get_filepath(self):
         """Opens a file dialog to set the recording destination."""
@@ -674,12 +682,10 @@ class View(QMainWindow):
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
-        self._hr_smooth_buf = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self._last_data_time = time.time()
         self.model.clear_buffers()
-        self.ibis_widget.time_series.clear()
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
         self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
@@ -704,12 +710,12 @@ class View(QMainWindow):
 
             elapsed = time.time() - self.start_time
             x = elapsed 
-            total_calibration_time = SETTLING_DURATION + BASELINE_DURATION 
+            total_calibration_time = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
 
             # 3. Add smoothed RMSSD to Chart
             ibis = list(self.model.ibis_buffer)
             cur_hr = 60000.0 / ibis[-1] if ibis and ibis[-1] > 0 else 70
-            smooth_n = max(5, round(cur_hr / 60 * SMOOTH_SECONDS))
+            smooth_n = max(5, round(cur_hr / 60 * self.settings.SMOOTH_SECONDS))
 
             self._rmssd_smooth_buf.append(y)
             while len(self._rmssd_smooth_buf) > smooth_n:
@@ -753,9 +759,8 @@ class View(QMainWindow):
                 self.recording_statusbar.setRange(0, total_calibration_time)
                 self.recording_statusbar.setValue(int(elapsed))
                 
-                if elapsed < SETTLING_DURATION:
-                    # Settling (0-15s)
-                    remaining = int(SETTLING_DURATION - elapsed)
+                if elapsed < self.settings.SETTLING_DURATION:
+                    remaining = int(self.settings.SETTLING_DURATION - elapsed)
                     self.recording_statusbar.setFormat(f"Settling... {remaining}s")
                 else:
                     # Baseline (15-45s)
@@ -768,7 +773,7 @@ class View(QMainWindow):
                 self.baseline_rmssd = sum(self.baseline_values) / len(self.baseline_values)
                 self.reset_button.setEnabled(True)
                 self.statusbar.showMessage(f"Baseline locked at {self.baseline_rmssd:.1f} ms")
-                if DEBUG:
+                if self.settings.DEBUG:
                     print(f"--- BASELINE LOCKED: {self.baseline_rmssd:.2f} ms ---")
 
             # PHASE 3: LOCKED STATE (45s+)
@@ -856,7 +861,7 @@ class View(QMainWindow):
         # ALWAYS update the tiny status bar at the very bottom
         self.statusbar.showMessage(status)
         
-        if print_to_terminal and DEBUG:
+        if print_to_terminal and self.settings.DEBUG:
             print(status)
 
     def emit_annotation(self):
@@ -873,7 +878,7 @@ class View(QMainWindow):
         if self._last_data_time is None:
             return
         silence = time.time() - self._last_data_time
-        if silence >= 5.0 and not self._fault_active:
+        if silence >= self.settings.DATA_TIMEOUT_SECONDS and not self._fault_active:
             self._fault_active = True
             self._consecutive_good = 0
             self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
@@ -890,10 +895,11 @@ class View(QMainWindow):
                 last_ibi_ms = data.value[1][-1]
                 
                 hr = 60000.0 / last_ibi_ms
-                self.current_hr_label.setText(f"Heart Rate: {int(hr)} bpm")
+                display_hr = self._hr_ewma if self._hr_ewma is not None else hr
+                self.current_hr_label.setText(f"Heart Rate: {int(display_hr)} bpm")
 
-                # LEVEL 1 FAULT: Total Dropout (3s+)
-                if last_ibi_ms > 3000: 
+                # LEVEL 1 FAULT: Total Dropout
+                if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
                     self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
@@ -901,8 +907,8 @@ class View(QMainWindow):
                     self.signals.request_buffer_reset.emit()
                     return
 
-                # LEVEL 2 FAULT: Hard limits (HR > 200 or HR < 30)
-                if last_ibi_ms > 2000 or last_ibi_ms < 300:
+                # LEVEL 2 FAULT: Hard IBI limits
+                if last_ibi_ms > self.settings.NOISE_IBI_HIGH_MS or last_ibi_ms < self.settings.NOISE_IBI_LOW_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
                     self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
@@ -913,11 +919,11 @@ class View(QMainWindow):
                 # Skip during recovery: the rolling average is polluted by
                 # the bad data that caused the fault in the first place.
                 if not self._fault_active:
-                    recent_ibis = list(data.value[1])[-30:]
-                    if len(recent_ibis) >= 10:
+                    recent_ibis = list(data.value[1])[-self.settings.DEVIATION_WINDOW:]
+                    if len(recent_ibis) >= self.settings.DEVIATION_MIN_SAMPLES:
                         avg_ibi = sum(recent_ibis) / len(recent_ibis)
                         deviation = abs(last_ibi_ms - avg_ibi) / avg_ibi
-                        if deviation > 0.30:
+                        if deviation > self.settings.DEVIATION_THRESHOLD:
                             self._fault_active = True
                             self._consecutive_good = 0
                             avg_hr = int(60000.0 / avg_ibi)
@@ -928,7 +934,7 @@ class View(QMainWindow):
                 # Normal beat — count towards recovery
                 if self._fault_active:
                     self._consecutive_good += 1
-                    if self._consecutive_good >= 10:
+                    if self._consecutive_good >= self.settings.RECOVERY_BEATS:
                         self._fault_active = False
                         self.model.clear_buffers()
                         self.health_indicator.setStyleSheet("color: #00FF00; font-size: 18px;")
@@ -975,27 +981,19 @@ class View(QMainWindow):
 
             if self.start_time is None:
                 self.start_time = time.time()
-                self.ibis_widget.time_series.clear()
                 self.hr_trend_series.clear()
                 self.sdnn_series.clear()
                 self.hrv_widget.time_series.clear()
-                if DEBUG:
+                if self.settings.DEBUG:
                     print("Timer Started")
 
             elapsed = time.time() - self.start_time
 
-            smooth_n = max(5, round(hr / 60 * SMOOTH_SECONDS))
-            self._hr_smooth_buf.append(hr)
-            while len(self._hr_smooth_buf) > smooth_n:
-                self._hr_smooth_buf.pop(0)
-            smoothed_hr = sum(self._hr_smooth_buf) / len(self._hr_smooth_buf)
-            self.ibis_widget.time_series.append(elapsed, smoothed_hr)
-
-            # EWMA trend line (weight 0.05 = smooth rolling average)
+            w = self.settings.HR_EWMA_WEIGHT
             if self._hr_ewma is None:
                 self._hr_ewma = hr
             else:
-                self._hr_ewma = 0.05 * hr + 0.95 * self._hr_ewma
+                self._hr_ewma = w * hr + (1.0 - w) * self._hr_ewma
             self.hr_trend_series.append(elapsed, self._hr_ewma)
 
             # Expand-only Y-axis: grows to fit extremes, never shrinks
