@@ -16,8 +16,8 @@ from collections import deque
 from itertools import islice
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtBluetooth import QBluetoothDeviceInfo
-from openhrv.utils import get_sensor_address, sign, NamedSignal
-from openhrv.config import (
+from vns_ta.utils import get_sensor_address, sign, NamedSignal
+from vns_ta.config import (
     tick_to_breathing_rate,
     HRV_BUFFER_SIZE,
     IBI_BUFFER_SIZE,

@@ -13,17 +13,17 @@ from PySide6.QtWidgets import (
     QProgressBar, QGridLayout, QSizePolicy
     )
 from typing import Iterable
-from openhrv.utils import valid_address, valid_path, get_sensor_address, NamedSignal
-from openhrv.sensor import SensorScanner, SensorClient
-from openhrv.logger import Logger
-from openhrv.pacer import Pacer
-from openhrv.model import Model
-from openhrv.config import (
+from vns_ta.utils import valid_address, valid_path, get_sensor_address, NamedSignal
+from vns_ta.sensor import SensorScanner, SensorClient
+from vns_ta.logger import Logger
+from vns_ta.pacer import Pacer
+from vns_ta.model import Model
+from vns_ta.config import (
     breathing_rate_to_tick, HRV_HISTORY_DURATION, IBI_HISTORY_DURATION,
     MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
     MIN_PLOT_IBI, MAX_PLOT_IBI
 )
-from openhrv import __version__ as version, resources  # noqa
+from vns_ta import __version__ as version, resources  # noqa
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -39,7 +39,7 @@ GREEN = QColor(0, 255, 0)
 YELLOW = QColor(255, 255, 0)
 RED = QColor(255, 0, 0)
 
-SENSOR_CONFIG = Path.home() / ".openhrv_last_sensor.json"
+SENSOR_CONFIG = Path.home() / ".vns_ta_last_sensor.json"
 
 def _save_last_sensor(name, address):
     try:
@@ -149,7 +149,7 @@ class View(QMainWindow):
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
 
-        self.setWindowTitle(f"OpenHRV ({version})")
+        self.setWindowTitle(f"VNS-TA ({version})")
         self.setWindowIcon(QIcon(":/logo.png"))
 
         # 2. DATA CONNECTIONS
@@ -410,7 +410,7 @@ class View(QMainWindow):
     def get_filepath(self):
         """Opens a file dialog to set the recording destination."""
         current_time: str = datetime.now().strftime("%Y-%m-%d-%H-%M")
-        default_file_name: str = f"OpenHRV_{current_time}.csv"
+        default_file_name: str = f"VNS-TA_{current_time}.csv"
         
         # Opens the Windows/System save dialog
         file_path: str = QFileDialog.getSaveFileName(

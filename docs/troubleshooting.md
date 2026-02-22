@@ -11,7 +11,7 @@ You might have to install (some of) the dependencies for connecting to the X11 s
 - https://doc.qt.io/qt-6/linux.html
 
 ## Windows
-`OpenHRV` has been tested on Windows 10, but there seem to be Bluetooth problems on Windows 11.
+`VNS-TA` has been tested on Windows 10, but there seem to be Bluetooth problems on Windows 11.
 Have a look at the issues (open and closed) labeled with `Windows`.
 
 ## MacOS
@@ -28,8 +28,8 @@ The `mac_os_app.spec` file should look as follows:
 block_cipher = None
 
 a = Analysis(
-    ["openhrv/app.py"],
-    pathex=["./openhrv"],
+    ["vns_ta/app.py"],
+    pathex=["./vns_ta"],
     binaries=[],
     datas=[],
     hiddenimports=[],
@@ -73,7 +73,7 @@ coll = COLLECT(
 )
 app = BUNDLE(
     coll,
-    name="openhrv.app",
+    name="vns_ta.app",
     icon="docs/logo.icns",
     bundle_identifier=None,
     info_plist={
@@ -82,9 +82,9 @@ app = BUNDLE(
 )
 ```
 
-A macOS app bundle will be created at `OpenHRV/dist/openhrv.app`.
+A macOS app bundle will be created at `VNS-TA/dist/vns_ta.app`.
 This can be loaded directly by clicking on it, or if you wish to see terminal debug messages,
-you can execute from the project root `./dist/openhrv.app/Contents/MacOS/app`.
+you can execute from the project root `./dist/vns_ta.app/Contents/MacOS/app`.
 The first run takes extra time.
 
 Also look at the issues (open and closed) labeled with `macOS`.

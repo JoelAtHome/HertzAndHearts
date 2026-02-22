@@ -1,7 +1,7 @@
 import sys
 from PySide6.QtWidgets import QApplication
-from openhrv.view import View
-from openhrv.model import Model
+from vns_ta.view import View
+from vns_ta.model import Model
 
 class Application(QApplication):
     def __init__(self, sys_argv):

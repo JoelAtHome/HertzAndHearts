@@ -1,6 +1,6 @@
 from datetime import datetime
 from PySide6.QtCore import QObject, Signal
-from openhrv.utils import NamedSignal
+from vns_ta.utils import NamedSignal
 
 
 class Logger(QObject):

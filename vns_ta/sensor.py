@@ -10,8 +10,8 @@ from PySide6.QtBluetooth import (
 )
 from math import ceil
 from typing import Union
-from openhrv.utils import get_sensor_address, get_sensor_remote_address
-from openhrv.config import COMPATIBLE_SENSORS
+from vns_ta.utils import get_sensor_address, get_sensor_remote_address
+from vns_ta.config import COMPATIBLE_SENSORS
 
 
 class SensorScanner(QObject):
@@ -52,7 +52,7 @@ class SensorClient(QObject):
     """
     Connect to an ECG sensor that acts as a Bluetooth server / peripheral.
     On Windows, the sensor must already be paired with the machine running
-    OpenHRV. Pairing isn't implemented in Qt6.
+    VNS-TA. Pairing isn't implemented in Qt6.
 
     In Qt terminology client=central, server=peripheral.
     """

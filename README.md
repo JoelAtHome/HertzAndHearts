@@ -1,6 +1,6 @@
 <img src="https://github.com/JanCBrammer/OpenHRV/raw/main/docs/logo.png" width="125" height="125" />
 
-# OpenHRV
+# VNS-TA
 
 A desktop application for heart rate variability (HRV) biofeedback training with ECG chest straps.
 
@@ -31,27 +31,27 @@ pip install git+https://github.com/JanCBrammer/OpenHRV.git
 You can now start the application with
 
 ```
-python -m openhrv.app
+python -m vns_ta.app
 ```
 
 or alternatively, with the shortcut
 
 ```
-openhrv
+vns-ta
 ```
-I tested `OpenHRV` on Ubuntu 24.04. It _should_ run on Windows and macOS as well, however, I haven't confirmed that myself.
-If you have problems running `OpenHRV` have a look at [docs/troubleshooting.md](docs/troubleshooting.md).
+I tested `VNS-TA` on Ubuntu 24.04. It _should_ run on Windows and macOS as well, however, I haven't confirmed that myself.
+If you have problems running `VNS-TA` have a look at [docs/troubleshooting.md](docs/troubleshooting.md).
 
 ## Ubuntu executable
 
-On Ubuntu, download and run [OpenHRV.bin](https://github.com/JanCBrammer/OpenHRV/releases/latest), no installation required.
+On Ubuntu, download and run [VNS-TA.bin](https://github.com/JanCBrammer/OpenHRV/releases/latest), no installation required.
 
 ## User Guide
 
 ### Connect your ECG sensor
 First make sure the sensor is paired with your computer
 (i.e., find and pair the sensor in your computer's Bluetooth settings).
-Then search the sensor in **OpenHRV** by clicking `Scan`. The addresses of all
+Then search the sensor in **VNS-TA** by clicking `Scan`. The addresses of all
 paired sensors show up in the drop-down menu. Select your sensor from the
 drop-down menu and click `Connect` in order to establish a connection. You can
 disconnect the sensor anytime by clicking `Disconnect`. Disconnecting is useful

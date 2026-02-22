@@ -28,18 +28,18 @@ jobs:
     - name: release build
       if: github.event_name == 'release'
       run: |
-        pyinstaller --onefile --icon=docs/logo.ico --name=OpenHRV.bin openhrv/app.py --windowed
+        pyinstaller --onefile --icon=docs/logo.ico --name=VNS-TA.bin vns_ta/app.py --windowed
 
     - name: manual build
       if: github.event_name == 'workflow_dispatch'
       run: |
-        pyinstaller --onefile --icon=docs/logo.ico --name=OpenHRV.bin openhrv/app.py
+        pyinstaller --onefile --icon=docs/logo.ico --name=VNS-TA.bin vns_ta/app.py
 
     - name: upload build artifact
       uses: actions/upload-artifact@v4
       with:
-        name: OpenHRV
-        path: dist/OpenHRV.bin
+        name: VNS-TA
+        path: dist/VNS-TA.bin
 
     - name: upload build artifact to release
       if: github.event_name == 'release'
@@ -47,4 +47,4 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    # token generated implicitly
       # See https://cli.github.com/manual/gh_release_upload.
       run: |
-        gh release upload ${{ github.ref_name }} dist/OpenHRV.bin
+        gh release upload ${{ github.ref_name }} dist/VNS-TA.bin
