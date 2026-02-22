@@ -5,13 +5,14 @@ import time
 from pathlib import Path
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QSplineSeries, QValueAxis, QAreaSeries
 from PySide6.QtGui import QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QMargins, QSize
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QFileDialog,
-    QProgressBar, QGridLayout, QSizePolicy
+    QProgressBar, QGridLayout, QSizePolicy, QStatusBar
     )
+from collections import deque
 from typing import Iterable
 from vns_ta.utils import valid_address, valid_path, get_sensor_address, NamedSignal
 from vns_ta.sensor import SensorScanner, SensorClient
@@ -123,6 +124,177 @@ class XYSeriesWidget(QChartView):
             self.time_series.append(x, y)        
 
 
+ECG_SAMPLE_RATE = 130
+ECG_DISPLAY_SECONDS = 5
+ECG_BUFFER_SIZE = ECG_SAMPLE_RATE * ECG_DISPLAY_SECONDS
+ECG_REFRESH_MS = 33
+
+
+class EcgWindow(QMainWindow):
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("VNS-TA — ECG Monitor")
+        self.setMinimumSize(600, 300)
+        self.resize(900, 350)
+
+        self._buffer = deque(maxlen=ECG_BUFFER_SIZE)
+        self._sample_count = 0
+        self._y_min_smooth = 0.0
+        self._y_max_smooth = 0.0
+
+        self._sweep_buffer = []
+        self._reveal_pos = 0.0
+        self._sweep_complete = False
+        self._prev_sample = None
+        self._peak_tracker = 0.0
+        self._trigger_threshold = 0.3
+        self._samples_per_frame = ECG_SAMPLE_RATE * (ECG_REFRESH_MS / 1000.0)
+
+        chart = QChart()
+        chart.legend().setVisible(False)
+        chart.setBackgroundRoundness(0)
+        chart.setMargins(QMargins(0, 0, 0, 0))
+        chart.setAnimationOptions(QChart.NoAnimation)
+
+        self._series = QLineSeries()
+        pen = self._series.pen()
+        pen.setWidthF(1.2)
+        pen.setColor(QColor(0, 0, 0))
+        self._series.setPen(pen)
+        self._series.setUseOpenGL(True)
+        chart.addSeries(self._series)
+
+        self._x_axis = QValueAxis()
+        self._x_axis.setTitleText("Last 5 Seconds")
+        self._x_axis.setRange(0, ECG_DISPLAY_SECONDS)
+        self._x_axis.setLabelsVisible(False)
+        self._x_axis.setTickCount(6)
+        chart.addAxis(self._x_axis, Qt.AlignBottom)
+        self._series.attachAxis(self._x_axis)
+
+        self._y_axis = QValueAxis()
+        self._y_axis.setTitleText("ECG (mV)")
+        self._y_axis.setRange(-1.0, 1.5)
+        chart.addAxis(self._y_axis, Qt.AlignLeft)
+        self._series.attachAxis(self._y_axis)
+
+        chart_view = QChartView(chart)
+        chart_view.setRenderHint(chart_view.renderHints())
+
+        self._frozen = False
+        self._freeze_button = QPushButton("Freeze")
+        self._freeze_button.setFixedWidth(80)
+        self._freeze_button.clicked.connect(self._toggle_freeze)
+
+        self._statusbar = QStatusBar()
+        self._statusbar.addPermanentWidget(self._freeze_button)
+        self.setStatusBar(self._statusbar)
+        self._statusbar.showMessage("Waiting for ECG data...")
+
+        self.setCentralWidget(chart_view)
+
+        self._refresh_timer = QTimer()
+        self._refresh_timer.setInterval(ECG_REFRESH_MS)
+        self._refresh_timer.timeout.connect(self._redraw)
+
+    def start(self):
+        self._sweep_buffer = []
+        self._reveal_pos = 0.0
+        self._sweep_complete = False
+        self._prev_sample = None
+        self._peak_tracker = 0.0
+        self._trigger_threshold = 0.3
+        self._refresh_timer.start()
+        self._statusbar.showMessage("ECG streaming...")
+
+    def stop(self):
+        self._refresh_timer.stop()
+        self._frozen = False
+        self._freeze_button.setText("Freeze")
+        self._statusbar.showMessage("ECG stopped.")
+
+    def _toggle_freeze(self):
+        self._frozen = not self._frozen
+        if self._frozen:
+            self._freeze_button.setText("Resume")
+            self._statusbar.showMessage("ECG frozen.")
+        else:
+            self._freeze_button.setText("Freeze")
+            self._statusbar.showMessage("ECG streaming...")
+
+    def append_samples(self, samples: list):
+        for s in samples:
+            self._buffer.append(s)
+            self._sample_count += 1
+
+            triggered = False
+            if self._prev_sample is not None:
+                if self._prev_sample < self._trigger_threshold <= s:
+                    if self._sweep_complete or len(self._sweep_buffer) == 0:
+                        triggered = True
+
+            if triggered:
+                self._sweep_buffer = [s]
+                self._sweep_complete = False
+                self._reveal_pos = 1.0
+            elif not self._sweep_complete:
+                self._sweep_buffer.append(s)
+                if len(self._sweep_buffer) >= ECG_BUFFER_SIZE:
+                    self._sweep_complete = True
+
+            if s > self._peak_tracker:
+                self._peak_tracker = s
+            else:
+                self._peak_tracker *= 0.998
+            self._trigger_threshold = self._peak_tracker * 0.5
+            self._prev_sample = s
+
+    def _redraw(self):
+        if self._frozen:
+            return
+
+        n = len(self._sweep_buffer)
+        if n < 2:
+            return
+
+        if not self._sweep_complete:
+            self._reveal_pos = min(self._reveal_pos + self._samples_per_frame, n)
+        show_count = n if self._sweep_complete else int(self._reveal_pos)
+        if show_count < 2:
+            return
+
+        points = self._sweep_buffer[:show_count]
+        inv_rate = 1.0 / ECG_SAMPLE_RATE
+
+        qpoints = []
+        y_lo = float('inf')
+        y_hi = float('-inf')
+        for i, val in enumerate(points):
+            t = i * inv_rate
+            if val < y_lo:
+                y_lo = val
+            if val > y_hi:
+                y_hi = val
+            qpoints.append(QPointF(t, val))
+
+        margin = max(0.1, (y_hi - y_lo) * 0.15)
+        target_lo = y_lo - margin
+        target_hi = y_hi + margin
+        alpha = 0.15
+        self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
+        self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
+        self._y_axis.setRange(self._y_min_smooth, self._y_max_smooth)
+
+        self._series.replace(qpoints)
+
+    def closeEvent(self, event):
+        self.stop()
+        self.closed.emit()
+        super().closeEvent(event)
+
+
 class ViewSignals(QObject):
     annotation = Signal(tuple)
     start_recording = Signal(str)
@@ -187,6 +359,11 @@ class View(QMainWindow):
         self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
         self.sensor.status_update.connect(self.show_status)
 
+        self.ecg_window = EcgWindow()
+        self.sensor.ecg_update.connect(self.ecg_window.append_samples)
+        self.sensor.ecg_ready.connect(self._on_ecg_ready)
+        self.ecg_window.closed.connect(self._on_ecg_window_closed)
+
         self.logger = Logger()
         self.logger_thread = QThread()
         self.logger.moveToThread(self.logger_thread)
@@ -212,6 +389,13 @@ class View(QMainWindow):
 
         self.ibis_widget.plot.legend().setVisible(True)
         self.ibis_widget.plot.legend().setAlignment(Qt.AlignTop)
+
+        self.hr_y_axis_right = QValueAxis()
+        self.hr_y_axis_right.setLabelsVisible(False)
+        self.hr_y_axis_right.setTitleText(" ")
+        self.hr_y_axis_right.setRange(40, 160)
+        self.ibis_widget.plot.addAxis(self.hr_y_axis_right, Qt.AlignRight)
+        self.ibis_widget.time_series.attachAxis(self.hr_y_axis_right)
 
         self.hrv_widget = XYSeriesWidget(self.model.hrv_seconds, self.model.hrv_buffer)
         self.hrv_widget.y_axis.setRange(0, 10)
@@ -280,10 +464,16 @@ class View(QMainWindow):
         self.connect_button = QPushButton("Connect")
         self.connect_button.clicked.connect(self.connect_sensor)
         self.disconnect_button = QPushButton("Disconnect")
+        self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_sensor)
         
         self.reset_button = QPushButton("Reset Baseline")
+        self.reset_button.setEnabled(False)
         self.reset_button.clicked.connect(self.reset_baseline)
+
+        self.ecg_button = QPushButton("ECG (starting...)")
+        self.ecg_button.setEnabled(False)
+        self.ecg_button.clicked.connect(self.toggle_ecg_window)
 
         self.start_recording_button = QPushButton("Start")
         self.start_recording_button.clicked.connect(self.get_filepath)
@@ -323,7 +513,8 @@ class View(QMainWindow):
         self.device_grid.addWidget(self.address_menu, 0, 1)
         self.device_grid.addWidget(self.connect_button, 1, 0)
         self.device_grid.addWidget(self.disconnect_button, 1, 1)
-        self.device_grid.addWidget(self.reset_button, 2, 0, 1, 2)
+        self.device_grid.addWidget(self.reset_button, 2, 0)
+        self.device_grid.addWidget(self.ecg_button, 2, 1)
 
         self.device_grid.addWidget(self.rmssd_label, 3, 0)
         self.device_grid.addWidget(self.stress_ratio_label, 3, 1)
@@ -402,6 +593,10 @@ class View(QMainWindow):
             self.hrv_widget.chart().removeSeries(self.baseline_series)
             del self.baseline_series
             
+        self.connect_button.setEnabled(False)
+        self.disconnect_button.setEnabled(False)
+        self.ecg_button.setEnabled(False)
+        self.ecg_button.setText("ECG (starting...)")
         self.sensor.connect_client(*sensor)
         self._last_data_time = None
         self._data_watchdog.stop()
@@ -410,9 +605,32 @@ class View(QMainWindow):
     def disconnect_sensor(self):
         """Safely disconnects from the Bluetooth sensor."""
         self._data_watchdog.stop()
+        if self.ecg_window.isVisible():
+            self.ecg_window.stop()
         self.sensor.disconnect_client()
+        self.connect_button.setEnabled(True)
+        self.disconnect_button.setEnabled(False)
+        self.ecg_button.setEnabled(False)
+        self.ecg_button.setText("ECG (no sensor)")
         self.is_phase_active = False 
         self.recording_statusbar.setFormat("Sensor Disconnected")
+
+    def toggle_ecg_window(self):
+        if self.ecg_window.isVisible():
+            self.ecg_window.stop()
+            self.ecg_window.hide()
+            self.ecg_button.setText("ECG Monitor")
+        else:
+            self.ecg_window.show()
+            self.ecg_window.start()
+            self.ecg_button.setText("Close ECG")
+
+    def _on_ecg_ready(self):
+        self.ecg_button.setEnabled(True)
+        self.ecg_button.setText("ECG Monitor")
+
+    def _on_ecg_window_closed(self):
+        self.ecg_button.setText("ECG Monitor")
 
     def get_filepath(self):
         """Opens a file dialog to set the recording destination."""
@@ -444,6 +662,7 @@ class View(QMainWindow):
         )    
 
     def reset_baseline(self):
+        self.reset_button.setEnabled(False)
         self.start_time = None
         self.baseline_rmssd = None
         self.baseline_values = []
@@ -479,15 +698,9 @@ class View(QMainWindow):
             raw_y = float(hrv_data.value[1][-1]) # Get the newest RMSSD
             y = max(0, min(raw_y, 250)) 
 
-            # 2. Ignition: Start the clock
+            # 2. Wait for plot_ibis to start the clock
             if self.start_time is None:
-                self.start_time = time.time()
-                self.hrv_widget.time_series.clear()
-                self.ibis_widget.time_series.clear()
-                self.hr_trend_series.clear()
-                self.sdnn_series.clear()
-                if DEBUG:
-                    print("Timer Started")
+                return
 
             elapsed = time.time() - self.start_time
             x = elapsed 
@@ -553,6 +766,7 @@ class View(QMainWindow):
             # PHASE 2: CALCULATE AVERAGE (Only once at 45s)
             elif self.baseline_rmssd is None and self.baseline_values:
                 self.baseline_rmssd = sum(self.baseline_values) / len(self.baseline_values)
+                self.reset_button.setEnabled(True)
                 self.statusbar.showMessage(f"Baseline locked at {self.baseline_rmssd:.1f} ms")
                 if DEBUG:
                     print(f"--- BASELINE LOCKED: {self.baseline_rmssd:.2f} ms ---")
@@ -624,13 +838,18 @@ class View(QMainWindow):
         self.recording_statusbar.setRange(0, status)
 
     def show_status(self, status: str, print_to_terminal=True):
-        if "Connected" in status:
+        if "Connected" in status and "Disconnecting" not in status:
             self.is_phase_active = False
+            self.connect_button.setEnabled(False)
+            self.disconnect_button.setEnabled(True)
             if self.address_menu.currentText():
                 parts = self.address_menu.currentText().split(",")
                 if len(parts) >= 2:
                     _save_last_sensor(parts[0].strip(), parts[1].strip())
-            
+        elif "error" in status.lower() or "Disconnecting" in status:
+            self.connect_button.setEnabled(True)
+            self.disconnect_button.setEnabled(False)
+
         if not self.is_phase_active:
             self.recording_statusbar.setFormat(status)
         
@@ -755,7 +974,13 @@ class View(QMainWindow):
             hr = 60000.0 / last_ibi_ms
 
             if self.start_time is None:
-                return
+                self.start_time = time.time()
+                self.ibis_widget.time_series.clear()
+                self.hr_trend_series.clear()
+                self.sdnn_series.clear()
+                self.hrv_widget.time_series.clear()
+                if DEBUG:
+                    print("Timer Started")
 
             elapsed = time.time() - self.start_time
 

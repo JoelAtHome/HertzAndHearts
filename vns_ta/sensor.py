@@ -1,4 +1,5 @@
-from PySide6.QtCore import QObject, Signal, QByteArray
+import struct
+from PySide6.QtCore import QObject, Signal, QByteArray, QUuid
 from PySide6.QtBluetooth import (
     QBluetoothDeviceDiscoveryAgent,
     QLowEnergyController,
@@ -11,7 +12,7 @@ from PySide6.QtBluetooth import (
 from math import ceil
 from typing import Union
 from vns_ta.utils import get_sensor_address, get_sensor_remote_address
-from vns_ta.config import COMPATIBLE_SENSORS
+from vns_ta.config import COMPATIBLE_SENSORS, DEBUG
 
 
 class SensorScanner(QObject):
@@ -58,13 +59,31 @@ class SensorClient(QObject):
     """
 
     ibi_update = Signal(object)
+    ecg_update = Signal(object)
+    ecg_ready = Signal()
     status_update = Signal(str)
+
+    PMD_SERVICE_UUID = QBluetoothUuid(QUuid("{FB005C80-02E7-F387-1CAD-8ACD2D8DF0C8}"))
+    PMD_CONTROL_UUID = QBluetoothUuid(QUuid("{FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8}"))
+    PMD_DATA_UUID = QBluetoothUuid(QUuid("{FB005C82-02E7-F387-1CAD-8ACD2D8DF0C8}"))
+
+    ECG_START_COMMAND = QByteArray(bytes([
+        0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00
+    ]))
+    ECG_STOP_COMMAND = QByteArray(bytes([0x03, 0x00]))
 
     def __init__(self):
         super().__init__()
         self.client: Union[None, QLowEnergyController] = None
         self.hr_service: Union[None, QLowEnergyService] = None
         self.hr_notification: Union[None, QLowEnergyDescriptor] = None
+        self.pmd_service: Union[None, QLowEnergyService] = None
+        self.pmd_data_notification: Union[None, QLowEnergyDescriptor] = None
+        self._ecg_streaming = False
+        self._pmd_ready = False
+        self._ecg_start_pending = False
+        self._ecg_data_received = False
+        self._pmd_descriptors_pending = 0
         self.ENABLE_NOTIFICATION: QByteArray = QByteArray.fromHex(b"0100")
         self.DISABLE_NOTIFICATION: QByteArray = QByteArray.fromHex(b"0000")
         self.HR_SERVICE: QBluetoothUuid.ServiceClassUuid = (
@@ -96,10 +115,15 @@ class SensorClient(QObject):
         self.client.connectToDevice()
 
     def disconnect_client(self):
+        self.stop_ecg_stream()
+        if self.pmd_data_notification is not None and self.pmd_service is not None:
+            if self.pmd_data_notification.isValid():
+                self.pmd_service.writeDescriptor(
+                    self.pmd_data_notification, self.DISABLE_NOTIFICATION
+                )
         if self.hr_notification is not None and self.hr_service is not None:
             if not self.hr_notification.isValid():
                 return
-            print("Unsubscribing from HR service.")
             self.hr_service.writeDescriptor(
                 self.hr_notification, self.DISABLE_NOTIFICATION
             )
@@ -132,6 +156,28 @@ class SensorClient(QObject):
         self.hr_service.characteristicChanged.connect(self._data_handler)
         self.hr_service.discoverDetails()
 
+        pmd_uuid_str = self.PMD_SERVICE_UUID.toString().lower()
+        pmd_match = [
+            s for s in self.client.services()
+            if s.toString().lower() == pmd_uuid_str
+        ]
+        if not pmd_match:
+            if DEBUG:
+                print(f"PMD service not found. Available services:")
+                for s in self.client.services():
+                    print(f"  {s.toString()}")
+            return
+        self.pmd_service = self.client.createServiceObject(pmd_match[0])
+        if self.pmd_service:
+            self.pmd_service.stateChanged.connect(self._start_pmd_notification)
+            self.pmd_service.characteristicChanged.connect(self._pmd_data_handler)
+            self.pmd_service.characteristicWritten.connect(self._pmd_write_confirmed)
+            self.pmd_service.descriptorWritten.connect(self._pmd_descriptor_written)
+            self.pmd_service.errorOccurred.connect(self._pmd_error)
+            self.pmd_service.discoverDetails()
+        else:
+            print(f"Couldn't establish connection to PMD service on {self._sensor_address()}.")
+
     def _start_hr_notification(self, state: QLowEnergyService.ServiceState):
         if state != QLowEnergyService.RemoteServiceDiscovered:
             return
@@ -150,10 +196,141 @@ class SensorClient(QObject):
         self.hr_service.writeDescriptor(self.hr_notification, self.ENABLE_NOTIFICATION)
         self.status_update.emit(f"Connected to {self._sensor_address()}")
 
+    def _start_pmd_notification(self, state: QLowEnergyService.ServiceState):
+        if state != QLowEnergyService.RemoteServiceDiscovered:
+            return
+        if self.pmd_service is None:
+            return
+
+        ctrl_uuid_str = self.PMD_CONTROL_UUID.toString().lower()
+        pmd_data_uuid_str = self.PMD_DATA_UUID.toString().lower()
+        self._pmd_descriptors_pending = 0
+
+        ctrl_char = None
+        data_char = None
+        for c in self.pmd_service.characteristics():
+            uuid_str = c.uuid().toString().lower()
+            if uuid_str == ctrl_uuid_str:
+                ctrl_char = c
+            elif uuid_str == pmd_data_uuid_str:
+                data_char = c
+
+        if ctrl_char is not None:
+            ctrl_desc = ctrl_char.descriptor(
+                QBluetoothUuid.DescriptorType.ClientCharacteristicConfiguration
+            )
+            if ctrl_desc.isValid():
+                self._pmd_descriptors_pending += 1
+                self.pmd_service.writeDescriptor(ctrl_desc, self.ENABLE_NOTIFICATION)
+
+        if data_char is not None:
+            self.pmd_data_notification = data_char.descriptor(
+                QBluetoothUuid.DescriptorType.ClientCharacteristicConfiguration
+            )
+            if self.pmd_data_notification.isValid():
+                self._pmd_descriptors_pending += 1
+                self.pmd_service.writeDescriptor(self.pmd_data_notification, self.ENABLE_NOTIFICATION)
+            else:
+                print("PMD data descriptor is invalid.")
+        else:
+            print("PMD data characteristic not found!")
+
+        if self._pmd_descriptors_pending == 0:
+            self._finalize_pmd_ready()
+
+    def _pmd_descriptor_written(self, descriptor, value):
+        self._pmd_descriptors_pending = max(0, self._pmd_descriptors_pending - 1)
+        if self._pmd_descriptors_pending == 0:
+            self._finalize_pmd_ready()
+
+    def _finalize_pmd_ready(self):
+        if self._pmd_ready:
+            return
+        self._pmd_ready = True
+        self.start_ecg_stream()
+
+    def start_ecg_stream(self):
+        if self.pmd_service is None:
+            print("Cannot start ECG: PMD service not available.")
+            return
+        if not self._pmd_ready:
+            self._ecg_start_pending = True
+            return
+        ctrl_uuid_str = self.PMD_CONTROL_UUID.toString().lower()
+        ctrl_char = self.pmd_service.characteristic(self.PMD_CONTROL_UUID)
+        if not ctrl_char.isValid():
+            for c in self.pmd_service.characteristics():
+                if c.uuid().toString().lower() == ctrl_uuid_str:
+                    ctrl_char = c
+                    break
+        if ctrl_char.isValid():
+            self.pmd_service.writeCharacteristic(ctrl_char, self.ECG_START_COMMAND)
+            self._ecg_streaming = True
+            self.status_update.emit("ECG streaming started.")
+        else:
+            print("Cannot start ECG: control characteristic not found.")
+
+    def stop_ecg_stream(self):
+        if self.pmd_service is None or not self._ecg_streaming:
+            return
+        ctrl_char = self.pmd_service.characteristic(self.PMD_CONTROL_UUID)
+        if not ctrl_char.isValid():
+            ctrl_uuid_str = self.PMD_CONTROL_UUID.toString().lower()
+            for c in self.pmd_service.characteristics():
+                if c.uuid().toString().lower() == ctrl_uuid_str:
+                    ctrl_char = c
+                    break
+        if ctrl_char.isValid():
+            self.pmd_service.writeCharacteristic(ctrl_char, self.ECG_STOP_COMMAND)
+            self._ecg_streaming = False
+
+    def _pmd_write_confirmed(self, char: QLowEnergyCharacteristic, value: QByteArray):
+        if DEBUG:
+            print(f"PMD write confirmed: char={char.uuid().toString()}")
+
+    def _pmd_error(self, error):
+        print(f"PMD service error: {error}")
+
+    def _pmd_data_handler(self, char: QLowEnergyCharacteristic, data: QByteArray):
+        raw = data.data()
+        if len(raw) < 10:
+            return
+        if raw[0] != 0x00:
+            return
+        samples = []
+        i = 10
+        while i + 2 <= len(raw):
+            val = raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
+            if val >= 0x800000:
+                val -= 0x1000000
+            samples.append(val / 1000.0)
+            i += 3
+        if samples:
+            if not self._ecg_data_received:
+                self._ecg_data_received = True
+                self.ecg_ready.emit()
+            self.ecg_update.emit(samples)
+
     def _reset_connection(self):
         print(f"Discarding sensor at {self._sensor_address()}.")
+        self._ecg_streaming = False
+        self._pmd_ready = False
+        self._ecg_start_pending = False
+        self._ecg_data_received = False
+        self._remove_pmd_service()
         self._remove_service()
         self._remove_client()
+
+    def _remove_pmd_service(self):
+        if self.pmd_service is None:
+            return
+        try:
+            self.pmd_service.deleteLater()
+        except Exception as e:
+            print(f"Couldn't remove PMD service: {e}")
+        finally:
+            self.pmd_service = None
+            self.pmd_data_notification = None
 
     def _remove_service(self):
         if self.hr_service is None:
