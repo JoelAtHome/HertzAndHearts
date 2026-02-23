@@ -159,6 +159,54 @@ DEVIATION_MIN_SAMPLES: Final[int] = 10
 RECOVERY_BEATS: Final[int] = 10
 
 # ──────────────────────────────────────────────────────────────────────
+#  PROTOCOL — Autonomic Readiness Thresholds
+# ──────────────────────────────────────────────────────────────────────
+# These thresholds gate the Autonomic Readiness Check (wizard screen 5).
+# Values may need clinical tuning per patient population.  A medicated
+# catatonic adolescent will typically have lower resting RMSSD than
+# healthy norms (~69 ms for a 16-year-old female).
+
+# Heart rate ceiling — above this, readiness check fails.
+READINESS_HR_MAX: Final[int] = 110  # BPM
+
+# RMSSD green threshold — above this, vagal tone is adequate for launch.
+READINESS_RMSSD_MIN: Final[int] = 45  # ms
+
+# RMSSD critical floor — below this, high sympathetic dominance;
+# pharmacological grounding recommended over taVNS.
+READINESS_RMSSD_NOGO: Final[int] = 30  # ms
+
+# SpO2 acceptable range.
+READINESS_SPO2_MIN: Final[int] = 95   # %
+READINESS_SPO2_MAX: Final[int] = 100  # %
+
+# ──────────────────────────────────────────────────────────────────────
+#  ANNOTATION PRESETS
+# ──────────────────────────────────────────────────────────────────────
+# Factory-default annotations shown in the monitoring page's annotation
+# combo box.  User-added annotations are persisted separately in the
+# JSON settings file and merged with this list at runtime.
+ANNOTATION_PRESETS: Final[list[str]] = [
+    "CH 1 intensity adjusted",
+    "CH 2 intensity adjusted",
+    "CH 3 intensity adjusted",
+    "Channel paused",
+    "Channel resumed",
+    "Electrodes needed adjustment",
+    "Facial twitching observed",
+    "Jaw clenching observed",
+    "Patient grimaced",
+    "Patient reported discomfort",
+    "Polar H10 strap went dry",
+    "Patient reported tingling",
+    "Patient verbally responsive",
+    "Physician consulted",
+    "Rapid blinking observed",
+    "Session paused",
+    "Thumb twitch observed",
+]
+
+# ──────────────────────────────────────────────────────────────────────
 #  SENSOR COMPATIBILITY
 # ──────────────────────────────────────────────────────────────────────
 COMPATIBLE_SENSORS: Final[list[str]] = ["Polar", "Decathlon Dual HR"]

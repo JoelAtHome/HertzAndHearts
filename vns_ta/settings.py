@@ -26,6 +26,55 @@ SETTINGS_FILE = Path.home() / ".vns_ta_settings.json"
 # Keys must match config.py attribute names exactly.
 # "advanced": True marks settings hidden behind the Advanced toggle.
 REGISTRY = OrderedDict([
+    # --- Protocol Thresholds ---
+    ("READINESS_HR_MAX", {
+        "display": "Max Resting HR",
+        "tooltip": (
+            "Heart rate ceiling for the Autonomic Readiness Check.  "
+            "If resting HR exceeds this, the readiness gate fails."
+        ),
+        "type": int, "min": 60, "max": 200, "unit": "BPM",
+        "section": "Protocol Thresholds",
+    }),
+    ("READINESS_RMSSD_MIN", {
+        "display": "Min RMSSD (GO)",
+        "tooltip": (
+            "Minimum baseline RMSSD to pass the readiness check.  "
+            "Above this value, vagal tone is considered adequate for "
+            "stimulation.  Healthy 16 y/o female \u2248 69 ms; medicated "
+            "catatonic patients may sit lower."
+        ),
+        "type": int, "min": 5, "max": 120, "unit": "ms",
+        "section": "Protocol Thresholds",
+    }),
+    ("READINESS_RMSSD_NOGO", {
+        "display": "Critical RMSSD (NO-GO)",
+        "tooltip": (
+            "RMSSD floor below which high sympathetic dominance is "
+            "indicated.  Triggers a NO-GO warning recommending "
+            "pharmacological grounding instead of taVNS."
+        ),
+        "type": int, "min": 5, "max": 60, "unit": "ms",
+        "section": "Protocol Thresholds",
+    }),
+    ("READINESS_SPO2_MIN", {
+        "display": "Min SpO\u2082",
+        "tooltip": (
+            "Lower bound of the acceptable SpO\u2082 range.  "
+            "Values below this fail the readiness check."
+        ),
+        "type": int, "min": 80, "max": 100, "unit": "%",
+        "section": "Protocol Thresholds",
+    }),
+    ("READINESS_SPO2_MAX", {
+        "display": "Max SpO\u2082",
+        "tooltip": (
+            "Upper bound of the acceptable SpO\u2082 range."
+        ),
+        "type": int, "min": 95, "max": 100, "unit": "%",
+        "section": "Protocol Thresholds",
+    }),
+
     # --- Session Timing ---
     ("SETTLING_DURATION", {
         "display": "Settling Duration",
@@ -261,6 +310,7 @@ class Settings:
                 default = getattr(_defaults, key)
                 inst._defaults[key] = default
                 setattr(inst, key, default)
+            inst._custom_annotations: list[str] = []
             inst._load_overrides()
             cls._instance = inst
         return cls._instance
@@ -269,7 +319,9 @@ class Settings:
         try:
             data = json.loads(SETTINGS_FILE.read_text())
             for key, val in data.items():
-                if key in self._defaults:
+                if key == "_custom_annotations" and isinstance(val, list):
+                    self._custom_annotations = [str(v) for v in val]
+                elif key in self._defaults:
                     expected_type = type(self._defaults[key])
                     setattr(self, key, expected_type(val))
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
@@ -281,6 +333,8 @@ class Settings:
             current = getattr(self, key)
             if current != self._defaults[key]:
                 overrides[key] = current
+        if self._custom_annotations:
+            overrides["_custom_annotations"] = self._custom_annotations
         if overrides:
             SETTINGS_FILE.write_text(json.dumps(overrides, indent=2))
         else:
@@ -292,6 +346,7 @@ class Settings:
     def reset_defaults(self):
         for key, default in self._defaults.items():
             setattr(self, key, default)
+        self._custom_annotations = []
         try:
             SETTINGS_FILE.unlink()
         except FileNotFoundError:
@@ -299,6 +354,26 @@ class Settings:
 
     def get_default(self, key):
         return self._defaults[key]
+
+    # ── annotation helpers ────────────────────────────────────────────
+
+    def get_all_annotations(self) -> list[str]:
+        """Return merged, deduplicated, sorted list of all annotations."""
+        presets = list(_defaults.ANNOTATION_PRESETS)
+        merged = sorted(set(presets + self._custom_annotations),
+                        key=str.casefold)
+        return merged
+
+    def add_custom_annotation(self, text: str):
+        """Add a user-typed annotation to the persistent custom list."""
+        text = text.strip()
+        if not text:
+            return
+        if text in _defaults.ANNOTATION_PRESETS:
+            return
+        if text not in self._custom_annotations:
+            self._custom_annotations.append(text)
+            self.save()
 
 
 # ──────────────────────────────────────────────────────────────────────

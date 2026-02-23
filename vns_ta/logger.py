@@ -36,9 +36,12 @@ class Logger(QObject):
         if not self.file:
             return
         key, val = data
-        if isinstance(val, list):
-            val = val[-1]
-        if isinstance(val, tuple):
-            val = val[-1][-1]
+        try:
+            if isinstance(val, list):
+                val = val[-1]
+            if isinstance(val, tuple):
+                val = val[-1][-1]
+        except (IndexError, TypeError):
+            return
         timestamp = datetime.now().isoformat()
         self.file.write(f"{key},{val},{timestamp}\n")

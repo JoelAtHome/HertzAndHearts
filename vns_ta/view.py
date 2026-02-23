@@ -10,7 +10,8 @@ from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QFileDialog,
-    QProgressBar, QGridLayout, QSizePolicy, QStatusBar
+    QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
+    QMessageBox,
     )
 from collections import deque
 from typing import Iterable
@@ -28,8 +29,9 @@ from vns_ta.config import (
 from vns_ta.settings import Settings, SettingsDialog
 from vns_ta.wizard import ProtocolWizard, PlaceholderPage, WIZARD_STEPS, MONITORING_PAGE_INDEX
 from vns_ta.wizard_pages import (
-    PreSessionPage, ModalitySelectionPage, SensorPlacementPage,
-    ElectrodePlacementPage,
+    WelcomeDisclaimerPage, PreSessionPage, ModalitySelectionPage,
+    SensorPlacementPage, ElectrodePlacementPage, EX4ConfigPage,
+    ReadinessPage, StartSequencePage, SessionSummaryPage, MODALITIES,
 )
 from vns_ta import __version__ as version, resources  # noqa
 import warnings
@@ -55,6 +57,96 @@ def _load_last_sensor():
         return json.loads(SENSOR_CONFIG.read_text())
     except Exception:
         return None
+
+class StatusBanner(QFrame):
+    """Colored status label with a thin progress strip underneath."""
+
+    _COLORS = {
+        "idle":    ("background:#dfe6e9; color:#636e72;", "#b2bec3"),
+        "settle":  ("background:#ffeaa7; color:#6c5b00;", "#fdcb6e"),
+        "baseline":("background:#74b9ff; color:#003366;", "#0984e3"),
+        "locked":  ("background:#00b894; color:#fff;",    "#00b894"),
+        "error":   ("background:#fab1a0; color:#7e0000;", "#d63031"),
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFrameShape(QFrame.NoFrame)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+
+        self._label = QLabel("Waiting for Sensor\u2026")
+        self._label.setAlignment(Qt.AlignCenter)
+        self._label.setStyleSheet(
+            "padding: 2px 8px; font-weight: bold; font-size: 12px; "
+            "border-radius: 3px; " + self._COLORS["idle"][0]
+        )
+        lay.addWidget(self._label)
+
+        self._bar = QProgressBar()
+        self._bar.setFixedHeight(4)
+        self._bar.setTextVisible(False)
+        self._bar.setRange(0, 100)
+        self._bar.setValue(0)
+        self._bar.setStyleSheet(
+            "QProgressBar { background: #dfe6e9; border: none; }"
+            "QProgressBar::chunk { background: #b2bec3; }"
+        )
+        lay.addWidget(self._bar)
+        self._state = "idle"
+
+    def _apply(self, state: str, text: str, value: int = 0, maximum: int = 100):
+        lbl_css, bar_color = self._COLORS.get(state, self._COLORS["idle"])
+        if state != self._state:
+            self._state = state
+            self._label.setStyleSheet(
+                "padding: 2px 8px; font-weight: bold; font-size: 12px; "
+                "border-radius: 3px; " + lbl_css
+            )
+            self._bar.setStyleSheet(
+                f"QProgressBar {{ background: #dfe6e9; border: none; }}"
+                f"QProgressBar::chunk {{ background: {bar_color}; }}"
+            )
+        self._label.setText(text)
+        self._bar.setRange(0, maximum)
+        self._bar.setValue(value)
+
+    # Public convenience API (drop-in for old QProgressBar calls)
+    def setFormat(self, text: str):
+        self._label.setText(text)
+
+    def setRange(self, lo: int, hi: int):
+        self._bar.setRange(lo, hi)
+
+    def setValue(self, v: int):
+        self._bar.setValue(v)
+
+    def set_idle(self, text: str = "Waiting for Sensor\u2026"):
+        self._apply("idle", text)
+
+    def set_settling(self, elapsed: int, total: int):
+        remaining = max(0, total - elapsed)
+        self._apply("settle", f"Settling\u2026  {remaining}s remaining",
+                     elapsed, total)
+
+    def set_baseline(self, elapsed: int, total: int):
+        remaining = max(0, total - elapsed)
+        self._apply("baseline",
+                     f"Establishing Baselines\u2026  {remaining}s remaining",
+                     elapsed, total)
+
+    def set_locked(self, rmssd: str, hr: str):
+        self._apply("locked",
+                     f"\u2705  BASELINES LOCKED  \u2014  RMSSD {rmssd} ms  |  HR {hr} bpm",
+                     1, 1)
+
+    def set_disconnected(self):
+        self._apply("idle", "Sensor Disconnected")
+
+    def set_error(self, text: str):
+        self._apply("error", text)
+
 
 class PacerWidget(QChartView):
     def __init__(self, x_values, y_values, color=BLUE):
@@ -320,6 +412,8 @@ class View(QMainWindow):
         self._fault_active = False
         self._consecutive_good = 0
         self._hr_ewma = None
+        self._signal_popup_shown = False
+        self._signal_degrade_count = 0
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
@@ -327,6 +421,9 @@ class View(QMainWindow):
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self._last_data_time = None
+        self._session_annotations: list[tuple[str, str]] = []
+        self._session_hr_values: list[float] = []
+        self._session_rmssd_values: list[float] = []
 
         self.setWindowTitle(f"VNS-TA ({version})")
         self.setWindowIcon(QIcon(":/logo.png"))
@@ -427,17 +524,13 @@ class View(QMainWindow):
         self.pacer_widget = PacerWidget(self.pacer.lung_x, self.pacer.lung_y)
         self.pacer_widget.setFixedSize(200, 200)
         
-        self.recording_statusbar = QProgressBar()
-        self.recording_statusbar.setMinimumHeight(30)
-        self.recording_statusbar.setTextVisible(True)
-        self.recording_statusbar.setAlignment(Qt.AlignCenter)
-        self.recording_statusbar.setFormat("Waiting for Sensor...")
+        self.recording_statusbar = StatusBanner()
 
         # Labels
-        self.current_hr_label = QLabel("Heart Rate: --")
+        self.current_hr_label = QLabel("HR: --")
         self.rmssd_label = QLabel("RMSSD: --")
-        self.sdnn_label = QLabel("HRV/SDNN: --")
-        self.stress_ratio_label = QLabel("Stress Ratio (LF/HF): --")
+        self.sdnn_label = QLabel("SDNN: --")
+        self.stress_ratio_label = QLabel("LF/HF: --")
         self.health_indicator = QLabel("●")
         self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
         self.health_label = QLabel("Signal: Identifying...")
@@ -481,9 +574,6 @@ class View(QMainWindow):
         self.ecg_button.setEnabled(False)
         self.ecg_button.clicked.connect(self.toggle_ecg_window)
 
-        self.settings_button = QPushButton("Settings")
-        self.settings_button.clicked.connect(self._open_settings)
-
         self.start_recording_button = QPushButton("Start")
         self.start_recording_button.clicked.connect(self.get_filepath)
         self.save_recording_button = QPushButton("Save")
@@ -491,62 +581,121 @@ class View(QMainWindow):
 
         self.annotation = QComboBox()
         self.annotation.setEditable(True)
+        self.annotation.setInsertPolicy(QComboBox.NoInsert)
+        self.annotation.completer().setFilterMode(Qt.MatchContains)
+        self.annotation.completer().setCompletionMode(
+            QCompleter.PopupCompletion
+        )
+        self._refresh_annotation_list()
         self.annotation_button = QPushButton("Annotate")
         self.annotation_button.clicked.connect(self.emit_annotation)
 
         # 5. LAYOUT ASSEMBLY — monitoring page content
         self.monitoring_page = QWidget()
         self.vlayout0 = QVBoxLayout(self.monitoring_page)
+        self.vlayout0.setSpacing(4)
 
         # TOP: HR Chart + Pacer
         self.hlayout_top = QHBoxLayout()
         self.hlayout_top.addWidget(self.ibis_widget)
         self.hlayout_top.addWidget(self.pacer_widget)
-        self.vlayout0.addLayout(self.hlayout_top, stretch=40)
+        self.vlayout0.addLayout(self.hlayout_top, stretch=45)
 
         # MIDDLE: HRV Chart + Pacer Controls (aligned to pacer orb above)
         self.hlayout_mid = QHBoxLayout()
         self.hlayout_mid.addWidget(self.hrv_widget)
         self.pacer_group.setFixedWidth(200)
         self.hlayout_mid.addWidget(self.pacer_group)
-        self.vlayout0.addLayout(self.hlayout_mid, stretch=40)
+        self.vlayout0.addLayout(self.hlayout_mid, stretch=45)
 
-        # BOTTOM: Controls Layout
-        self.controls_layout = QHBoxLayout()
-        
-        # PANEL A: Device & Stats
-        self.device_group = QGroupBox("Control Panel")
-        self.device_grid = QGridLayout(self.device_group)
-        self.device_grid.addWidget(self.scan_button, 0, 0)
-        self.device_grid.addWidget(self.address_menu, 0, 1)
-        self.device_grid.addWidget(self.connect_button, 1, 0)
-        self.device_grid.addWidget(self.disconnect_button, 1, 1)
-        self.device_grid.addWidget(self.reset_button, 2, 0)
-        self.device_grid.addWidget(self.ecg_button, 2, 1)
+        # BOTTOM ROW 1: Full-width status banner + reset
+        progress_row = QHBoxLayout()
+        progress_row.setSpacing(8)
+        progress_row.addWidget(self.recording_statusbar, stretch=1)
+        self.reset_button.setFixedWidth(90)
+        progress_row.addWidget(self.reset_button)
+        self.vlayout0.addLayout(progress_row)
 
-        self.device_grid.addWidget(self.settings_button, 3, 0)
+        # BOTTOM ROW 2: Compact toolbar — constrained for 1366px screens
+        toolbar = QHBoxLayout()
+        toolbar.setSpacing(4)
+        toolbar.setContentsMargins(0, 0, 0, 0)
 
-        self.device_grid.addWidget(self.rmssd_label, 4, 0)
-        self.device_grid.addWidget(self.stress_ratio_label, 4, 1)
-        self.device_grid.addWidget(self.current_hr_label, 5, 0)
-        self.device_grid.addWidget(self.sdnn_label, 6, 0)
+        for btn in (self.scan_button, self.connect_button,
+                    self.disconnect_button):
+            btn.setMaximumWidth(80)
+            btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.ecg_button.setMaximumWidth(110)
+        self.ecg_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.address_menu.setMaximumWidth(160)
+        self.address_menu.setStyleSheet("font-size: 11px;")
 
-        # PANEL B: Recording & Status
-        self.rec_group = QGroupBox("Recording & Status")
-        self.rec_grid = QGridLayout(self.rec_group)
-        self.rec_grid.addWidget(self.start_recording_button, 0, 0)
-        self.rec_grid.addWidget(self.save_recording_button, 0, 1)
-        self.rec_grid.addWidget(self.annotation, 1, 0, 1, 2)
-        self.rec_grid.addWidget(self.annotation_button, 1, 2)
-        self.rec_grid.addWidget(self.recording_statusbar, 2, 0, 1, 3)
+        toolbar.addWidget(self.scan_button)
+        toolbar.addWidget(self.address_menu)
+        toolbar.addWidget(self.connect_button)
+        toolbar.addWidget(self.disconnect_button)
 
-        self.controls_layout.addWidget(self.device_group, stretch=45)
-        self.controls_layout.addWidget(self.rec_group, stretch=55)
-        
-        self.vlayout0.addLayout(self.controls_layout, stretch=20)
+        _sep1 = QFrame()
+        _sep1.setFixedSize(1, 18)
+        _sep1.setStyleSheet("background: #bdc3c7;")
+        toolbar.addWidget(_sep1)
+
+        toolbar.addStretch()
+        toolbar.addWidget(self.ecg_button)
+        toolbar.addStretch()
+
+        _stat_style = (
+            "font-size: 11px; color: #2c3e50; "
+            "border: 1px solid #bdc3c7; border-radius: 3px; "
+            "padding: 1px 4px; background: #f8f9fa;"
+        )
+        _stat_widths = {
+            self.current_hr_label: 80,
+            self.rmssd_label: 120,
+            self.sdnn_label: 110,
+            self.stress_ratio_label: 80,
+        }
+        for lbl, w in _stat_widths.items():
+            lbl.setFixedWidth(w)
+            lbl.setAlignment(Qt.AlignCenter)
+            lbl.setStyleSheet(_stat_style)
+            toolbar.addWidget(lbl)
+
+        toolbar.addSpacing(12)
+
+        _sep2 = QFrame()
+        _sep2.setFixedSize(1, 18)
+        _sep2.setStyleSheet("background: #bdc3c7;")
+        toolbar.addWidget(_sep2)
+
+        self.annotation.setMaximumWidth(200)
+        self.annotation.setStyleSheet("font-size: 11px;")
+        self.annotation.setPlaceholderText("Annotation\u2026")
+        self.annotation_button.setMaximumWidth(64)
+        self.annotation_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        toolbar.addWidget(self.annotation)
+        toolbar.addWidget(self.annotation_button)
+
+        _sep3 = QFrame()
+        _sep3.setFixedSize(1, 18)
+        _sep3.setStyleSheet("background: #bdc3c7;")
+        toolbar.addWidget(_sep3)
+
+        self.health_label.setStyleSheet("font-size: 11px;")
+        toolbar.addWidget(self.health_indicator)
+        toolbar.addWidget(self.health_label)
+
+        self.vlayout0.addLayout(toolbar)
 
         # 6. WIZARD ASSEMBLY
         self.wizard = ProtocolWizard()
+        self.wizard.header.settings_clicked.connect(self._open_settings)
+        self.wizard.dev_mode_changed.connect(self._on_dev_mode_changed)
+        self.wizard.page_changed.connect(self._on_wizard_page_changed)
+        self.wizard.new_session_requested.connect(self._on_new_session)
+
+        self.welcome_page = WelcomeDisclaimerPage()
+        self.welcome_page.gate_changed.connect(self.wizard.refresh_gate)
 
         self.pre_session_page = PreSessionPage()
         self.pre_session_page.gate_changed.connect(self.wizard.refresh_gate)
@@ -566,35 +715,90 @@ class View(QMainWindow):
 
         self.electrode_page = ElectrodePlacementPage()
         self.electrode_page.gate_changed.connect(self.wizard.refresh_gate)
+
+        self.ex4_page = EX4ConfigPage()
+        self.ex4_page.gate_changed.connect(self.wizard.refresh_gate)
+
+        self.readiness_page = ReadinessPage(settings=self.settings)
+        self.readiness_page.gate_changed.connect(self.wizard.refresh_gate)
+        self.readiness_page.reset_btn.clicked.connect(self.reset_baseline)
+
+        self.start_seq_page = StartSequencePage()
+        self.start_seq_page.gate_changed.connect(self.wizard.refresh_gate)
+
+        self.summary_page = SessionSummaryPage()
+        self.summary_page.gate_changed.connect(self.wizard.refresh_gate)
+
         self.modality_page.modality_changed.connect(
             lambda key: self.electrode_page.set_active_channels(
                 self.modality_page.selected_channels
+            )
+        )
+        self.modality_page.modality_changed.connect(
+            lambda key: self.ex4_page.set_active_channels(
+                self.modality_page.selected_channels
+            )
+        )
+        self.modality_page.modality_changed.connect(
+            lambda key: self.start_seq_page.set_active_channels(
+                self.modality_page.selected_channels
+            )
+        )
+
+        self.sensor_page._spo2_input.textChanged.connect(
+            lambda text: self.readiness_page.update_spo2(
+                self.sensor_page.spo2_value
             )
         )
 
         for i, title in enumerate(WIZARD_STEPS):
             if i == 0:
                 self.wizard.add_page(
+                    self.welcome_page,
+                    gate_check=self.welcome_page.is_complete,
+                )
+            elif i == 1:
+                self.wizard.add_page(
                     self.pre_session_page,
                     gate_check=self.pre_session_page.is_complete,
                 )
-            elif i == 1:
+            elif i == 2:
                 self.wizard.add_page(
                     self.modality_page,
                     gate_check=self.modality_page.is_complete,
                 )
-            elif i == 2:
+            elif i == 3:
                 self.wizard.add_page(
                     self.sensor_page,
                     gate_check=self.sensor_page.is_complete,
                 )
-            elif i == 3:
+            elif i == 4:
                 self.wizard.add_page(
                     self.electrode_page,
                     gate_check=self.electrode_page.is_complete,
                 )
+            elif i == 5:
+                self.wizard.add_page(
+                    self.ex4_page,
+                    gate_check=self.ex4_page.is_complete,
+                )
+            elif i == 6:
+                self.wizard.add_page(
+                    self.readiness_page,
+                    gate_check=self.readiness_page.is_complete,
+                )
+            elif i == 7:
+                self.wizard.add_page(
+                    self.start_seq_page,
+                    gate_check=self.start_seq_page.is_complete,
+                )
             elif i == MONITORING_PAGE_INDEX:
                 self.wizard.add_page(self.monitoring_page)
+            elif i == len(WIZARD_STEPS) - 1:
+                self.wizard.add_page(
+                    self.summary_page,
+                    gate_check=self.summary_page.is_complete,
+                )
             else:
                 self.wizard.add_page(
                     PlaceholderPage(title, f"Step {i + 1} of {len(WIZARD_STEPS)}")
@@ -603,12 +807,6 @@ class View(QMainWindow):
 
         # Initialize
         self.statusbar = self.statusBar()
-        signal_status_widget = QWidget()
-        signal_status_layout = QHBoxLayout(signal_status_widget)
-        signal_status_layout.setContentsMargins(8, 0, 8, 0)
-        signal_status_layout.addWidget(self.health_indicator)
-        signal_status_layout.addWidget(self.health_label)
-        self.statusbar.addPermanentWidget(signal_status_widget)
         self.logger_thread.start()
         self.pacer_timer.start()
 
@@ -650,12 +848,16 @@ class View(QMainWindow):
         self._fault_active = False
         self._consecutive_good = 0
         self._hr_ewma = None
+        self._reset_signal_popup()
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._session_annotations = []
+        self._session_hr_values = []
+        self._session_rmssd_values = []
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
 
@@ -685,14 +887,17 @@ class View(QMainWindow):
         self.sensor.disconnect_client()
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
+        self.scan_button.setEnabled(True)
         self.sensor_page.connect_btn.setEnabled(True)
         self.sensor_page.disconnect_btn.setEnabled(False)
+        self.sensor_page.scan_btn.setEnabled(True)
         self.sensor_page.set_ble_connected(False)
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (no sensor)")
         self.is_phase_active = False
-        self.recording_statusbar.setValue(0)
-        self.recording_statusbar.setFormat("Sensor Disconnected")
+        self._reset_signal_popup()
+        self.recording_statusbar.set_disconnected()
+        self.readiness_page.set_progress_disconnected()
 
     def toggle_ecg_window(self):
         if self.ecg_window.isVisible():
@@ -714,6 +919,120 @@ class View(QMainWindow):
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, parent=self)
         dlg.exec()
+
+    def _on_new_session(self):
+        """Prompt, then reset the entire wizard for a fresh session."""
+        reply = QMessageBox.question(
+            self,
+            "New Session",
+            "Start a new session?\n\n"
+            "Make sure you have saved or exported any data you need.\n"
+            "Unsaved session data will be lost.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # Jump to page 0 first, then reset state after event loop settles
+        self.wizard.set_page(0)
+        QTimer.singleShot(0, self._reset_session_state)
+
+    def _reset_session_state(self):
+        """Deferred reset — runs after the page jump is visually complete."""
+        if self.sensor.device_connected:
+            self.disconnect_sensor()
+
+        # Uncheck all checkboxes across all pages
+        for page_idx in range(self.wizard.stack.count()):
+            page = self.wizard.stack.widget(page_idx)
+            for cb in page.findChildren(QCheckBox):
+                cb.blockSignals(True)
+                cb.setChecked(False)
+                cb.blockSignals(False)
+
+        self.pre_session_page.clear_patient_info()
+        self.modality_page.clear_selection()
+        self.sensor_page.clear()
+        self.readiness_page.reset_all()
+        self.summary_page._notes_edit.clear()
+
+        # Reset monitoring state
+        self.baseline_rmssd = None
+        self.baseline_hr = None
+        self.baseline_values.clear()
+        self._rmssd_smooth_buf.clear()
+        self._sdnn_smooth_buf.clear()
+        self._session_annotations.clear()
+        self._session_hr_values.clear()
+        self._session_rmssd_values.clear()
+        self.start_time = None
+        self._hr_ewma = None
+
+        self.recording_statusbar.set_idle()
+        self.current_hr_label.setText("HR: --")
+        self.rmssd_label.setText("RMSSD: --")
+        self.sdnn_label.setText("SDNN: --")
+        self.stress_ratio_label.setText("LF/HF: --")
+
+        self.wizard.refresh_gate()
+
+    def _on_wizard_page_changed(self, index: int):
+        """Populate the summary page when the user navigates to it."""
+        if index == len(WIZARD_STEPS) - 1:
+            self._populate_summary()
+
+    def _populate_summary(self):
+        modality_key = self.modality_page.selected_modality
+        modality_name = "--"
+        if modality_key:
+            for m in MODALITIES:
+                if m["key"] == modality_key:
+                    modality_name = m["title"]
+                    break
+
+        last_rmssd = None
+        if self._rmssd_smooth_buf:
+            last_rmssd = sum(self._rmssd_smooth_buf) / len(self._rmssd_smooth_buf)
+
+        csv_path = None
+        if self.logger.file is not None:
+            csv_path = self.logger.file.name
+
+        session_start_dt = None
+        if self.start_time is not None:
+            session_start_dt = datetime.fromtimestamp(self.start_time)
+
+        self.summary_page.set_session_data({
+            "patient_name": self.pre_session_page.patient_name,
+            "patient_dob": self.pre_session_page.patient_dob.toString("MM/dd/yyyy"),
+            "baseline_hr": self.baseline_hr,
+            "baseline_rmssd": self.baseline_rmssd,
+            "spo2": self.sensor_page.spo2_value,
+            "last_hr": self._hr_ewma,
+            "last_rmssd": last_rmssd,
+            "modality_name": modality_name,
+            "active_channels": self.modality_page.selected_channels,
+            "session_start": session_start_dt,
+            "csv_path": csv_path,
+            "annotations": list(self._session_annotations),
+            "hr_values": list(self._session_hr_values),
+            "rmssd_values": list(self._session_rmssd_values),
+            "outcome": "normal",
+        })
+
+    def _on_dev_mode_changed(self, enabled: bool):
+        self.readiness_page.set_dev_mode(enabled)
+        suffix = " [DEV]" if enabled else ""
+        self.setWindowTitle(f"VNS-TA ({version}){suffix}")
+
+    def _auto_start_recording(self):
+        """Auto-start CSV recording on successful BLE connection."""
+        if self.logger.file is not None:
+            return
+        ts = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
+        auto_path = str(Path.home() / f"VNS-TA_{ts}.csv")
+        self.signals.start_recording.emit(auto_path)
 
     def get_filepath(self):
         """Opens a file dialog to set the recording destination."""
@@ -739,10 +1058,23 @@ class View(QMainWindow):
         self.signals.start_recording.emit(file_path)
 
     def emit_annotation(self):
-        """Sends the current text in the dropdown to the data logger."""
-        self.signals.annotation.emit(
-            NamedSignal("Annotation", self.annotation.currentText())
-        )    
+        """Send annotation to logger, auto-learn custom entries, clear field."""
+        text = self.annotation.currentText().strip()
+        if not text:
+            return
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._session_annotations.append((ts, text))
+        self.signals.annotation.emit(NamedSignal("Annotation", text))
+        self.settings.add_custom_annotation(text)
+        self._refresh_annotation_list()
+        self.annotation.setCurrentText("")
+
+    def _refresh_annotation_list(self):
+        """Rebuild the annotation combo from presets + user custom entries."""
+        self.annotation.clear()
+        for item in self.settings.get_all_annotations():
+            self.annotation.addItem(item)
+        self.annotation.setCurrentText("")
 
     def reset_baseline(self):
         self.reset_button.setEnabled(False)
@@ -751,6 +1083,8 @@ class View(QMainWindow):
         self.baseline_values = []
         self.baseline_hr = None
         self.baseline_hr_values = []
+        self.readiness_page.set_baselines_locked(False)
+        self.readiness_page.set_progress_disconnected()
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -811,10 +1145,12 @@ class View(QMainWindow):
 
             if elapsed < self.settings.SETTLING_DURATION:
                 self.is_phase_active = True
-                remaining = int(self.settings.SETTLING_DURATION - elapsed)
-                self.recording_statusbar.setRange(0, self.settings.SETTLING_DURATION)
-                self.recording_statusbar.setValue(int(elapsed))
-                self.recording_statusbar.setFormat(f"Settling... {remaining}s")
+                self.recording_statusbar.set_settling(
+                    int(elapsed), self.settings.SETTLING_DURATION
+                )
+                self.readiness_page.set_progress_settling(
+                    int(elapsed), self.settings.SETTLING_DURATION
+                )
                 return
 
             if self._rmssd_smooth_buf and not self.hrv_widget.time_series.count():
@@ -824,10 +1160,12 @@ class View(QMainWindow):
                 smoothed_rmssd = y
 
             self.hrv_widget.time_series.append(x, smoothed_rmssd)
+            self._session_rmssd_values.append(smoothed_rmssd)
+            self.start_seq_page.update_rmssd(smoothed_rmssd)
             if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
                 smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
                 self.sdnn_series.append(x, smoothed_sdnn)
-                self.sdnn_label.setText(f"HRV/SDNN: {sdnn:.1f} ms")
+                self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
 
             # 4. Expand-only Y-axes — grow to fit peaks, never shrink
             # Left axis: RMSSD (start tight, grow in steps of 5)
@@ -854,10 +1192,12 @@ class View(QMainWindow):
                 self.is_phase_active = True
                 baseline_elapsed = elapsed - self.settings.SETTLING_DURATION
                 baseline_duration = self.settings.BASELINE_DURATION
-                remaining = int(baseline_duration - baseline_elapsed)
-                self.recording_statusbar.setRange(0, baseline_duration)
-                self.recording_statusbar.setValue(int(baseline_elapsed))
-                self.recording_statusbar.setFormat(f"Establishing Baselines... {remaining}s")
+                self.recording_statusbar.set_baseline(
+                    int(baseline_elapsed), baseline_duration
+                )
+                self.readiness_page.set_progress_baseline(
+                    int(baseline_elapsed), baseline_duration
+                )
                 self.baseline_values.append(y)
 
             # PHASE 2: CALCULATE AVERAGES (Only once at end of baseline)
@@ -868,6 +1208,9 @@ class View(QMainWindow):
                 self.statusbar.showMessage(
                     f"Baselines locked — RMSSD: {self.baseline_rmssd:.1f} ms, HR: {hr_text} bpm"
                 )
+                self.readiness_page.update_rmssd(self.baseline_rmssd)
+                self.readiness_page.set_baselines_locked(True)
+                self.start_seq_page.set_baseline_hr(self.baseline_hr)
                 if self.settings.DEBUG:
                     print(f"--- BASELINES LOCKED: RMSSD={self.baseline_rmssd:.2f} ms, HR={hr_text} bpm ---")
 
@@ -875,11 +1218,12 @@ class View(QMainWindow):
             if self.baseline_rmssd is not None:
                 self.is_phase_active = True
                 hr_val = f"{self.baseline_hr:.0f}" if self.baseline_hr is not None else "--"
-                self.recording_statusbar.setFormat(
-                    f"BASELINES LOCKED: RMSSD = {self.baseline_rmssd:.1f} ms  |  HR = {hr_val} bpm"
+                self.recording_statusbar.set_locked(
+                    f"{self.baseline_rmssd:.1f}", hr_val
                 )
-                self.recording_statusbar.setRange(0, self.settings.BASELINE_DURATION)
-                self.recording_statusbar.setValue(self.settings.BASELINE_DURATION)
+                self.readiness_page.set_progress_locked(
+                    f"{self.baseline_rmssd:.1f}", hr_val
+                )
 
                 # Dotted Line Logic
                 if not hasattr(self, 'baseline_series'):
@@ -941,15 +1285,17 @@ class View(QMainWindow):
 
     def show_recording_status(self, status: int):
         """Indicate busy state if `status` is 0."""
-        self.recording_statusbar.setRange(0, status)
+        self.recording_statusbar.setRange(0, max(status, 1))
 
     def show_status(self, status: str, print_to_terminal=True):
         if "Connected" in status and "Disconnecting" not in status:
             self.is_phase_active = False
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
+            self.scan_button.setEnabled(False)
             self.sensor_page.connect_btn.setEnabled(False)
             self.sensor_page.disconnect_btn.setEnabled(True)
+            self.sensor_page.scan_btn.setEnabled(False)
             self.sensor_page.set_ble_connected(True)
             if self.address_menu.currentText():
                 parts = self.address_menu.currentText().split(",")
@@ -959,15 +1305,21 @@ class View(QMainWindow):
                 parts = self.sensor_page.device_menu.currentText().split(",")
                 if len(parts) >= 2:
                     _save_last_sensor(parts[0].strip(), parts[1].strip())
+            self._auto_start_recording()
         elif "error" in status.lower() or "Disconnecting" in status:
             self.connect_button.setEnabled(True)
             self.disconnect_button.setEnabled(False)
+            self.scan_button.setEnabled(True)
             self.sensor_page.connect_btn.setEnabled(True)
             self.sensor_page.disconnect_btn.setEnabled(False)
+            self.sensor_page.scan_btn.setEnabled(True)
             self.sensor_page.set_ble_connected(False)
 
         if not self.is_phase_active:
-            self.recording_statusbar.setFormat(status)
+            if "error" in status.lower():
+                self.recording_statusbar.set_error(status)
+            else:
+                self.recording_statusbar.set_idle(status)
         
         # ALWAYS update the tiny status bar at the very bottom
         self.statusbar.showMessage(status)
@@ -975,15 +1327,47 @@ class View(QMainWindow):
         if print_to_terminal and self.settings.DEBUG:
             print(status)
 
-    def emit_annotation(self):
-        self.signals.annotation.emit(
-            NamedSignal("Annotation", self.annotation.currentText())
-        )
-
     def update_ui_with_mock_data(self):
-        self.current_hr_label.setText("Heart Rate: 72 bpm")
+        self.current_hr_label.setText("HR: 72 bpm")
         self.rmssd_label.setText("RMSSD: 45 ms")
-        self.stress_ratio_label.setText("Stress Ratio (LF/HF): 1.2")
+        self.stress_ratio_label.setText("LF/HF: 1.2")
+
+    def _show_signal_degraded_popup(self, reason: str):
+        """One-shot popup when H10 signal degrades from IBI faults."""
+        if self._signal_popup_shown:
+            return
+        self._signal_popup_shown = True
+        self._fire_signal_popup(reason)
+
+    def _fire_signal_popup(self, reason: str):
+        if self.wizard.current_index() >= len(WIZARD_STEPS) - 1:
+            return
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Polar H10 Signal Degraded")
+        msg.setText(
+            f"<b>Signal quality issue detected: {reason}</b>"
+        )
+        msg.setInformativeText(
+            "Please ask the patient to sit still and breathe normally.\n\n"
+            "If the problem persists, re-wet the Polar H10 electrode "
+            "pads with water or electrode gel and ensure the strap is "
+            "snug against the skin."
+        )
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.open()
+
+    def _on_rmssd_degraded(self):
+        """Track consecutive bad RMSSD readings; popup after sustained degradation."""
+        self._signal_degrade_count += 1
+        if not self._signal_popup_shown and self._signal_degrade_count >= 8:
+            self._signal_popup_shown = True
+            self._fire_signal_popup("Poor signal — electrodes may be dry")
+
+    def _reset_signal_popup(self):
+        """Allow popup to fire again after signal recovers."""
+        self._signal_popup_shown = False
+        self._signal_degrade_count = 0
 
     def _check_data_timeout(self):
         if self._last_data_time is None:
@@ -994,6 +1378,7 @@ class View(QMainWindow):
             self._consecutive_good = 0
             self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
             self.health_label.setText("Signal: LOST (No data)")
+            self._show_signal_degraded_popup("No data received")
             self.model.clear_buffers()
 
     def update_ui_labels(self, data: NamedSignal):
@@ -1007,8 +1392,10 @@ class View(QMainWindow):
                 
                 hr = 60000.0 / last_ibi_ms
                 display_hr = self._hr_ewma if self._hr_ewma is not None else hr
-                self.current_hr_label.setText(f"Heart Rate: {int(display_hr)} bpm")
+                self.current_hr_label.setText(f"HR: {int(display_hr)} bpm")
                 self.sensor_page.update_hr_display(display_hr)
+                self.readiness_page.update_hr(display_hr)
+                self.start_seq_page.update_hr(display_hr)
 
                 # LEVEL 1 FAULT: Total Dropout
                 if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
@@ -1016,6 +1403,7 @@ class View(QMainWindow):
                     self._consecutive_good = 0
                     self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
                     self.health_label.setText("FAULT: Clearing Buffer...")
+                    self._show_signal_degraded_popup("Total signal dropout")
                     self.signals.request_buffer_reset.emit()
                     return
 
@@ -1025,6 +1413,7 @@ class View(QMainWindow):
                     self._consecutive_good = 0
                     self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
                     self.health_label.setText("Signal: DROP/NOISE")
+                    self._show_signal_degraded_popup("Signal dropout or noise")
                     return
 
                 # LEVEL 3 FAULT: Adaptive — 30% deviation from rolling average
@@ -1041,6 +1430,7 @@ class View(QMainWindow):
                             avg_hr = int(60000.0 / avg_ibi)
                             self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
                             self.health_label.setText(f"Signal: ERRATIC (avg {avg_hr})")
+                            self._show_signal_degraded_popup("Erratic heart rate")
                             return
 
                 # Normal beat — count towards recovery
@@ -1048,13 +1438,14 @@ class View(QMainWindow):
                     self._consecutive_good += 1
                     if self._consecutive_good >= self.settings.RECOVERY_BEATS:
                         self._fault_active = False
+                        self._reset_signal_popup()
                         self.model.clear_buffers()
                         self.health_indicator.setStyleSheet("color: #00FF00; font-size: 18px;")
                         self.health_label.setText("Signal: GOOD")
         
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":
-            self.stress_ratio_label.setText(f"Stress Ratio (LF/HF): {data.value[0]:.2f}")
+            self.stress_ratio_label.setText(f"LF/HF: {data.value[0]:.2f}")
 
         # 3. AVERAGED DATA (RMSSD & Stability)
         elif data.name == "hrv":
@@ -1070,12 +1461,15 @@ class View(QMainWindow):
             if rmssd_val > 200:
                 self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
                 self.health_label.setText("Signal: POOR (Dry?)")
+                self._on_rmssd_degraded()
             elif rmssd_val > 150:
                 self.health_indicator.setStyleSheet("color: orange; font-size: 18px;")
                 self.health_label.setText("Signal: NOISY")
+                self._on_rmssd_degraded()
             else:
                 self.health_indicator.setStyleSheet("color: #00FF00; font-size: 18px;")
                 self.health_label.setText("Signal: GOOD")
+                self._reset_signal_popup()
 
     def plot_ibis(self, data: NamedSignal):
         """Plots the top chart as Heart Rate (bpm) vs wall-clock time."""
@@ -1114,6 +1508,7 @@ class View(QMainWindow):
                 self._hr_ewma = hr
 
             self.hr_trend_series.append(elapsed, self._hr_ewma)
+            self._session_hr_values.append(self._hr_ewma)
 
             total_cal = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
             if elapsed < total_cal:

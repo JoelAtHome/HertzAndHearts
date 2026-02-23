@@ -22,6 +22,7 @@ from PySide6.QtGui import QFont
 # ──────────────────────────────────────────────────────────────────────
 
 WIZARD_STEPS = [
+    "Welcome",
     "Pre-Session",
     "Modality",
     "Sensors",
@@ -33,7 +34,7 @@ WIZARD_STEPS = [
     "Summary",
 ]
 
-MONITORING_PAGE_INDEX = 7
+MONITORING_PAGE_INDEX = 8
 
 # ──────────────────────────────────────────────────────────────────────
 #  Colors (matching the HTML mockup palette)
@@ -68,13 +69,27 @@ class _StepDot(QLabel):
         "font-size: 10px; font-weight: bold;"
     )
 
+    clicked = Signal(int)
+
     def __init__(self, number: int, size: int = 22, parent=None):
         super().__init__(str(number), parent)
         self._number = number
         self._r = size // 2
+        self._clickable = False
         self.setFixedSize(size, size)
         self.setAlignment(Qt.AlignCenter)
         self.set_state("future")
+
+    def set_clickable(self, clickable: bool):
+        self._clickable = clickable
+        self.setCursor(
+            Qt.PointingHandCursor if clickable else Qt.ArrowCursor
+        )
+
+    def mousePressEvent(self, event):
+        if self._clickable:
+            self.clicked.emit(self._number - 1)
+        super().mousePressEvent(event)
 
     def set_state(self, state: str):
         r = self._r
@@ -95,6 +110,9 @@ class _StepDot(QLabel):
 
 class ProgressHeader(QWidget):
     """Horizontal step indicator matching the mockup's progress track."""
+
+    settings_clicked = Signal()
+    dot_clicked = Signal(int)
 
     def __init__(self, steps: list[str], parent=None):
         super().__init__(parent)
@@ -121,6 +139,7 @@ class ProgressHeader(QWidget):
                 self._connectors.append(conn)
 
             dot = _StepDot(i + 1)
+            dot.clicked.connect(self.dot_clicked.emit)
             layout.addWidget(dot, alignment=Qt.AlignVCenter)
 
             lbl = QLabel(name)
@@ -134,6 +153,48 @@ class ProgressHeader(QWidget):
             self._labels.append(lbl)
 
         layout.addStretch()
+
+        self._dev_badge = QLabel("DEV")
+        self._dev_badge.setFont(QFont("Segoe UI", 8, QFont.Bold))
+        self._dev_badge.setStyleSheet(
+            f"background: {_RED}; color: white; padding: 2px 6px; "
+            "border-radius: 3px; margin-right: 6px;"
+        )
+        self._dev_badge.setToolTip(
+            "Developer Mode active — gates bypassed, "
+            "click any step dot to jump"
+        )
+        self._dev_badge.setVisible(False)
+        layout.addWidget(self._dev_badge, alignment=Qt.AlignVCenter)
+
+        gear_btn = QPushButton("\u2699")
+        gear_btn.setToolTip("Protocol Settings")
+        gear_btn.setCursor(Qt.PointingHandCursor)
+        gear_btn.setFixedSize(30, 30)
+        gear_btn.setFont(QFont("Segoe UI", 14))
+        gear_btn.setStyleSheet(
+            f"QPushButton {{ background: transparent; color: {_GRAY}; "
+            "border: none; border-radius: 4px; } "
+            f"QPushButton:hover {{ background: #d5dbdb; color: {_GRAY_DARK}; }}"
+        )
+        gear_btn.clicked.connect(self.settings_clicked.emit)
+        layout.addWidget(gear_btn, alignment=Qt.AlignVCenter)
+
+    def set_dev_mode(self, enabled: bool):
+        self._dev_badge.setVisible(enabled)
+        for dot in self._dots:
+            dot.set_clickable(enabled)
+
+    def mousePressEvent(self, event):
+        """Ctrl+Alt+Click anywhere on the header toggles dev mode."""
+        mods = event.modifiers()
+        if (mods & Qt.ControlModifier) and (mods & Qt.AltModifier):
+            parent = self.parent()
+            while parent and not isinstance(parent, ProtocolWizard):
+                parent = parent.parent()
+            if parent:
+                parent.toggle_dev_mode()
+        super().mousePressEvent(event)
 
     def set_current(self, index: int):
         for i, (dot, lbl) in enumerate(zip(self._dots, self._labels)):
@@ -232,7 +293,7 @@ class NavigationFooter(QWidget):
         layout.addStretch()
 
         self.next_button = QPushButton("Next \u25B6")
-        self.next_button.setFixedWidth(160)
+        self.next_button.setMinimumWidth(160)
         self.next_button.setStyleSheet(self._BTN_NEXT)
         self.next_button.clicked.connect(self.next_clicked.emit)
         layout.addWidget(self.next_button)
@@ -244,7 +305,7 @@ class NavigationFooter(QWidget):
         self.gate_warning.setVisible(not gate_satisfied)
 
         if current == total - 1:
-            self.next_button.setText("Export && Finish")
+            self.next_button.setText("\u21BB  New Session")
             self.next_button.setStyleSheet(self._BTN_FINISH)
         elif current == MONITORING_PAGE_INDEX - 1:
             self.next_button.setText("Begin Monitoring \u25B6")
@@ -294,13 +355,19 @@ class ProtocolWizard(QWidget):
 
     Pages are added via add_page().  Each page may optionally provide a
     gate_check callable; if it returns False the Next button is disabled.
+
+    Developer Mode (toggled via toggle_dev_mode) bypasses all gate checks
+    and allows direct page jumps by clicking step dots in the header.
     """
 
     page_changed = Signal(int)
+    dev_mode_changed = Signal(bool)
+    new_session_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._current = 0
+        self._dev_mode = False
         self._gate_checks: dict[int, callable] = {}
 
         root = QVBoxLayout(self)
@@ -308,6 +375,7 @@ class ProtocolWizard(QWidget):
         root.setSpacing(0)
 
         self.header = ProgressHeader(WIZARD_STEPS)
+        self.header.dot_clicked.connect(self._on_dot_clicked)
         root.addWidget(self.header)
 
         self.stack = QStackedWidget()
@@ -340,7 +408,23 @@ class ProtocolWizard(QWidget):
         """Re-evaluate the current page's gate (call after checkbox changes)."""
         self._refresh()
 
+    # ── dev mode ──────────────────────────────────────────────────────
+
+    @property
+    def dev_mode(self) -> bool:
+        return self._dev_mode
+
+    def toggle_dev_mode(self):
+        self._dev_mode = not self._dev_mode
+        self.header.set_dev_mode(self._dev_mode)
+        self._refresh()
+        self.dev_mode_changed.emit(self._dev_mode)
+
     # ── private ──────────────────────────────────────────────────────
+
+    def _on_dot_clicked(self, index: int):
+        if self._dev_mode and 0 <= index < self.stack.count():
+            self.set_page(index)
 
     def _go_back(self):
         if self._current > 0:
@@ -349,10 +433,15 @@ class ProtocolWizard(QWidget):
     def _go_next(self):
         if not self._gate_ok():
             return
+        if self._current == self.stack.count() - 1:
+            self.new_session_requested.emit()
+            return
         if self._current < self.stack.count() - 1:
             self.set_page(self._current + 1)
 
     def _gate_ok(self) -> bool:
+        if self._dev_mode:
+            return True
         check = self._gate_checks.get(self._current)
         return check() if check else True
 
