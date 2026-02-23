@@ -26,6 +26,11 @@ from vns_ta.config import (
     ECG_SAMPLE_RATE,
 )
 from vns_ta.settings import Settings, SettingsDialog
+from vns_ta.wizard import ProtocolWizard, PlaceholderPage, WIZARD_STEPS, MONITORING_PAGE_INDEX
+from vns_ta.wizard_pages import (
+    PreSessionPage, ModalitySelectionPage, SensorPlacementPage,
+    ElectrodePlacementPage,
+)
 from vns_ta import __version__ as version, resources  # noqa
 import warnings
 
@@ -489,10 +494,9 @@ class View(QMainWindow):
         self.annotation_button = QPushButton("Annotate")
         self.annotation_button.clicked.connect(self.emit_annotation)
 
-        # 5. LAYOUT ASSEMBLY
-        self.central_widget = QWidget()
-        self.setCentralWidget(self.central_widget)
-        self.vlayout0 = QVBoxLayout(self.central_widget)
+        # 5. LAYOUT ASSEMBLY — monitoring page content
+        self.monitoring_page = QWidget()
+        self.vlayout0 = QVBoxLayout(self.monitoring_page)
 
         # TOP: HR Chart + Pacer
         self.hlayout_top = QHBoxLayout()
@@ -541,6 +545,62 @@ class View(QMainWindow):
         
         self.vlayout0.addLayout(self.controls_layout, stretch=20)
 
+        # 6. WIZARD ASSEMBLY
+        self.wizard = ProtocolWizard()
+
+        self.pre_session_page = PreSessionPage()
+        self.pre_session_page.gate_changed.connect(self.wizard.refresh_gate)
+
+        self.modality_page = ModalitySelectionPage()
+        self.modality_page.gate_changed.connect(self.wizard.refresh_gate)
+
+        self.sensor_page = SensorPlacementPage()
+        self.sensor_page.gate_changed.connect(self.wizard.refresh_gate)
+        self.sensor_page.scan_btn.clicked.connect(self.scanner.scan)
+        self.sensor_page.connect_btn.clicked.connect(self._connect_from_wizard)
+        self.sensor_page.disconnect_btn.clicked.connect(self.disconnect_sensor)
+        if saved:
+            self.sensor_page.device_menu.addItem(
+                f"{saved['name']}, {saved['address']}"
+            )
+
+        self.electrode_page = ElectrodePlacementPage()
+        self.electrode_page.gate_changed.connect(self.wizard.refresh_gate)
+        self.modality_page.modality_changed.connect(
+            lambda key: self.electrode_page.set_active_channels(
+                self.modality_page.selected_channels
+            )
+        )
+
+        for i, title in enumerate(WIZARD_STEPS):
+            if i == 0:
+                self.wizard.add_page(
+                    self.pre_session_page,
+                    gate_check=self.pre_session_page.is_complete,
+                )
+            elif i == 1:
+                self.wizard.add_page(
+                    self.modality_page,
+                    gate_check=self.modality_page.is_complete,
+                )
+            elif i == 2:
+                self.wizard.add_page(
+                    self.sensor_page,
+                    gate_check=self.sensor_page.is_complete,
+                )
+            elif i == 3:
+                self.wizard.add_page(
+                    self.electrode_page,
+                    gate_check=self.electrode_page.is_complete,
+                )
+            elif i == MONITORING_PAGE_INDEX:
+                self.wizard.add_page(self.monitoring_page)
+            else:
+                self.wizard.add_page(
+                    PlaceholderPage(title, f"Step {i + 1} of {len(WIZARD_STEPS)}")
+                )
+        self.setCentralWidget(self.wizard)
+
         # Initialize
         self.statusbar = self.statusBar()
         signal_status_widget = QWidget()
@@ -558,26 +618,29 @@ class View(QMainWindow):
         self.hrv_widget.x_axis.setTitleText("Seconds")
         self.hrv_widget.y_axis.setTitleText("RMSSD (ms)")
 
-    def show_status(self, status: str):
-        """Silently ignore generic status updates if a Phase is active."""
-        if not self.is_phase_active:
-            self.recording_statusbar.setFormat(status)
-        self.statusbar.showMessage(status)
-
     def connect_sensor(self):
-        if not self.address_menu.currentText(): return
+        """Connect using the monitoring-page address menu."""
+        if not self.address_menu.currentText():
+            return
         parts = self.address_menu.currentText().split(",")
-        name = parts[0].strip()
-        address = parts[1].strip()
+        self._do_connect(parts[0].strip(), parts[1].strip())
+
+    def _connect_from_wizard(self):
+        """Connect using the wizard sensor-page device menu."""
+        if not self.sensor_page.device_menu.currentText():
+            return
+        parts = self.sensor_page.device_menu.currentText().split(",")
+        self._do_connect(parts[0].strip(), parts[1].strip())
+
+    def _do_connect(self, name: str, address: str):
         sensor = [s for s in self.model.sensors if get_sensor_address(s) == address]
-        
+
         if not sensor:
             bt_addr = QBluetoothAddress(address)
             device = QBluetoothDeviceInfo(bt_addr, name, 0)
             device.setCoreConfigurations(QBluetoothDeviceInfo.LowEnergyCoreConfiguration)
             sensor = [device]
 
-        # RESET EVERYTHING
         self.start_time = None
         self.baseline_values = []
         self.baseline_rmssd = None
@@ -595,16 +658,18 @@ class View(QMainWindow):
         self._sdnn_smooth_buf = []
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
-        
+
         if hasattr(self, 'baseline_series'):
             self.hrv_widget.chart().removeSeries(self.baseline_series)
             del self.baseline_series
         if hasattr(self, 'hr_baseline_series'):
             self.ibis_widget.plot.removeSeries(self.hr_baseline_series)
             del self.hr_baseline_series
-            
+
         self.connect_button.setEnabled(False)
         self.disconnect_button.setEnabled(False)
+        self.sensor_page.connect_btn.setEnabled(False)
+        self.sensor_page.disconnect_btn.setEnabled(False)
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (starting...)")
         self.sensor.connect_client(*sensor)
@@ -620,6 +685,9 @@ class View(QMainWindow):
         self.sensor.disconnect_client()
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
+        self.sensor_page.connect_btn.setEnabled(True)
+        self.sensor_page.disconnect_btn.setEnabled(False)
+        self.sensor_page.set_ble_connected(False)
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (no sensor)")
         self.is_phase_active = False
@@ -842,6 +910,8 @@ class View(QMainWindow):
     def list_addresses(self, addresses: NamedSignal):
         self.address_menu.clear()
         self.address_menu.addItems(addresses.value)
+        self.sensor_page.device_menu.clear()
+        self.sensor_page.device_menu.addItems(addresses.value)
 
     def plot_pacer_disk(self):
         if not self.pacer_toggle.isChecked():
@@ -878,13 +948,23 @@ class View(QMainWindow):
             self.is_phase_active = False
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
+            self.sensor_page.connect_btn.setEnabled(False)
+            self.sensor_page.disconnect_btn.setEnabled(True)
+            self.sensor_page.set_ble_connected(True)
             if self.address_menu.currentText():
                 parts = self.address_menu.currentText().split(",")
+                if len(parts) >= 2:
+                    _save_last_sensor(parts[0].strip(), parts[1].strip())
+            elif self.sensor_page.device_menu.currentText():
+                parts = self.sensor_page.device_menu.currentText().split(",")
                 if len(parts) >= 2:
                     _save_last_sensor(parts[0].strip(), parts[1].strip())
         elif "error" in status.lower() or "Disconnecting" in status:
             self.connect_button.setEnabled(True)
             self.disconnect_button.setEnabled(False)
+            self.sensor_page.connect_btn.setEnabled(True)
+            self.sensor_page.disconnect_btn.setEnabled(False)
+            self.sensor_page.set_ble_connected(False)
 
         if not self.is_phase_active:
             self.recording_statusbar.setFormat(status)
@@ -928,6 +1008,7 @@ class View(QMainWindow):
                 hr = 60000.0 / last_ibi_ms
                 display_hr = self._hr_ewma if self._hr_ewma is not None else hr
                 self.current_hr_label.setText(f"Heart Rate: {int(display_hr)} bpm")
+                self.sensor_page.update_hr_display(display_hr)
 
                 # LEVEL 1 FAULT: Total Dropout
                 if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
