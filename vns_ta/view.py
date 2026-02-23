@@ -3,9 +3,11 @@ import json
 import statistics
 import time
 from pathlib import Path
-from PySide6.QtCharts import QLineSeries, QChartView, QChart, QSplineSeries, QValueAxis, QAreaSeries
+import numpy as np
+import pyqtgraph as pg
+from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
 from PySide6.QtGui import QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF
+from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF, QEvent
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
@@ -37,6 +39,7 @@ from vns_ta import __version__ as version, resources  # noqa
 import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
+pg.setConfigOptions(antialias=True)
 
 BLUE = QColor(135, 206, 250)
 WHITE = QColor(255, 255, 255)
@@ -178,9 +181,7 @@ class PacerWidget(QChartView):
         self.setChart(self.plot)
 
     def update_series(self, x_values, y_values):
-        self.outline.clear()
-        for x, y in zip(x_values, y_values):
-            self.outline.append(x, y)
+        self.outline.replace([QPointF(x, y) for x, y in zip(x_values, y_values)])
 
     def sizeHint(self):
         height = self.size().height()
@@ -213,9 +214,7 @@ class XYSeriesWidget(QChartView):
 
     def update_series(self, x_values, y_values):
         """Replaces the points in the series with new data."""
-        self.time_series.clear()
-        for x, y in zip(x_values, y_values):
-            self.time_series.append(x, y)        
+        self.time_series.replace([QPointF(x, y) for x, y in zip(x_values, y_values)])
 
 
 class EcgWindow(QMainWindow):
@@ -228,162 +227,200 @@ class EcgWindow(QMainWindow):
         self.resize(900, 350)
 
         self._settings = Settings()
-        display_sec = self._settings.ECG_DISPLAY_SECONDS
-        self._buffer = deque(maxlen=ECG_SAMPLE_RATE * display_sec)
+        self._display_sec = self._settings.ECG_DISPLAY_SECONDS
+        self._view_sec = float(self._display_sec)
+        buf_size = ECG_SAMPLE_RATE * self._display_sec
+
+        self._times = deque(maxlen=buf_size)
+        self._values = deque(maxlen=buf_size)
         self._sample_count = 0
+
+        self._pending = deque()
+        self._got_first_data = False
+        self._drain_rate = max(1, int(
+            ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+        ))
+
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
 
-        self._sweep_buffer = []
-        self._reveal_pos = 0.0
-        self._sweep_complete = False
-        self._prev_sample = None
-        self._peak_tracker = 0.0
-        self._trigger_threshold = self._settings.ECG_TRIGGER_THRESHOLD
-        self._samples_per_frame = ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+        self._plot_widget = pg.PlotWidget(background='w')
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        self._plot_widget.setLabel('left', 'ECG (mV)', color='k')
+        self._plot_widget.setLabel('bottom', 'Seconds', color='k')
+        self._plot_widget.getAxis('left').setTextPen('k')
+        self._plot_widget.getAxis('bottom').setTextPen('k')
+        self._plot_widget.getAxis('left').setPen(pg.mkPen('k'))
+        self._plot_widget.getAxis('bottom').setPen(pg.mkPen('k'))
+        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._plot_widget.hideButtons()
 
-        chart = QChart()
-        chart.legend().setVisible(False)
-        chart.setBackgroundRoundness(0)
-        chart.setMargins(QMargins(0, 0, 0, 0))
-        chart.setAnimationOptions(QChart.NoAnimation)
-
-        self._series = QLineSeries()
-        pen = self._series.pen()
-        pen.setWidthF(1.2)
-        pen.setColor(QColor(0, 0, 0))
-        self._series.setPen(pen)
-        self._series.setUseOpenGL(True)
-        chart.addSeries(self._series)
-
-        self._x_axis = QValueAxis()
-        self._x_axis.setTitleText(f"Last {display_sec} Seconds")
-        self._x_axis.setRange(0, display_sec)
-        self._x_axis.setLabelsVisible(False)
-        self._x_axis.setTickCount(6)
-        chart.addAxis(self._x_axis, Qt.AlignBottom)
-        self._series.attachAxis(self._x_axis)
-
-        self._y_axis = QValueAxis()
-        self._y_axis.setTitleText("ECG (mV)")
-        self._y_axis.setRange(-1.0, 1.5)
-        chart.addAxis(self._y_axis, Qt.AlignLeft)
-        self._series.attachAxis(self._y_axis)
-
-        chart_view = QChartView(chart)
-        chart_view.setRenderHint(chart_view.renderHints())
+        self._curve = self._plot_widget.plot(
+            pen=pg.mkPen(color='k', width=1.2)
+        )
 
         self._frozen = False
+
+        self._zoom_out_button = QPushButton("\u2212")
+        self._zoom_out_button.setFixedWidth(28)
+        self._zoom_out_button.setToolTip("Zoom Out (show more time)")
+        self._zoom_out_button.clicked.connect(self._zoom_out)
+
+        self._zoom_in_button = QPushButton("+")
+        self._zoom_in_button.setFixedWidth(28)
+        self._zoom_in_button.setToolTip("Zoom In (show less time)")
+        self._zoom_in_button.clicked.connect(self._zoom_in)
+
         self._freeze_button = QPushButton("Freeze")
         self._freeze_button.setFixedWidth(80)
         self._freeze_button.clicked.connect(self._toggle_freeze)
 
         self._statusbar = QStatusBar()
+        zoom_label = QLabel("Zoom:")
+        zoom_label.setStyleSheet("font-size: 11px;")
+        self._statusbar.addPermanentWidget(zoom_label)
+        self._statusbar.addPermanentWidget(self._zoom_out_button)
+        self._statusbar.addPermanentWidget(self._zoom_in_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
         self.setStatusBar(self._statusbar)
         self._statusbar.showMessage("Waiting for ECG data...")
 
-        self.setCentralWidget(chart_view)
+        self.setCentralWidget(self._plot_widget)
 
         self._refresh_timer = QTimer()
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
         self._refresh_timer.timeout.connect(self._redraw)
 
     def start(self):
-        display_sec = self._settings.ECG_DISPLAY_SECONDS
-        self._buffer = deque(maxlen=ECG_SAMPLE_RATE * display_sec)
-        self._sweep_buffer = []
-        self._reveal_pos = 0.0
-        self._sweep_complete = False
-        self._prev_sample = None
-        self._peak_tracker = 0.0
-        self._trigger_threshold = self._settings.ECG_TRIGGER_THRESHOLD
-        self._samples_per_frame = ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+        self._display_sec = self._settings.ECG_DISPLAY_SECONDS
+        self._view_sec = float(self._display_sec)
+        buf_size = ECG_SAMPLE_RATE * self._display_sec
+        self._times = deque(maxlen=buf_size)
+        self._values = deque(maxlen=buf_size)
+        self._sample_count = 0
+        self._drain_rate = max(1, int(
+            ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+        ))
+        self._y_min_smooth = 0.0
+        self._y_max_smooth = 0.0
+        # Pre-fill display buffers from any accumulated pending samples so the
+        # plot renders immediately on the first frame instead of slowly draining.
+        if len(self._pending) > buf_size:
+            drop = len(self._pending) - buf_size
+            for _ in range(drop):
+                self._pending.popleft()
+        inv_rate = 1.0 / ECG_SAMPLE_RATE
+        while self._pending:
+            val = self._pending.popleft()
+            self._times.append(self._sample_count * inv_rate)
+            self._values.append(val)
+            self._sample_count += 1
+        self._got_first_data = len(self._times) > 0
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
-        self._x_axis.setRange(0, display_sec)
-        self._x_axis.setTitleText(f"Last {display_sec} Seconds")
         self._refresh_timer.start()
-        self._statusbar.showMessage("ECG streaming...")
+        if self._got_first_data:
+            self._statusbar.showMessage("ECG streaming...")
+        else:
+            self._statusbar.showMessage("Waiting for ECG data from sensor\u2026")
 
     def stop(self):
         self._refresh_timer.stop()
         self._frozen = False
         self._freeze_button.setText("Freeze")
+        self._plot_widget.setMouseEnabled(x=False, y=False)
         self._statusbar.showMessage("ECG stopped.")
 
     def _toggle_freeze(self):
         self._frozen = not self._frozen
         if self._frozen:
             self._freeze_button.setText("Resume")
-            self._statusbar.showMessage("ECG frozen.")
+            self._plot_widget.setMouseEnabled(x=True, y=False)
+            self._statusbar.showMessage("ECG frozen — drag to pan, scroll wheel or +/\u2212 to zoom.")
         else:
             self._freeze_button.setText("Freeze")
+            self._plot_widget.setMouseEnabled(x=False, y=False)
+            self._view_sec = float(self._display_sec)
             self._statusbar.showMessage("ECG streaming...")
 
+    def _zoom_in(self):
+        self._view_sec = max(0.5, self._view_sec / 2)
+        if self._frozen:
+            self._refresh_frozen_view()
+
+    def _zoom_out(self):
+        self._view_sec = min(float(self._display_sec), self._view_sec * 2)
+        if self._frozen:
+            self._refresh_frozen_view()
+
+    def _refresh_frozen_view(self):
+        """Re-render X range at current zoom level while frozen."""
+        if len(self._times) < 2:
+            return
+        t_arr = np.array(self._times)
+        current_range = self._plot_widget.viewRange()[0]
+        center = (current_range[0] + current_range[1]) / 2
+        half = self._view_sec / 2
+        t_lo = max(float(t_arr[0]), center - half)
+        t_hi = t_lo + self._view_sec
+        if t_hi > float(t_arr[-1]):
+            t_hi = float(t_arr[-1])
+            t_lo = max(float(t_arr[0]), t_hi - self._view_sec)
+        self._plot_widget.setXRange(t_lo, t_hi, padding=0)
+
     def append_samples(self, samples: list):
-        for s in samples:
-            self._buffer.append(s)
-            self._sample_count += 1
-
-            triggered = False
-            if self._prev_sample is not None:
-                if self._prev_sample < self._trigger_threshold <= s:
-                    if self._sweep_complete or len(self._sweep_buffer) == 0:
-                        triggered = True
-
-            if triggered:
-                self._sweep_buffer = [s]
-                self._sweep_complete = False
-                self._reveal_pos = 1.0
-            elif not self._sweep_complete:
-                self._sweep_buffer.append(s)
-                if len(self._sweep_buffer) >= ECG_SAMPLE_RATE * self._settings.ECG_DISPLAY_SECONDS:
-                    self._sweep_complete = True
-
-            if s > self._peak_tracker:
-                self._peak_tracker = s
-            else:
-                self._peak_tracker *= 0.998
-            self._trigger_threshold = self._peak_tracker * 0.5
-            self._prev_sample = s
+        self._pending.extend(samples)
+        max_pending = ECG_SAMPLE_RATE * 10
+        while len(self._pending) > max_pending:
+            self._pending.popleft()
 
     def _redraw(self):
         if self._frozen:
             return
 
-        n = len(self._sweep_buffer)
+        n_pending = len(self._pending)
+        if n_pending == 0:
+            return
+
+        if not self._got_first_data:
+            self._got_first_data = True
+            self._statusbar.showMessage("ECG streaming...")
+
+        if n_pending > 200:
+            drain = min(50, n_pending)
+        elif n_pending > 100:
+            drain = min(20, n_pending)
+        else:
+            drain = min(self._drain_rate + 2, n_pending)
+
+        inv_rate = 1.0 / ECG_SAMPLE_RATE
+        for _ in range(drain):
+            val = self._pending.popleft()
+            self._times.append(self._sample_count * inv_rate)
+            self._values.append(val)
+            self._sample_count += 1
+
+        n = len(self._times)
         if n < 2:
             return
 
-        if not self._sweep_complete:
-            self._reveal_pos = min(self._reveal_pos + self._samples_per_frame, n)
-        show_count = n if self._sweep_complete else int(self._reveal_pos)
-        if show_count < 2:
-            return
+        t_arr = np.array(self._times)
+        v_arr = np.array(self._values)
 
-        points = self._sweep_buffer[:show_count]
-        inv_rate = 1.0 / ECG_SAMPLE_RATE
-
-        qpoints = []
-        y_lo = float('inf')
-        y_hi = float('-inf')
-        for i, val in enumerate(points):
-            t = i * inv_rate
-            if val < y_lo:
-                y_lo = val
-            if val > y_hi:
-                y_hi = val
-            qpoints.append(QPointF(t, val))
-
+        y_lo = float(v_arr.min())
+        y_hi = float(v_arr.max())
         margin = max(0.1, (y_hi - y_lo) * 0.15)
         target_lo = y_lo - margin
         target_hi = y_hi + margin
         alpha = 0.15
         self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
         self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
-        self._y_axis.setRange(self._y_min_smooth, self._y_max_smooth)
+        self._plot_widget.setYRange(self._y_min_smooth, self._y_max_smooth, padding=0)
 
-        self._series.replace(qpoints)
+        t_max = float(t_arr[-1])
+        t_min = t_max - self._view_sec
+        self._plot_widget.setXRange(max(0, t_min), t_max, padding=0)
+
+        self._curve.setData(t_arr, v_arr)
 
     def closeEvent(self, event):
         self.stop()
@@ -508,12 +545,15 @@ class View(QMainWindow):
 
         self.sdnn_series = QLineSeries()
         self.sdnn_series.setName("HRV/SDNN (ms)")
-        pen = QPen(QColor(30, 100, 220))
+        sdnn_color = QColor(0, 130, 255)
+        pen = QPen(sdnn_color)
         pen.setWidth(2)
         self.sdnn_series.setPen(pen)
 
         self.hrv_y_axis_right = QValueAxis()
         self.hrv_y_axis_right.setTitleText("HRV/SDNN (ms)")
+        self.hrv_y_axis_right.setTitleBrush(QBrush(sdnn_color))
+        self.hrv_y_axis_right.setLabelsColor(sdnn_color)
         self.hrv_y_axis_right.setRange(0, 50)
         self.hrv_widget.plot.addAxis(self.hrv_y_axis_right, Qt.AlignRight)
 
@@ -523,7 +563,20 @@ class View(QMainWindow):
 
         self.pacer_widget = PacerWidget(self.pacer.lung_x, self.pacer.lung_y)
         self.pacer_widget.setFixedSize(200, 200)
-        
+
+        self._hr_overlay = self._make_chart_overlay(self.ibis_widget)
+        self._hr_overlay.hide()
+        self._hrv_overlay = self._make_chart_overlay(self.hrv_widget)
+        self._hrv_overlay.hide()
+        self.ibis_widget.installEventFilter(self)
+        self.hrv_widget.installEventFilter(self)
+
+        self._connect_pulse_timer = QTimer()
+        self._connect_pulse_timer.setInterval(700)
+        self._connect_pulse_timer.timeout.connect(self._pulse_connect_button)
+        self._connect_pulse_on = False
+        self._sensor_pulse_active = False
+
         self.recording_statusbar = StatusBanner()
 
         # Labels
@@ -872,6 +925,7 @@ class View(QMainWindow):
         self.disconnect_button.setEnabled(False)
         self.sensor_page.connect_btn.setEnabled(False)
         self.sensor_page.disconnect_btn.setEnabled(False)
+        self._stop_connect_hints()
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (starting...)")
         self.sensor.connect_client(*sensor)
@@ -898,6 +952,11 @@ class View(QMainWindow):
         self._reset_signal_popup()
         self.recording_statusbar.set_disconnected()
         self.readiness_page.set_progress_disconnected()
+        current_page = self.wizard.current_index()
+        if current_page == MONITORING_PAGE_INDEX:
+            self._start_connect_hints()
+        elif current_page == 3:
+            self._start_sensor_page_pulse()
 
     def toggle_ecg_window(self):
         if self.ecg_window.isVisible():
@@ -915,6 +974,91 @@ class View(QMainWindow):
 
     def _on_ecg_window_closed(self):
         self.ecg_button.setText("ECG Monitor")
+
+    # ── Connect-CTA helpers ───────────────────────────────────────────
+
+    @staticmethod
+    def _make_chart_overlay(parent):
+        lbl = QLabel(
+            "No sensor connected\nPress Connect to begin",
+            parent,
+        )
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet(
+            "background: rgba(255, 255, 255, 180); "
+            "color: #636e72; font-size: 16px; font-weight: bold; "
+            "border-radius: 8px; padding: 20px;"
+        )
+        lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        return lbl
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Resize:
+            overlay = None
+            if obj is self.ibis_widget:
+                overlay = self._hr_overlay
+            elif obj is self.hrv_widget:
+                overlay = self._hrv_overlay
+            if overlay is not None:
+                overlay.resize(obj.size())
+        return super().eventFilter(obj, event)
+
+    def _start_connect_hints(self):
+        self._hr_overlay.show()
+        self._hrv_overlay.show()
+        if not self._connect_pulse_timer.isActive():
+            self._connect_pulse_on = False
+            self._connect_pulse_timer.start()
+
+    def _stop_connect_hints(self):
+        self._hr_overlay.hide()
+        self._hrv_overlay.hide()
+        self._connect_pulse_timer.stop()
+        self._connect_pulse_on = False
+        self.connect_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._stop_sensor_page_pulse()
+
+    _CONNECT_GLOW_CSS = (
+        "font-size: 11px; padding: 2px 6px; "
+        "background: #d4edda; border: 2px solid #28a745; border-radius: 3px;"
+    )
+    _CONNECT_NORMAL_CSS = "font-size: 11px; padding: 2px 6px;"
+
+    _SENSOR_BTN_NORMAL_CSS = (
+        "QPushButton { background: #27ae60; color: white; border: none; "
+        "border-radius: 5px; padding: 8px 18px; "
+        "font-size: 13px; font-weight: 600; } "
+        "QPushButton:disabled { background: #bdc3c7; color: #95a5a6; }"
+    )
+    _SENSOR_BTN_GLOW_CSS = (
+        "QPushButton { background: #2ecc71; color: white; "
+        "border: 2px solid #fff; border-radius: 5px; padding: 6px 16px; "
+        "font-size: 13px; font-weight: 600; } "
+        "QPushButton:disabled { background: #bdc3c7; color: #95a5a6; }"
+    )
+
+    def _start_sensor_page_pulse(self):
+        self._sensor_pulse_active = True
+        if not self._connect_pulse_timer.isActive():
+            self._connect_pulse_on = False
+            self._connect_pulse_timer.start()
+
+    def _stop_sensor_page_pulse(self):
+        self._sensor_pulse_active = False
+        self.sensor_page.connect_btn.setStyleSheet(self._SENSOR_BTN_NORMAL_CSS)
+
+    def _pulse_connect_button(self):
+        self._connect_pulse_on = not self._connect_pulse_on
+        if self.wizard.current_index() == MONITORING_PAGE_INDEX:
+            if self._connect_pulse_on:
+                self.connect_button.setStyleSheet(self._CONNECT_GLOW_CSS)
+            else:
+                self.connect_button.setStyleSheet(self._CONNECT_NORMAL_CSS)
+        if self._sensor_pulse_active:
+            if self._connect_pulse_on:
+                self.sensor_page.connect_btn.setStyleSheet(self._SENSOR_BTN_GLOW_CSS)
+            else:
+                self.sensor_page.connect_btn.setStyleSheet(self._SENSOR_BTN_NORMAL_CSS)
 
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, parent=self)
@@ -940,7 +1084,7 @@ class View(QMainWindow):
 
     def _reset_session_state(self):
         """Deferred reset — runs after the page jump is visually complete."""
-        if self.sensor.device_connected:
+        if self.sensor.client is not None:
             self.disconnect_sensor()
 
         # Uncheck all checkboxes across all pages
@@ -981,6 +1125,21 @@ class View(QMainWindow):
         """Populate the summary page when the user navigates to it."""
         if index == len(WIZARD_STEPS) - 1:
             self._populate_summary()
+
+        sensor_connected = self.sensor.client is not None
+        if index == MONITORING_PAGE_INDEX:
+            if not sensor_connected:
+                self._start_connect_hints()
+            else:
+                self._stop_connect_hints()
+        elif index == 3:
+            if not sensor_connected:
+                self._start_sensor_page_pulse()
+            else:
+                self._stop_sensor_page_pulse()
+        else:
+            self._connect_pulse_timer.stop()
+            self._stop_sensor_page_pulse()
 
     def _populate_summary(self):
         modality_key = self.modality_page.selected_modality
@@ -1099,8 +1258,7 @@ class View(QMainWindow):
         self.model.clear_buffers()
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
-        self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
-        self.health_label.setText("Signal: Identifying...")
+        self._set_signal_indicator("Identifying...", "gray")
         self.show_status("Baseline Reset. Waiting for data...")
         if hasattr(self, 'baseline_series'):
             self.baseline_series.clear()
@@ -1151,13 +1309,6 @@ class View(QMainWindow):
                 self.readiness_page.set_progress_settling(
                     int(elapsed), self.settings.SETTLING_DURATION
                 )
-                return
-
-            if self._rmssd_smooth_buf and not self.hrv_widget.time_series.count():
-                self._rmssd_smooth_buf.clear()
-                self._sdnn_smooth_buf.clear()
-                self._rmssd_smooth_buf.append(y)
-                smoothed_rmssd = y
 
             self.hrv_widget.time_series.append(x, smoothed_rmssd)
             self._session_rmssd_values.append(smoothed_rmssd)
@@ -1289,6 +1440,7 @@ class View(QMainWindow):
 
     def show_status(self, status: str, print_to_terminal=True):
         if "Connected" in status and "Disconnecting" not in status:
+            self._stop_connect_hints()
             self.is_phase_active = False
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
@@ -1376,10 +1528,19 @@ class View(QMainWindow):
         if silence >= self.settings.DATA_TIMEOUT_SECONDS and not self._fault_active:
             self._fault_active = True
             self._consecutive_good = 0
-            self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
-            self.health_label.setText("Signal: LOST (No data)")
+            self._set_signal_indicator("LOST (No data)", "red")
             self._show_signal_degraded_popup("No data received")
             self.model.clear_buffers()
+
+    def _in_settling(self):
+        return (self.start_time is not None
+                and (time.time() - self.start_time) < self.settings.SETTLING_DURATION)
+
+    def _set_signal_indicator(self, text: str, color: str):
+        """Update signal quality on both Monitoring and Sensors pages."""
+        self.health_indicator.setStyleSheet("color: %s; font-size: 18px;" % color)
+        self.health_label.setText("Signal: %s" % text)
+        self.sensor_page.update_signal_quality(text, color)
 
     def update_ui_labels(self, data: NamedSignal):
         # 1. RAW BEAT DATA (Heart Rate & Instant Faults)
@@ -1397,12 +1558,17 @@ class View(QMainWindow):
                 self.readiness_page.update_hr(display_hr)
                 self.start_seq_page.update_hr(display_hr)
 
+                if self._in_settling():
+                    remaining = int(self.settings.SETTLING_DURATION
+                                    - (time.time() - self.start_time)) + 1
+                    self._set_signal_indicator(f"Settling ({remaining}s)", "#2196F3")
+                    return
+
                 # LEVEL 1 FAULT: Total Dropout
                 if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
-                    self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
-                    self.health_label.setText("FAULT: Clearing Buffer...")
+                    self._set_signal_indicator("FAULT: Clearing Buffer...", "red")
                     self._show_signal_degraded_popup("Total signal dropout")
                     self.signals.request_buffer_reset.emit()
                     return
@@ -1411,8 +1577,7 @@ class View(QMainWindow):
                 if last_ibi_ms > self.settings.NOISE_IBI_HIGH_MS or last_ibi_ms < self.settings.NOISE_IBI_LOW_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
-                    self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
-                    self.health_label.setText("Signal: DROP/NOISE")
+                    self._set_signal_indicator("DROP/NOISE", "red")
                     self._show_signal_degraded_popup("Signal dropout or noise")
                     return
 
@@ -1427,9 +1592,7 @@ class View(QMainWindow):
                         if deviation > self.settings.DEVIATION_THRESHOLD:
                             self._fault_active = True
                             self._consecutive_good = 0
-                            avg_hr = int(60000.0 / avg_ibi)
-                            self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
-                            self.health_label.setText(f"Signal: ERRATIC (avg {avg_hr})")
+                            self._set_signal_indicator("ERRATIC \u2014 irregular beat", "red")
                             self._show_signal_degraded_popup("Erratic heart rate")
                             return
 
@@ -1440,8 +1603,7 @@ class View(QMainWindow):
                         self._fault_active = False
                         self._reset_signal_popup()
                         self.model.clear_buffers()
-                        self.health_indicator.setStyleSheet("color: #00FF00; font-size: 18px;")
-                        self.health_label.setText("Signal: GOOD")
+                        self._set_signal_indicator("GOOD", "#00FF00")
         
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":
@@ -1455,20 +1617,17 @@ class View(QMainWindow):
             rmssd_val = max(0, min(raw_rmssd, 250))
             self.rmssd_label.setText(f"RMSSD: {rmssd_val:.2f} ms")
             
-            if self._fault_active:
+            if self._fault_active or self._in_settling():
                 return
 
             if rmssd_val > 200:
-                self.health_indicator.setStyleSheet("color: red; font-size: 18px;")
-                self.health_label.setText("Signal: POOR (Dry?)")
+                self._set_signal_indicator("POOR (Dry?)", "red")
                 self._on_rmssd_degraded()
             elif rmssd_val > 150:
-                self.health_indicator.setStyleSheet("color: orange; font-size: 18px;")
-                self.health_label.setText("Signal: NOISY")
+                self._set_signal_indicator("NOISY", "orange")
                 self._on_rmssd_degraded()
             else:
-                self.health_indicator.setStyleSheet("color: #00FF00; font-size: 18px;")
-                self.health_label.setText("Signal: GOOD")
+                self._set_signal_indicator("GOOD", "#00FF00")
                 self._reset_signal_popup()
 
     def plot_ibis(self, data: NamedSignal):
@@ -1490,6 +1649,8 @@ class View(QMainWindow):
                 self.hr_trend_series.clear()
                 self.sdnn_series.clear()
                 self.hrv_widget.time_series.clear()
+                if self.ecg_button.text() != "ECG (waiting\u2026)":
+                    self.ecg_button.setText("ECG (waiting\u2026)")
                 if self.settings.DEBUG:
                     print("Timer Started")
 
@@ -1501,9 +1662,6 @@ class View(QMainWindow):
             else:
                 self._hr_ewma = w * hr + (1.0 - w) * self._hr_ewma
 
-            if elapsed < self.settings.SETTLING_DURATION:
-                return
-
             if not self.hr_trend_series.count():
                 self._hr_ewma = hr
 
@@ -1511,7 +1669,7 @@ class View(QMainWindow):
             self._session_hr_values.append(self._hr_ewma)
 
             total_cal = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
-            if elapsed < total_cal:
+            if self.settings.SETTLING_DURATION <= elapsed < total_cal:
                 self.baseline_hr_values.append(self._hr_ewma)
             elif self.baseline_hr is None and self.baseline_hr_values:
                 self.baseline_hr = sum(self.baseline_hr_values) / len(self.baseline_hr_values)

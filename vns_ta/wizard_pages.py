@@ -258,7 +258,7 @@ class WelcomeDisclaimerPage(QWidget):
         lay = QVBoxLayout(content)
         lay.setContentsMargins(60, 36, 60, 24)
         lay.setSpacing(0)
-        lay.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        lay.setAlignment(Qt.AlignTop)
 
         # ── Branding ───────────────────────────────────────────────────
         title = QLabel("VNS-TA")
@@ -985,9 +985,12 @@ class SensorPlacementPage(QWidget):
         """Update the live HR readout in the BLE status row."""
         self.ble_hr_label.setText("HR: <b>%d</b> BPM" % int(hr))
         self.ble_hr_label.setVisible(True)
-        self.ble_signal_label.setText("Signal: <b>GOOD</b>")
-        self.ble_signal_label.setStyleSheet("color: %s;" % _GREEN)
         self.ble_signal_label.setVisible(True)
+
+    def update_signal_quality(self, text: str, color: str):
+        """Mirror the monitoring-page signal indicator."""
+        self.ble_signal_label.setText("Signal: <b>%s</b>" % text)
+        self.ble_signal_label.setStyleSheet("color: %s;" % color)
 
     @property
     def spo2_value(self) -> int | None:

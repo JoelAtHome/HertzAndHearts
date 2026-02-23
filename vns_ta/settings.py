@@ -268,18 +268,6 @@ REGISTRY = OrderedDict([
         "section": "Advanced",
         "advanced": True,
     }),
-    ("ECG_TRIGGER_THRESHOLD", {
-        "display": "ECG Trigger Threshold",
-        "tooltip": (
-            "Initial R-peak detection threshold (mV) for the "
-            "oscilloscope-style ECG sweep.  Automatically adapts to "
-            "50%% of tracked peak amplitude during operation."
-        ),
-        "type": float, "min": 0.05, "max": 2.00, "step": 0.05,
-        "decimals": 2, "unit": "mV",
-        "section": "Advanced",
-        "advanced": True,
-    }),
     ("ECG_REFRESH_MS", {
         "display": "ECG Refresh Interval",
         "tooltip": (
