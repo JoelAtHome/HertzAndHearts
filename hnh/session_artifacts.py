@@ -60,3 +60,30 @@ def create_session_bundle(root: Path, profile_id: str = "Default") -> SessionBun
 
 def write_manifest(path: Path, payload: dict):
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+
+def default_qtc_payload() -> dict:
+    """Canonical QTc metadata scaffold until QTc estimation is implemented."""
+    return {
+        "session_value_ms": None,
+        "summary_method": "median_valid_window",
+        "summary_window_seconds": 30,
+        "status": "unavailable",
+        "quality": {
+            "is_valid": False,
+            "reason": "signal quality too low",
+            "minimum_valid_beats": 12,
+        },
+        "trend": {
+            "enabled": False,
+            "available": False,
+            "label": "For trend context only; clinical interpretation requires review.",
+        },
+        "formula_default": "bazett",
+        "formula_used": None,
+        "method_suggestion": {
+            "suggested_method": "bazett",
+            "reasoning": "Insufficient data to determine recommendation.",
+        },
+        "trend_point": None,
+    }

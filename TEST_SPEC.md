@@ -251,6 +251,21 @@
 
 ---
 
+## 18. QTc Presentation Format (Phased)
+
+> Run these checks when QTc surfacing is enabled. Until then, mark as **N/A**.
+
+| #   | Test | Expected Result | Status |
+|-----|------|-----------------|--------|
+| 18.1 | Verify end-of-session QTc summary label | Post-session/report output uses `QTc (session)` label and includes one canonical session value or unavailability message. | |
+| 18.2 | Verify quality-gated unavailable state | If QTc quality requirements are not met, output shows `QTc unavailable (signal quality too low)` or equivalent non-numeric unavailable text. | |
+| 18.3 | Verify canonical summary method | Session QTc is computed from the agreed canonical method (valid-window median), not an arbitrary instantaneous sample. | |
+| 18.4 | Verify trend visibility default | Dedicated QTc trend is hidden by default and only shown when explicitly enabled. | |
+| 18.5 | Verify trend safety copy | When QTc trend is shown, UI/report includes `For trend context only; clinical interpretation requires review.` | |
+| 18.6 | Verify report/manifest consistency | Session report and `session_manifest.json` agree on QTc availability, value, and trend-enabled state. | |
+
+---
+
 ## Results Summary
 
 | Section | Total | Pass | Fail | N/A |
@@ -272,7 +287,8 @@
 | 15. EWMA Trend | 2 | | | |
 | 16. Edge Cases | 10 | | | |
 | 17. Label ↔ Chart Consistency | 4 | | | |
-| **TOTAL** | **113** | | | |
+| 18. QTc Presentation Format | 6 | | | |
+| **TOTAL** | **119** | | | |
 
 **Tested by:** _______________  
 **Date:** _______________  

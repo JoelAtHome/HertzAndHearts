@@ -15,8 +15,11 @@ from hnh.config import (
     MAX_IBI,
     MIN_HRV_TARGET,
     MAX_HRV_TARGET,
+    ECG_SAMPLE_RATE,
 )
 from hnh.settings import Settings
+from hnh.qtc import QtcConfig, compute_qtc_payload_from_ecg
+from hnh.session_artifacts import default_qtc_payload
 
 
 class Model(QObject):
@@ -26,12 +29,17 @@ class Model(QObject):
     pacer_rate_update = Signal(NamedSignal)
     hrv_target_update = Signal(NamedSignal)
     stress_ratio_update = Signal(NamedSignal)
+    qtc_update = Signal(NamedSignal)
 
     def clear_buffers(self):
         """Wipes the data history to allow rapid recovery from noise."""
         self.ibis_buffer.clear()
         self.hrv_buffer.clear()
         self.rr_intervals.clear()
+        self._ecg_buffer.clear()
+        self._ecg_samples_since_qtc = 0
+        self._ecg_total_samples = 0
+        self.latest_qtc_payload = default_qtc_payload()
         self.ewma_hrv = 1.0
 
     def __init__(self):
@@ -61,6 +69,10 @@ class Model(QObject):
         self.rr_intervals = deque(maxlen=IBI_BUFFER_SIZE)
         self.rmssd = 0.0
         self.update_counter = 0
+        self._ecg_buffer: deque[float] = deque(maxlen=ECG_SAMPLE_RATE * 120)
+        self._ecg_samples_since_qtc = 0
+        self._ecg_total_samples = 0
+        self.latest_qtc_payload: dict = default_qtc_payload()
 
 
     def hr_handler(self, rr_ms):
@@ -93,6 +105,21 @@ class Model(QObject):
         self.update_counter += 1
         if self.update_counter % 5 == 0:
             self.compute_local_hrv()
+
+    @Slot(object)
+    def update_ecg_samples(self, samples):
+        if not samples:
+            return
+        try:
+            self._ecg_buffer.extend(float(x) for x in samples)
+        except Exception:
+            return
+        self._ecg_total_samples += len(samples)
+        self._ecg_samples_since_qtc += len(samples)
+        # Recompute every ~2 seconds of incoming ECG.
+        if self._ecg_samples_since_qtc >= ECG_SAMPLE_RATE * 2:
+            self._ecg_samples_since_qtc = 0
+            self._compute_qtc()
 
     
     @Slot(int)
@@ -232,3 +259,26 @@ class Model(QObject):
             [i - seconds for i in self.hrv_seconds], HRV_BUFFER_SIZE
         )
         self.hrv_seconds.append(0.0)
+
+    def _compute_qtc(self):
+        if len(self._ecg_buffer) < ECG_SAMPLE_RATE * 5:
+            return
+        cfg = QtcConfig(
+            sampling_rate=ECG_SAMPLE_RATE,
+            summary_window_seconds=int(self._settings.QTC_SUMMARY_WINDOW_SECONDS),
+            min_valid_beats=int(self._settings.QTC_MIN_VALID_BEATS),
+            fridericia_hr_low_threshold=int(self._settings.QTC_FRIDERICIA_HR_LOW_THRESHOLD),
+            fridericia_hr_high_threshold=int(self._settings.QTC_FRIDERICIA_HR_HIGH_THRESHOLD),
+            fridericia_hysteresis_bpm=int(self._settings.QTC_FRIDERICIA_HYSTERESIS_BPM),
+            max_rr_gap_seconds=float(self._settings.QTC_MAX_RR_GAP_SECONDS),
+            trend_enabled=bool(self._settings.QTC_TREND_ENABLED),
+            default_formula="bazett",
+        )
+        payload = compute_qtc_payload_from_ecg(list(self._ecg_buffer), cfg)
+        trend_point = payload.get("trend_point")
+        if isinstance(trend_point, dict):
+            trend_point["t_sec"] = float(self._ecg_total_samples) / float(ECG_SAMPLE_RATE)
+            if not payload.get("quality", {}).get("is_valid", False):
+                trend_point["is_low_quality"] = True
+        self.latest_qtc_payload = payload
+        self.qtc_update.emit(NamedSignal(name="qtc", value=payload))

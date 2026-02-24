@@ -28,6 +28,37 @@ Copy this block when adding a new item:
 
 Raw ideas go here first.
 
+### Contextual F1 help consistency across UI
+- Problem: Contextual help is currently uneven across windows, which makes discoverability and UX consistency weaker.
+- Proposed approach: Define and implement a global F1 help standard so each major window and workflow surface provides contextual guidance (matching style, tone, and depth).
+- Effort: M
+- Impact: High
+- Status: idea
+- Notes: Start with QTc, ECG, Poincare, main dashboard, Settings, and History. Include keyboard shortcut behavior, help content template, and acceptance checks for consistency. Complexity guardrail: do not turn help into feature sprawl; use it to simplify defaults and improve discoverability.
+
+Help content template (per screen):
+- Title: `<Screen Name> — Quick Guide`
+- Purpose (1 line): What this screen is for.
+- How to read/use (3-5 bullets): Core controls/visuals and their meaning.
+- Guardrails (1-3 bullets): Key caveats or non-diagnostic warnings where relevant.
+- Keyboard shortcuts: Include `F1` and any screen-specific shortcuts.
+- Next action (1 line): What users typically do after this screen.
+
+### Complexity guardrail check (anti "Swiss army knife" drift)
+- Problem: As capabilities expand, the app can drift into an overly complex experience that weakens usability for primary workflows.
+- Proposed approach: Add an explicit complexity review checkpoint for each major feature or release.
+- Effort: S
+- Impact: High
+- Status: idea
+- Notes: Keep default workflow simple, use progressive disclosure for advanced tools, and avoid increasing visible controls without strong evidence. Use a feature budget per screen and prioritize one primary user outcome per release.
+
+Complexity review checklist:
+- [ ] Does this feature improve the default workflow, or should it be advanced/opt-in?
+- [ ] Does this increase visible UI controls on the main screen beyond our feature budget?
+- [ ] Can this be merged into an existing interaction pattern instead of introducing a new mode/panel?
+- [ ] Is there usage evidence to justify promotion to default visibility?
+- [ ] Does this release still have one clearly dominant primary user outcome?
+
 ### Example: Save breathing presets
 - Problem: Users repeat the same target and breathing rate setup each session.
 - Proposed approach: Add named preset save/load controls in the main UI.
@@ -66,19 +97,30 @@ Top candidates after triage. Keep this list focused and ordered by value.
 
 ### 4) Decide QTc presentation format
 - Problem: It is unclear how QTc should be presented in a way that is useful and not misleading.
-- Proposed approach: Evaluate options such as a dedicated QTc plot, single end-of-session value, or both.
+- Proposed approach: Use both in phases: Phase 1 exposes a single end-of-session QTc summary with quality gating; Phase 2 adds an optional QTc trend plot after quality and smoothing validation.
 - Effort: S
 - Impact: Med
-- Status: triaged
-- Notes: Finalize UX before implementing calculation output.
+- Status: done
+- Notes: Decision locked. `QTc (session)` is the canonical MVP output; if quality checks fail, show `QTc unavailable (signal quality too low)`. Trend view remains optional and hidden by default until validated.
 
 ### 5) QTc estimation capability
 - Problem: The app currently lacks QTc estimate support for users who want a rough indication.
-- Proposed approach: Add QTc estimation with clear messaging that results are approximate.
+- Proposed approach: Implement QTc estimation against the locked presentation contract: Phase 1 fills end-of-session `QTc (session)` only; Phase 2 optionally enables trend output when quality gates pass.
 - Effort: M
 - Impact: Med
-- Status: triaged
-- Notes: Show prominent disclaimer that estimate may be off by around 15% and is not diagnostic.
+- Status: planned
+- Notes: Populate `qtc` report payload and `metrics.qtc` manifest fields (`session_value_ms`, `summary_method`, `summary_window_seconds`, `status`, `quality`, `trend`) with non-diagnostic messaging and quality-gated unavailable fallback. Data-driven method recommendation is already computed in `qtc.method_suggestion` (`suggested_method`, `reasoning`) and must be surfaced in report/UI so it is not lost.
+
+Implementation checklist:
+- [ ] Choose QT correction formula for MVP (default: Bazett) and record formula id in `qtc.summary_method` or adjacent metadata.
+- [ ] Define QT/QRS beat-quality gates (minimum valid beats, noise/artifact rejection, max gap between valid beats).
+- [ ] Implement canonical session summary as median of valid-window QTc values over final 30 seconds (`summary_window_seconds=30`).
+- [ ] Implement unavailable fallback path when quality gates fail (`status=unavailable`, `quality.is_valid=false`, `quality.reason` populated).
+- [ ] Populate report output `QTc (session)` from `qtc.session_value_ms` with non-diagnostic copy.
+- [ ] Keep `qtc.trend.enabled=false` by default and add explicit feature toggle path for Phase 2.
+- [ ] Surface `qtc.method_suggestion` in report/UI (`suggested_method` + plain-language `reasoning`) and include non-diagnostic wording.
+- [ ] Add synthetic test vectors for known QT/RR pairs and expected QTc ranges across low/normal/high heart rates.
+- [ ] Add replay tests on recorded noisy sessions to verify stable summary and proper unavailable behavior.
 
 ### 6) Add profile demographics metadata (age, gender, notes)
 - Problem: Profile records currently do not capture key contextual demographics needed for interpretation and reporting.
@@ -87,6 +129,134 @@ Top candidates after triage. Keep this list focused and ordered by value.
 - Impact: High
 - Status: done
 - Notes: Implemented in profile store schema and Profile Manager details form.
+
+### 7) [F20] Finalize-time quality checklist
+- Problem: Sessions can be finalized with low-quality or incomplete context, which increases interpretation risk.
+- Proposed approach: Add a pre-finalize checklist for data quality, baseline completeness, and report-readiness warnings.
+- Effort: S
+- Impact: High
+- Status: planned
+- Notes: Include explicit confirm/override flow and a persisted checklist outcome in `session_manifest.json`.
+
+### 8) [F01] Live Signal Quality Index (SQI) strip
+- Problem: Users lack a single quantitative confidence indicator across session timeline and outputs.
+- Proposed approach: Compute and display a continuous SQI strip (or score) that reflects confidence in current physiological outputs.
+- Effort: M
+- Impact: High
+- Status: planned
+- Notes: Start with HR/RMSSD/QTc confidence blend and expose component reasons (dropout/noise/instability).
+
+### 9) [F04] Confidence badges on all outputs
+- Problem: Metric labels can appear equally trustworthy even when underlying signal quality differs.
+- Proposed approach: Add High/Moderate/Low confidence badges for key outputs and reports.
+- Effort: M
+- Impact: High
+- Status: triaged
+- Notes: Depends on SQI and quality-rule definitions; align wording with non-diagnostic guardrails.
+
+### 10) [F12] One-page clinical summary PDF
+- Problem: Current reports are comprehensive but may be too long for fast handoff contexts.
+- Proposed approach: Add a concise one-page summary export focused on key pre/post values, quality, and notable events.
+- Effort: M
+- Impact: High
+- Status: planned
+- Notes: Keep this as a companion export, not a replacement for the full report.
+
+### 11) [F15] Versioned analysis metadata
+- Problem: Reproducibility is harder without explicit algorithm/settings version traces per session.
+- Proposed approach: Store analysis version, formula strategy, and settings hash with each session artifact.
+- Effort: S
+- Impact: High
+- Status: planned
+- Notes: Add stable keys to manifest and include in report footer/appendix.
+
+### 12) [F06] Serial session comparison view
+- Problem: It is difficult to compare current session outcomes against recent personal history at a glance.
+- Proposed approach: Add a dedicated serial comparison view for selected sessions with aligned metrics and deltas.
+- Effort: M
+- Impact: High
+- Status: triaged
+- Notes: Prioritize QTc/RMSSD/HR plus confidence overlays.
+
+### 13) [F13] Session replay mode
+- Problem: Post-session review lacks synchronized playback for metric changes and annotations.
+- Proposed approach: Add timeline replay for recorded sessions with marker navigation and synchronized chart state.
+- Effort: M
+- Impact: High
+- Status: triaged
+- Notes: Include variable playback speed and jump-to-annotation controls.
+
+### 14) [F24] Import connectors (common RR/ECG formats)
+- Problem: Historical/external recordings are hard to analyze in-app without native import paths.
+- Proposed approach: Add import support for common formats and selected ecosystem exports, then run the same analysis pipeline.
+- Effort: M
+- Impact: High
+- Status: triaged
+- Notes: Start with CSV/EDF plus one high-value vendor export profile.
+
+### 15) [F08] Tag correlation analytics
+- Problem: Tagged events are captured but not leveraged to explain metric changes.
+- Proposed approach: Compute and visualize correlations between tags and metric shifts over time.
+- Effort: M
+- Impact: Med
+- Status: triaged
+- Notes: Show association confidence and sample-size caveats to avoid over-interpretation.
+
+### 16) [F09] Circadian heatmap (hour/day patterns)
+- Problem: Time-of-day patterns in stress/recovery signals are not easily visible.
+- Proposed approach: Add heatmap views for metric distributions by hour and day-of-week.
+- Effort: M
+- Impact: Med
+- Status: triaged
+- Notes: Requires enough historical sessions for stable interpretation.
+
+### 17) [F16] Export bundle profiles
+- Problem: Different audiences need different export packages, but current export is one-size-fits-all.
+- Proposed approach: Add export presets (`research`, `clinical review`, `raw`) with deterministic contents.
+- Effort: M
+- Impact: Med
+- Status: triaged
+- Notes: Include manifest-level provenance and file list per bundle.
+
+### 18) [F10] "What changed?" auto-insight card
+- Problem: Users must manually infer the most important session-to-session changes.
+- Proposed approach: Generate a concise auto-insight card summarizing largest shifts and likely drivers.
+- Effort: L
+- Impact: Med
+- Status: triaged
+- Notes: Keep language cautious and confidence-aware; avoid diagnostic phrasing.
+
+### 19) [F11] Population/peer percentile norms
+- Problem: Session interpretation lacks normative context across demographics.
+- Proposed approach: Add optional percentile context by age/sex and quality-filtered cohorts.
+- Effort: L
+- Impact: Med
+- Status: triaged
+- Notes: Requires validated reference datasets and transparent provenance.
+
+### 20) [F31] SpO2/BP integration panel (manual first, device later)
+- Problem: Cardiovascular context is incomplete when SpO2/BP is absent from session workflow.
+- Proposed approach: Add manual SpO2/BP entry first, then optional device integrations for auto-capture.
+- Effort: M
+- Impact: Med
+- Status: triaged
+- Notes: Manual-entry phase is feasible now; device phase depends on vendor protocol/API support.
+
+### 21) [F26] EMR-friendly exports (structured PDF/CSV mappings)
+- Problem: Clinical workflow handoff often requires structured artifacts compatible with records systems.
+- Proposed approach: Add structured export profiles and field mappings suitable for EMR ingestion workflows.
+- Effort: L
+- Impact: Med
+- Status: triaged
+- Notes: Full HL7/FHIR/DICOM integration is out of scope for near-term Python desktop delivery.
+
+### 22) [F28] Arrhythmia pre-screen flags (non-diagnostic)
+- Problem: High-risk rhythm patterns may be missed without explicit pre-screening cues.
+- Proposed approach: Add non-diagnostic rhythm suspicion flags (e.g., AF/PVC tendency) with strict quality gating.
+- Effort: L
+- Impact: Med
+- Status: triaged
+- Notes: Requires careful validation and conservative UX to avoid diagnostic overreach; limited by single-lead constraints.
 
 ## PlannedNext
 
@@ -148,6 +318,11 @@ Completed items. Include completion date and optional version reference.
 - Completed: 2026-02-24
 - Outcome: Profile records now persist age, gender, and notes; Profile Manager includes editable fields with save action.
 - Notes: Demographics are currently profile metadata only (not yet surfaced in report documents).
+
+### Decide QTc presentation format
+- Completed: 2026-02-24
+- Outcome: Presentation format locked to phased rollout: end-of-session QTc summary first, optional dedicated trend plot second.
+- Notes: Implementation must enforce quality gating, non-diagnostic copy, and explicit trend-context labeling before enabling trend by default.
 
 ## Triage Workflow
 

@@ -143,6 +143,26 @@ REGISTRY = OrderedDict([
         "section": "ECG Monitor",
     }),
 
+    # --- QTc Estimation ---
+    ("QTC_SUMMARY_WINDOW_SECONDS", {
+        "display": "QTc Summary Window",
+        "tooltip": (
+            "Seconds from the end of the session used to compute the "
+            "canonical QTc summary value (median of valid beats)."
+        ),
+        "type": int, "min": 10, "max": 120, "unit": "seconds",
+        "section": "QTc Estimation",
+    }),
+    ("QTC_MIN_VALID_BEATS", {
+        "display": "QTc Min Valid Beats",
+        "tooltip": (
+            "Minimum number of valid QT/RR beats required before showing "
+            "a session QTc value."
+        ),
+        "type": int, "min": 3, "max": 60, "unit": "beats",
+        "section": "QTc Estimation",
+    }),
+
     # --- Developer ---
     ("DEBUG", {
         "display": "Debug Mode",
@@ -228,6 +248,57 @@ REGISTRY = OrderedDict([
             "Takes effect the next time the ECG window is opened."
         ),
         "type": int, "min": 16, "max": 100, "unit": "ms",
+        "section": "Advanced",
+        "advanced": True,
+    }),
+    ("QTC_FRIDERICIA_HR_LOW_THRESHOLD", {
+        "display": "QTc Fridericia Low HR Threshold",
+        "tooltip": (
+            "If QTc default correction is Bazett, switch to Fridericia "
+            "below this heart-rate threshold."
+        ),
+        "type": int, "min": 35, "max": 80, "unit": "bpm",
+        "section": "Advanced",
+        "advanced": True,
+    }),
+    ("QTC_FRIDERICIA_HR_HIGH_THRESHOLD", {
+        "display": "QTc Fridericia High HR Threshold",
+        "tooltip": (
+            "If QTc default correction is Bazett, switch to Fridericia "
+            "above this heart-rate threshold."
+        ),
+        "type": int, "min": 80, "max": 160, "unit": "bpm",
+        "section": "Advanced",
+        "advanced": True,
+    }),
+    ("QTC_FRIDERICIA_HYSTERESIS_BPM", {
+        "display": "QTc Fridericia Hysteresis",
+        "tooltip": (
+            "BPM margin used to avoid rapid formula toggling near "
+            "Fridericia low/high thresholds."
+        ),
+        "type": int, "min": 0, "max": 20, "unit": "bpm",
+        "section": "Advanced",
+        "advanced": True,
+    }),
+    ("QTC_MAX_RR_GAP_SECONDS", {
+        "display": "QTc Max RR Gap",
+        "tooltip": (
+            "Maximum allowed RR gap between consecutive valid beats before "
+            "QTc summary quality is downgraded."
+        ),
+        "type": float, "min": 1.0, "max": 5.0, "step": 0.1,
+        "decimals": 1, "unit": "seconds",
+        "section": "Advanced",
+        "advanced": True,
+    }),
+    ("QTC_TREND_ENABLED", {
+        "display": "Enable QTc Trend Output",
+        "tooltip": (
+            "Allow dedicated QTc trend output. Keep disabled for MVP unless "
+            "you have validated trend quality and smoothing."
+        ),
+        "type": bool,
         "section": "Advanced",
         "advanced": True,
     }),

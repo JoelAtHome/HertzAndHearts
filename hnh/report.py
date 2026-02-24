@@ -43,12 +43,24 @@ def _fmt(val, unit: str = "", precision: int = 1) -> str:
     return f"{val} {unit}".strip()
 
 
+def _fmt_qtc_session_value(qtc_data: dict) -> str:
+    value = qtc_data.get("session_value_ms")
+    if value is None:
+        quality = qtc_data.get("quality", {})
+        reason = quality.get("reason")
+        if reason:
+            return f"QTc unavailable ({reason})"
+        return "QTc unavailable (signal quality too low)"
+    return _fmt(value, "ms", 0)
+
+
 def generate_session_report(path: str, data: dict) -> None:
     """Generate a .docx session report.
 
     Expected keys in *data*:
         baseline_hr, baseline_rmssd,
         last_hr, last_rmssd,
+        qtc,
         session_type,
         session_start (datetime), session_end (datetime),
         csv_path,
@@ -100,6 +112,7 @@ def generate_session_report(path: str, data: dict) -> None:
     _add_heading(doc, "Post-Session Readings")
     pre_rmssd = data.get("baseline_rmssd")
     post_rmssd = data.get("last_rmssd")
+    qtc_data = data.get("qtc", {}) or {}
     delta_rmssd = "--"
     if pre_rmssd is not None and post_rmssd is not None and pre_rmssd > 0:
         pct = ((post_rmssd - pre_rmssd) / pre_rmssd) * 100
@@ -108,7 +121,15 @@ def generate_session_report(path: str, data: dict) -> None:
         ("Heart Rate", _fmt(data.get("last_hr"), "bpm", 0)),
         ("RMSSD", _fmt(post_rmssd, "ms")),
         ("\u0394 RMSSD from Baseline", delta_rmssd),
+        ("QTc (session)", _fmt_qtc_session_value(qtc_data)),
     ])
+    qtc_trend = qtc_data.get("trend", {})
+    if qtc_trend.get("enabled"):
+        trend_label = qtc_trend.get(
+            "label",
+            "For trend context only; clinical interpretation requires review.",
+        )
+        _add_key_value_table(doc, [("QTc Trend Note", trend_label)])
 
     # Section 4: Intra-Session Statistics
     _add_heading(doc, "Intra-Session Statistics")

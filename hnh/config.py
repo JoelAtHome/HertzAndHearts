@@ -159,6 +159,30 @@ DEVIATION_MIN_SAMPLES: Final[int] = 10
 RECOVERY_BEATS: Final[int] = 10
 
 # ──────────────────────────────────────────────────────────────────────
+#  QTC ESTIMATION
+# ──────────────────────────────────────────────────────────────────────
+# Canonical session summary window.
+QTC_SUMMARY_WINDOW_SECONDS: Final[int] = 30
+
+# Minimum valid beats needed to publish a QTc summary value.
+QTC_MIN_VALID_BEATS: Final[int] = 12
+
+# If default formula is Bazett, switch to Fridericia below this HR.
+QTC_FRIDERICIA_HR_LOW_THRESHOLD: Final[int] = 50
+
+# If default formula is Bazett, switch to Fridericia above this HR.
+QTC_FRIDERICIA_HR_HIGH_THRESHOLD: Final[int] = 100
+
+# Hysteresis band used to prevent rapid method toggling around thresholds.
+QTC_FRIDERICIA_HYSTERESIS_BPM: Final[int] = 5
+
+# Maximum allowed gap between consecutive valid beats for QTc summary.
+QTC_MAX_RR_GAP_SECONDS: Final[float] = 2.5
+
+# Dedicated QTc trend is disabled by default for MVP.
+QTC_TREND_ENABLED: Final[bool] = False
+
+# ──────────────────────────────────────────────────────────────────────
 #  ANNOTATION PRESETS
 # ──────────────────────────────────────────────────────────────────────
 # Factory-default annotations shown in the monitoring page's annotation
