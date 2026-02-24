@@ -15,6 +15,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import (
     Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
     QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
+    QEventLoop,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
@@ -39,7 +40,12 @@ from hnh.config import (
 )
 from hnh.settings import Settings, SettingsDialog, REGISTRY
 from hnh.report import generate_session_report
-from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
+from hnh.session_artifacts import (
+    SessionBundle,
+    create_session_bundle,
+    default_qtc_payload,
+    write_manifest,
+)
 from hnh.profile_store import ProfileStore
 from hnh import __version__ as version, resources  # noqa
 import warnings
@@ -1064,6 +1070,9 @@ class EcgWindow(QMainWindow):
         )
 
         self._frozen = False
+        self._timeline_offset_sec = 0.0
+        self._synced_xrange: tuple[float, float] | None = None
+        self._follow_main_xrange = True
 
         self._zoom_out_button = QPushButton("\u2212")
         self._zoom_out_button.setFixedWidth(28)
@@ -1078,6 +1087,11 @@ class EcgWindow(QMainWindow):
         self._freeze_button = QPushButton("Freeze")
         self._freeze_button.setFixedWidth(80)
         self._freeze_button.clicked.connect(self._toggle_freeze)
+        self._relock_button = QPushButton("Relock")
+        self._relock_button.setFixedWidth(64)
+        self._relock_button.setToolTip("Relock this chart to the main plot time range.")
+        self._relock_button.clicked.connect(self._relock_to_main_xrange)
+        self._relock_button.setEnabled(False)
 
         self._statusbar = QStatusBar()
         zoom_label = QLabel("Zoom:")
@@ -1085,6 +1099,7 @@ class EcgWindow(QMainWindow):
         self._statusbar.addPermanentWidget(zoom_label)
         self._statusbar.addPermanentWidget(self._zoom_out_button)
         self._statusbar.addPermanentWidget(self._zoom_in_button)
+        self._statusbar.addPermanentWidget(self._relock_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
         self.setStatusBar(self._statusbar)
         self._statusbar.showMessage("Waiting for ECG data...")
@@ -1098,12 +1113,13 @@ class EcgWindow(QMainWindow):
     def start(self):
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
         self._view_sec = float(self._display_sec)
+        self._follow_main_xrange = True
+        self._relock_button.setEnabled(False)
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
         buf_size = ECG_SAMPLE_RATE * self._history_sec
         self._times = deque(maxlen=buf_size)
         self._values = deque(maxlen=buf_size)
-        self._sample_count = 0
         self._drain_rate = max(1, int(
             ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
         ))
@@ -1116,7 +1132,9 @@ class EcgWindow(QMainWindow):
         inv_rate = 1.0 / ECG_SAMPLE_RATE
         while self._pending:
             val = self._pending.popleft()
-            self._times.append(self._sample_count * inv_rate)
+            self._times.append(
+                (self._sample_count * inv_rate) + self._timeline_offset_sec
+            )
             self._values.append(val)
             self._sample_count += 1
         self._got_first_data = len(self._times) > 0
@@ -1127,6 +1145,23 @@ class EcgWindow(QMainWindow):
         else:
             self._statusbar.showMessage("Waiting for ECG data from sensor\u2026")
 
+    def clear(self):
+        self._refresh_timer.stop()
+        self._times.clear()
+        self._values.clear()
+        self._pending.clear()
+        self._sample_count = 0
+        self._timeline_offset_sec = 0.0
+        self._synced_xrange = None
+        self._follow_main_xrange = True
+        self._relock_button.setEnabled(False)
+        self._got_first_data = False
+        self._frozen = False
+        self._freeze_button.setText("Freeze")
+        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._curve.setData([], [])
+        self._statusbar.showMessage("Waiting for ECG data...")
+
     def stop(self):
         self._refresh_timer.stop()
         self._frozen = False
@@ -1135,7 +1170,10 @@ class EcgWindow(QMainWindow):
         self._statusbar.showMessage("ECG stopped.")
 
     def _toggle_freeze(self):
-        self._frozen = not self._frozen
+        self.set_stream_frozen(not self._frozen)
+
+    def set_stream_frozen(self, frozen: bool):
+        self._frozen = bool(frozen)
         if self._frozen:
             self._freeze_button.setText("Resume")
             self._plot_widget.setMouseEnabled(x=True, y=False)
@@ -1144,17 +1182,32 @@ class EcgWindow(QMainWindow):
             self._freeze_button.setText("Freeze")
             self._plot_widget.setMouseEnabled(x=False, y=False)
             self._view_sec = float(self._display_sec)
-            self._statusbar.showMessage("ECG streaming...")
+            self._statusbar.showMessage(
+                "ECG streaming..." if self._got_first_data else "Waiting for ECG data..."
+            )
 
     def _zoom_in(self):
+        if self._follow_main_xrange:
+            self._follow_main_xrange = False
+            self._relock_button.setEnabled(True)
         self._view_sec = max(0.5, self._view_sec / 2)
         if self._frozen:
             self._refresh_frozen_view()
 
     def _zoom_out(self):
+        if self._follow_main_xrange:
+            self._follow_main_xrange = False
+            self._relock_button.setEnabled(True)
         self._view_sec = min(self._max_view_sec, self._view_sec * 2)
         if self._frozen:
             self._refresh_frozen_view()
+
+    def _relock_to_main_xrange(self):
+        self._follow_main_xrange = True
+        self._relock_button.setEnabled(False)
+        if self._synced_xrange is not None and not self._frozen:
+            x_lo, x_hi = self._synced_xrange
+            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
 
     def _refresh_frozen_view(self):
         if len(self._times) < 2:
@@ -1175,6 +1228,34 @@ class EcgWindow(QMainWindow):
         max_pending = ECG_SAMPLE_RATE * 10
         while len(self._pending) > max_pending:
             self._pending.popleft()
+
+    def sync_timeline_to_main(self, main_plot_delay_sec: float):
+        inv_rate = 1.0 / ECG_SAMPLE_RATE
+        current_raw_t = self._sample_count * inv_rate
+        new_offset = -float(main_plot_delay_sec) - current_raw_t
+        delta = new_offset - self._timeline_offset_sec
+        if delta != 0.0 and self._times:
+            self._times = deque(
+                (t + delta for t in self._times),
+                maxlen=self._times.maxlen,
+            )
+        self._timeline_offset_sec = new_offset
+
+    def set_synced_xrange(self, x_lo: float, x_hi: float):
+        self._synced_xrange = (float(x_lo), float(x_hi))
+        if self._follow_main_xrange and self._times:
+            target_right = float(x_hi) - 2.0
+            latest = float(self._times[-1])
+            delta = target_right - latest
+            # Keep ECG trace anchored to the same right-edge semantics as main.
+            if abs(delta) > 0.75:
+                self._times = deque(
+                    (t + delta for t in self._times),
+                    maxlen=self._times.maxlen,
+                )
+                self._timeline_offset_sec += delta
+        if self._follow_main_xrange and not self._frozen:
+            self._plot_widget.setXRange(float(x_lo), float(x_hi), padding=0)
 
     def _redraw(self):
         if self._frozen:
@@ -1198,7 +1279,9 @@ class EcgWindow(QMainWindow):
         inv_rate = 1.0 / ECG_SAMPLE_RATE
         for _ in range(drain):
             val = self._pending.popleft()
-            self._times.append(self._sample_count * inv_rate)
+            self._times.append(
+                (self._sample_count * inv_rate) + self._timeline_offset_sec
+            )
             self._values.append(val)
             self._sample_count += 1
 
@@ -1220,10 +1303,272 @@ class EcgWindow(QMainWindow):
         self._plot_widget.setYRange(self._y_min_smooth, self._y_max_smooth, padding=0)
 
         t_max = float(t_arr[-1])
-        t_min = t_max - self._view_sec
-        self._plot_widget.setXRange(max(0, t_min), t_max, padding=0)
+        if self._follow_main_xrange and self._synced_xrange is not None:
+            x_lo, x_hi = self._synced_xrange
+            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
+        else:
+            x_hi = t_max + 2.0
+            x_lo = x_hi - self._view_sec
+            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
 
         self._curve.setData(t_arr, v_arr)
+
+    def closeEvent(self, event):
+        self.stop()
+        self.closed.emit()
+        super().closeEvent(event)
+
+
+class QtcWindow(QMainWindow):
+    closed = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Hertz & Hearts — QTc Monitor")
+        self.setMinimumSize(600, 300)
+        self.resize(900, 350)
+
+        self._plot_widget = pg.PlotWidget(background="w")
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.25)
+        self._plot_widget.setLabel("left", "QTc (ms)", color="k")
+        self._plot_widget.setLabel("bottom", "Seconds", color="k")
+        self._plot_widget.getAxis("left").setTextPen("k")
+        self._plot_widget.getAxis("bottom").setTextPen("k")
+        self._plot_widget.getAxis("left").setPen(pg.mkPen("k"))
+        self._plot_widget.getAxis("bottom").setPen(pg.mkPen("k"))
+        self._plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
+        self._plot_widget.setYRange(410, 505, padding=0)
+        self._plot_widget.setXRange(0, 60, padding=0)
+        self._plot_widget.addLegend(offset=(8, 8))
+
+        # Highlight elevated QTc region.
+        self._high_qtc_region = pg.LinearRegionItem(
+            values=(470, 510),
+            orientation=pg.LinearRegionItem.Horizontal,
+            movable=False,
+            brush=(220, 80, 80, 32),
+            pen=pg.mkPen((220, 80, 80, 40)),
+        )
+        self._plot_widget.addItem(self._high_qtc_region)
+        self._threshold_line = pg.InfiniteLine(
+            pos=470,
+            angle=0,
+            pen=pg.mkPen((180, 90, 90, 170), width=1),
+        )
+        self._plot_widget.addItem(self._threshold_line)
+        self._threshold_label = pg.TextItem(
+            text="470 ms threshold",
+            color=(120, 80, 80),
+            anchor=(1, 0),
+        )
+        self._plot_widget.addItem(self._threshold_label)
+
+        self._upper_curve = self._plot_widget.plot(
+            pen=pg.mkPen((60, 120, 190, 30), width=1),
+            name="Uncertainty band (IQR)",
+        )
+        self._lower_curve = self._plot_widget.plot(pen=pg.mkPen((60, 120, 190, 30), width=1))
+        self._band = pg.FillBetweenItem(
+            self._upper_curve, self._lower_curve, brush=pg.mkBrush(70, 130, 210, 70)
+        )
+        self._plot_widget.addItem(self._band)
+
+        self._median_curve = self._plot_widget.plot(
+            pen=pg.mkPen((30, 78, 153), width=2.2),
+            name="Rolling median QTc",
+        )
+        self._low_quality_curve = self._plot_widget.plot(
+            pen=pg.mkPen((85, 140, 205), width=2, style=Qt.DashLine),
+            name="Low-quality interval",
+        )
+
+        self._statusbar = QStatusBar()
+        self._info_button = QPushButton("Info")
+        self._info_button.setFixedWidth(64)
+        self._info_button.setToolTip("How to interpret QTc trend and uncertainty.")
+        self._info_button.clicked.connect(self._show_info)
+        self._freeze_button = QPushButton("Freeze QTc")
+        self._freeze_button.setFixedWidth(92)
+        self._freeze_button.clicked.connect(self._toggle_freeze)
+        self._statusbar.addPermanentWidget(self._info_button)
+        self._statusbar.addPermanentWidget(self._freeze_button)
+        self.setStatusBar(self._statusbar)
+        self._statusbar.showMessage(
+            "Waiting for QTc trend points... For trend context only; clinical interpretation requires review."
+        )
+
+        self.setCentralWidget(self._plot_widget)
+        self._frozen = False
+        self._timeline_offset_sec = 0.0
+        self._synced_xrange: tuple[float, float] | None = None
+        self._history_sec = 20 * 60
+        self._times = deque(maxlen=1200)
+        self._medians = deque(maxlen=1200)
+        self._p25 = deque(maxlen=1200)
+        self._p75 = deque(maxlen=1200)
+        self._lowq = deque(maxlen=1200)
+
+    def _show_info(self):
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("QTc Trend Guide")
+        msg.setText(
+            "<b>How to read this chart</b><br><br>"
+            "• <b>Rolling median QTc</b>: smoothed central QTc estimate.<br>"
+            "• <b>Uncertainty band (IQR)</b>: wider band means less confidence.<br>"
+            "• <b>Dashed segments</b>: lower signal quality periods.<br>"
+            "• <b>Shaded area above 470 ms</b>: elevated reference zone."
+        )
+        msg.setInformativeText("Trend context only; requires clinical review.")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setMinimumWidth(520)
+        flags = msg.windowFlags()
+        flags &= ~Qt.WindowMinimizeButtonHint
+        flags &= ~Qt.WindowMaximizeButtonHint
+        flags |= Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
+        msg.setWindowFlags(flags)
+        msg.open()
+
+    def clear(self):
+        self._times.clear()
+        self._medians.clear()
+        self._p25.clear()
+        self._p75.clear()
+        self._lowq.clear()
+        self._timeline_offset_sec = 0.0
+        self._synced_xrange = None
+        self._median_curve.setData([], [])
+        self._low_quality_curve.setData([], [])
+        self._upper_curve.setData([], [])
+        self._lower_curve.setData([], [])
+        self._statusbar.showMessage("Waiting for QTc trend points...")
+
+    def start(self):
+        self._frozen = False
+        self._freeze_button.setText("Freeze QTc")
+
+    def stop(self):
+        self._frozen = False
+        self._freeze_button.setText("Freeze QTc")
+
+    def _toggle_freeze(self):
+        self.set_stream_frozen(not self._frozen)
+
+    def set_stream_frozen(self, frozen: bool):
+        self._frozen = bool(frozen)
+        self._freeze_button.setText("Resume QTc" if self._frozen else "Freeze QTc")
+        if self._frozen:
+            self._statusbar.showMessage("QTc view frozen.")
+        else:
+            self._statusbar.showMessage("QTc streaming.")
+            self._redraw()
+
+    def sync_timeline_to_main(self, main_plot_delay_sec: float):
+        current_raw_t = float(self._times[-1]) if self._times else 0.0
+        new_offset = -float(main_plot_delay_sec) - current_raw_t
+        delta = new_offset - self._timeline_offset_sec
+        if delta != 0.0 and self._times:
+            self._times = deque(
+                (t + delta for t in self._times),
+                maxlen=self._times.maxlen,
+            )
+        self._timeline_offset_sec = new_offset
+
+    def set_synced_xrange(self, x_lo: float, x_hi: float):
+        self._synced_xrange = (float(x_lo), float(x_hi))
+        if self._times:
+            target_right = float(x_hi) - 2.0
+            latest = float(self._times[-1])
+            delta = target_right - latest
+            # QTc updates less frequently; tolerate small lag, correct large drift.
+            if abs(delta) > 4.0:
+                self._times = deque(
+                    (t + delta for t in self._times),
+                    maxlen=self._times.maxlen,
+                )
+                self._timeline_offset_sec += delta
+        if not self._frozen:
+            self._plot_widget.setXRange(float(x_lo), float(x_hi), padding=0)
+
+    def append_payload(self, payload: dict):
+        if not isinstance(payload, dict):
+            return
+        trend_point = payload.get("trend_point")
+        if not isinstance(trend_point, dict):
+            quality = payload.get("quality", {}) if isinstance(payload, dict) else {}
+            reason = quality.get("reason") if isinstance(quality, dict) else None
+            if isinstance(reason, str) and reason.strip():
+                self._statusbar.showMessage(f"QTc waiting: {reason}.")
+            return
+        try:
+            t_sec = float(trend_point["t_sec"]) + self._timeline_offset_sec
+            median_ms = float(trend_point["median_ms"])
+            p25_ms = float(trend_point["p25_ms"])
+            p75_ms = float(trend_point["p75_ms"])
+            is_low_quality = bool(trend_point.get("is_low_quality", False))
+        except (KeyError, TypeError, ValueError):
+            return
+
+        # Stream resets can rewind t_sec to near zero; clear stale history to
+        # prevent overplotted artifacts after reconnect/recovery.
+        if self._times and t_sec < (self._times[-1] - 5.0):
+            self.clear()
+
+        if self._times and t_sec <= self._times[-1]:
+            self._times[-1] = t_sec
+            self._medians[-1] = median_ms
+            self._p25[-1] = p25_ms
+            self._p75[-1] = p75_ms
+            self._lowq[-1] = is_low_quality
+        else:
+            self._times.append(t_sec)
+            self._medians.append(median_ms)
+            self._p25.append(p25_ms)
+            self._p75.append(p75_ms)
+            self._lowq.append(is_low_quality)
+        if not self._frozen:
+            self._redraw()
+
+    def _redraw(self):
+        if len(self._times) < 1:
+            return
+
+        x = np.asarray(self._times, dtype=float)
+        y = np.asarray(self._medians, dtype=float)
+        lo = np.asarray(self._p25, dtype=float)
+        hi = np.asarray(self._p75, dtype=float)
+        lowq = np.asarray(self._lowq, dtype=bool)
+        order = np.argsort(x)
+        x = x[order]
+        y = y[order]
+        lo = lo[order]
+        hi = hi[order]
+        lowq = lowq[order]
+
+        y_good = y.copy()
+        y_good[lowq] = np.nan
+        y_bad = y.copy()
+        y_bad[~lowq] = np.nan
+
+        self._upper_curve.setData(x, hi)
+        self._lower_curve.setData(x, lo)
+        self._median_curve.setData(x, y_good)
+        self._low_quality_curve.setData(x, y_bad)
+
+        x_hi = float(x[-1])
+        x_lo = max(0.0, x_hi - 60.0)
+        if len(x) == 1:
+            x_lo = max(0.0, x_hi - 2.0)
+        if self._synced_xrange is not None:
+            x_lo, x_hi = self._synced_xrange
+            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
+            self._threshold_label.setPos(x_hi - 1.0, 471)
+        else:
+            self._plot_widget.setXRange(x_lo, x_hi + 2.0, padding=0)
+            self._threshold_label.setPos(x_hi + 1.0, 471)
+        self._statusbar.showMessage(
+            "QTc streaming. For trend context only; clinical interpretation requires review."
+        )
 
     def closeEvent(self, event):
         self.stop()
@@ -1404,6 +1749,7 @@ class View(QMainWindow):
         self.baseline_hr_values = []
         self.baseline_hr = None
         self.start_time = None 
+        self._plot_start_delay_seconds = 1.5
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -1414,12 +1760,18 @@ class View(QMainWindow):
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
+        self._main_plots_frozen = False
+        self._all_plots_frozen = False
+        self._phase_debug_last_second = -1
+        self._phase_debug_last_name = ""
+        self._debug_heart_anim_groups = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self._last_data_time = None
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
         self._session_rmssd_values: list[float] = []
+        self._session_qtc_payload: dict = default_qtc_payload()
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
         self._session_root = Path.home() / "Hertz-and-Hearts"
@@ -1438,6 +1790,7 @@ class View(QMainWindow):
         self.model.stress_ratio_update.connect(self.update_ui_labels)
         self.model.hrv_update.connect(self.update_ui_labels)
         self.model.hrv_update.connect(self.direct_chart_update)
+        self.model.qtc_update.connect(self.update_ui_labels)
 
         self.model.addresses_update.connect(self.list_addresses)
         self.model.pacer_rate_update.connect(self.update_pacer_label)
@@ -1445,7 +1798,7 @@ class View(QMainWindow):
 
         # 3. COMPONENT INITIALIZATION
         self.signals = ViewSignals()
-        self.signals.request_buffer_reset.connect(self.model.clear_buffers)
+        self.signals.request_buffer_reset.connect(self._handle_stream_reset)
         self.pacer = Pacer()
         self.pacer_timer = QTimer()
         self.pacer_timer.setInterval(int(1000 / 8))
@@ -1461,12 +1814,16 @@ class View(QMainWindow):
 
         self.sensor = SensorClient()
         self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
+        self.sensor.ecg_update.connect(self.model.update_ecg_samples)
         self.sensor.status_update.connect(self.show_status)
 
         self.ecg_window = EcgWindow()
+        self.qtc_window = QtcWindow()
+        self.model.qtc_update.connect(lambda data: self.qtc_window.append_payload(data.value))
         self.sensor.ecg_update.connect(self.ecg_window.append_samples)
         self.sensor.ecg_ready.connect(self._on_ecg_ready)
         self.ecg_window.closed.connect(self._on_ecg_window_closed)
+        self.qtc_window.closed.connect(self._on_qtc_window_closed)
         self.poincare_window = PoincareWindow()
         self.poincare_window.closed.connect(self._on_poincare_window_closed)
         self.poincare_window.info_requested.connect(self.show_poincare_info)
@@ -1598,6 +1955,8 @@ class View(QMainWindow):
         if saved:
             self.address_menu.addItem(f"{saved['name']}, {saved['address']}")
         self.connect_button = QPushButton("Connect")
+        self.connect_button.setAutoDefault(True)
+        self.connect_button.setDefault(False)
         self.connect_button.clicked.connect(self.connect_sensor)
         self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.setEnabled(False)
@@ -1608,10 +1967,17 @@ class View(QMainWindow):
         self.reset_button.clicked.connect(self.reset_baseline)
         self.reset_axes_button = QPushButton("Reset Y Axes")
         self.reset_axes_button.clicked.connect(self.reset_y_axes)
+        self.freeze_two_main_plots_button = QPushButton("Freeze Two Main Plots")
+        self.freeze_two_main_plots_button.clicked.connect(self._toggle_two_main_plots_freeze)
+        self.freeze_all_button = QPushButton("Freeze All")
+        self.freeze_all_button.clicked.connect(self._toggle_freeze_all)
 
         self.ecg_button = QPushButton("ECG (starting...)")
         self.ecg_button.setEnabled(False)
         self.ecg_button.clicked.connect(self.toggle_ecg_window)
+        self.qtc_button = QPushButton("QTc (starting...)")
+        self.qtc_button.setEnabled(False)
+        self.qtc_button.clicked.connect(self.toggle_qtc_window)
         self.poincare_button = QPushButton("Poincare (starting...)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.clicked.connect(self.toggle_poincare_window)
@@ -1642,6 +2008,7 @@ class View(QMainWindow):
         self._refresh_annotation_list()
         self.annotation_button = QPushButton("Annotate")
         self.annotation_button.clicked.connect(self.emit_annotation)
+        self._apply_freeze_button_states()
 
         # Settings button
         self._settings_button = QPushButton("\u2699")
@@ -1661,7 +2028,10 @@ class View(QMainWindow):
         self.disconnect_button.setToolTip("Disconnect from the current sensor.")
         self.reset_button.setToolTip("Reset baseline detection and clear trend buffers.")
         self.reset_axes_button.setToolTip("Restore both chart Y-axes to sensible baseline-centered ranges.")
+        self.freeze_two_main_plots_button.setToolTip("Freeze/resume only the two main trend plots.")
+        self.freeze_all_button.setToolTip("Freeze/resume the main, ECG, and QTc plots.")
         self.ecg_button.setToolTip("Open/close the live ECG monitor window.")
+        self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
         self.poincare_button.setToolTip("Open the live Poincare RR scatter window.")
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
         self.save_recording_button.setToolTip("Finalize the active session and save artifacts.")
@@ -1696,13 +2066,34 @@ class View(QMainWindow):
             "font-size: 14px; font-weight: 600; color: #2c3e50;"
         )
         self.profile_header_label.setAlignment(Qt.AlignCenter)
+        self._debug_mode_badge = QLabel("DEBUG ON")
+        self._debug_mode_badge.setStyleSheet(
+            "font-size: 10px; font-weight: 700; color: #7e0000; "
+            "background: #ffe5e5; border: 1px solid #ffb3b3; "
+            "border-radius: 3px; padding: 1px 6px;"
+        )
+        self._debug_mode_badge.setVisible(False)
         header_row.addWidget(self._header_left_spacer)
         header_row.addStretch()
         header_row.addWidget(self.profile_header_label, alignment=Qt.AlignCenter)
+        header_row.addSpacing(8)
+        header_row.addWidget(self._debug_mode_badge, alignment=Qt.AlignVCenter)
         header_row.addStretch()
         header_row.addWidget(self.profile_manager_button)
         header_row.addWidget(self._settings_button)
-        self.vlayout0.addLayout(header_row)
+        self._top_bar = QWidget()
+        self._top_bar.setLayout(header_row)
+        self.vlayout0.addWidget(self._top_bar)
+        for _w in (
+            self._top_bar,
+            self._header_left_spacer,
+            self.profile_header_label,
+            self._debug_mode_badge,
+            self.profile_manager_button,
+            self._settings_button,
+        ):
+            _w.installEventFilter(self)
+        self._refresh_debug_mode_ui()
 
         # Main content row: equal-height plots on left, pacer stack on right.
         self.content_row = QHBoxLayout()
@@ -1713,13 +2104,19 @@ class View(QMainWindow):
         plots_column.setContentsMargins(0, 0, 0, 0)
         plots_column.setSpacing(2)
         plots_column.addWidget(self.ibis_widget, stretch=1)
-        plots_column.addWidget(self.hrv_widget, stretch=1)
-        reset_axes_row = QHBoxLayout()
-        reset_axes_row.addStretch()
+        freeze_row = QHBoxLayout()
+        freeze_row.addStretch()
+        self.freeze_two_main_plots_button.setFixedWidth(160)
+        freeze_row.addWidget(self.freeze_two_main_plots_button)
+        self.freeze_all_button.setFixedWidth(92)
+        freeze_row.addSpacing(8)
+        freeze_row.addWidget(self.freeze_all_button)
         self.reset_axes_button.setFixedWidth(100)
-        reset_axes_row.addWidget(self.reset_axes_button)
-        reset_axes_row.addStretch()
-        plots_column.addLayout(reset_axes_row)
+        freeze_row.addSpacing(8)
+        freeze_row.addWidget(self.reset_axes_button)
+        freeze_row.addStretch()
+        plots_column.addLayout(freeze_row)
+        plots_column.addWidget(self.hrv_widget, stretch=1)
         self.content_row.addLayout(plots_column, stretch=1)
 
         pacer_column = QVBoxLayout()
@@ -1754,6 +2151,8 @@ class View(QMainWindow):
             btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.ecg_button.setMaximumWidth(170)
         self.ecg_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.qtc_button.setMaximumWidth(170)
+        self.qtc_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.poincare_button.setMaximumWidth(130)
         self.poincare_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.start_recording_button.setMaximumWidth(70)
@@ -1781,6 +2180,7 @@ class View(QMainWindow):
 
         toolbar.addStretch()
         toolbar.addWidget(self.ecg_button)
+        toolbar.addWidget(self.qtc_button)
         toolbar.addWidget(self.poincare_button)
         toolbar.addStretch()
 
@@ -1839,6 +2239,7 @@ class View(QMainWindow):
         self._apply_connect_ready_state()
         self._start_connect_hints()
         self._update_session_actions()
+        self._focus_connect_if_ready()
         QTimer.singleShot(0, self._run_startup_flow)
 
         # Set Axis Labels
@@ -1860,6 +2261,12 @@ class View(QMainWindow):
     def _set_active_profile(self, profile_id: str, announce: bool = False):
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
         self.profile_header_label.setText(f"User: {self._session_profile_id}")
+        debug_pref = self._profile_store.get_profile_pref(
+            self._session_profile_id,
+            "debug_mode",
+            default=("1" if self.settings.DEBUG else "0"),
+        )
+        self._set_debug_mode(debug_pref == "1", announce=False)
         if announce:
             self.show_status(f"Active user: {self._session_profile_id}")
 
@@ -1930,6 +2337,20 @@ class View(QMainWindow):
                 self.finalize_session(show_message=False)
             else:
                 self._abandon_active_session()
+        # Ensure BLE resources are released on app exit to reduce reconnect issues
+        # on next launch (especially on Windows stacks that linger briefly).
+        if self.sensor.client is not None:
+            self.sensor.disconnect_client()
+            # Give Qt's BLE stack a brief chance to process disconnect cleanup
+            # before the process exits.
+            shutdown_wait = QEventLoop(self)
+            QTimer.singleShot(350, shutdown_wait.quit)
+            shutdown_wait.exec()
+        if self.logger_thread.isRunning():
+            # Flush any open recording before terminating the logger event loop.
+            self.signals.save_recording.emit()
+            self.logger_thread.quit()
+            self.logger_thread.wait(2000)
         super().closeEvent(event)
 
     def _is_sensor_connected(self) -> bool:
@@ -1947,6 +2368,12 @@ class View(QMainWindow):
         self.export_report_button.setEnabled(self._session_bundle is not None)
         self.export_report_button.setText("Report (Draft)" if is_recording else "Report")
         self.poincare_button.setEnabled(connected)
+        if not connected:
+            self.qtc_button.setEnabled(False)
+            self.qtc_button.setText("QTc (no sensor)")
+        elif self.ecg_button.isEnabled() and not self.qtc_window.isVisible():
+            self.qtc_button.setEnabled(True)
+            self.qtc_button.setText("QTc Monitor")
         if not connected:
             self.poincare_button.setText("Poincare (no sensor)")
         elif not self.poincare_window.isVisible():
@@ -1967,6 +2394,7 @@ class View(QMainWindow):
         session_end = datetime.now()
         last_rmssd = self._session_rmssd_values[-1] if self._session_rmssd_values else None
         last_hr = self._session_hr_values[-1] if self._session_hr_values else None
+        qtc_payload = self._session_qtc_payload or self.model.latest_qtc_payload or default_qtc_payload()
         csv_path = str(self._session_bundle.csv_path) if self._session_bundle else ""
         return {
             "session_id": self._session_bundle.session_id if self._session_bundle else "--",
@@ -1984,12 +2412,14 @@ class View(QMainWindow):
             "notes": "",
             "csv_path": csv_path,
             "report_stage": report_stage,
+            "qtc": qtc_payload,
         }
 
     def _manifest_payload(self, state: str, report_stage: str | None = None) -> dict:
         now = datetime.now().isoformat()
         last_rmssd = self._session_rmssd_values[-1] if self._session_rmssd_values else None
         last_hr = self._session_hr_values[-1] if self._session_hr_values else None
+        qtc_payload = self._session_qtc_payload or self.model.latest_qtc_payload or default_qtc_payload()
         settings_snapshot = {key: getattr(self.settings, key) for key in REGISTRY}
         bundle = self._session_bundle
         if bundle is None:
@@ -2016,6 +2446,7 @@ class View(QMainWindow):
                 "baseline_rmssd": self.baseline_rmssd,
                 "last_hr": last_hr,
                 "last_rmssd": last_rmssd,
+                "qtc": qtc_payload,
                 "annotation_count": len(self._session_annotations),
             },
             "artifacts": {
@@ -2062,6 +2493,7 @@ class View(QMainWindow):
         self._session_annotations = []
         self._session_hr_values = []
         self._session_rmssd_values = []
+        self._session_qtc_payload = default_qtc_payload()
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
             bundle=self._session_bundle,
@@ -2138,12 +2570,20 @@ class View(QMainWindow):
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
+        self._main_plots_frozen = False
+        self._all_plots_frozen = False
+        self.ecg_window.set_stream_frozen(False)
+        self.qtc_window.set_stream_frozen(False)
+        self._apply_freeze_button_states()
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self._session_annotations = []
         self._session_hr_values = []
         self._session_rmssd_values = []
+        self._session_qtc_payload = default_qtc_payload()
         self._session_bundle = None
+        self.ecg_window.clear()
+        self.qtc_window.clear()
         self._set_session_state("idle")
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
@@ -2161,6 +2601,8 @@ class View(QMainWindow):
         self.disconnect_button.setEnabled(False)
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (starting...)")
+        self.qtc_button.setEnabled(False)
+        self.qtc_button.setText("QTc (starting...)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.setText("Poincare (starting...)")
         self.sensor.connect_client(*sensor)
@@ -2188,6 +2630,11 @@ class View(QMainWindow):
         self._connect_attempt_timer.stop()
         if self.ecg_window.isVisible():
             self.ecg_window.stop()
+        if self.qtc_window.isVisible():
+            self.qtc_window.stop()
+            self.qtc_window.hide()
+        self.ecg_window.clear()
+        self.qtc_window.clear()
         if self.poincare_window.isVisible():
             self.poincare_window.hide()
         self.poincare_window.clear()
@@ -2197,8 +2644,15 @@ class View(QMainWindow):
         self.scan_button.setEnabled(True)
         self.ecg_button.setEnabled(False)
         self.ecg_button.setText("ECG (no sensor)")
+        self.qtc_button.setEnabled(False)
+        self.qtc_button.setText("QTc (no sensor)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.setText("Poincare (no sensor)")
+        self._main_plots_frozen = False
+        self._all_plots_frozen = False
+        self.ecg_window.set_stream_frozen(False)
+        self.qtc_window.set_stream_frozen(False)
+        self._apply_freeze_button_states()
         self.is_phase_active = False
         self._reset_signal_popup()
         self.recording_statusbar.set_disconnected()
@@ -2213,14 +2667,34 @@ class View(QMainWindow):
         else:
             self.ecg_window.show()
             self.ecg_window.start()
+            self.ecg_window.set_stream_frozen(self._all_plots_frozen)
             self.ecg_button.setText("Close ECG")
 
     def _on_ecg_ready(self):
         self.ecg_button.setEnabled(True)
         self.ecg_button.setText("ECG Monitor")
+        self.qtc_button.setEnabled(True)
+        self.qtc_button.setText("QTc Monitor")
 
     def _on_ecg_window_closed(self):
         self.ecg_button.setText("ECG Monitor")
+
+    def toggle_qtc_window(self):
+        if self.qtc_window.isVisible():
+            self.qtc_window.stop()
+            self.qtc_window.hide()
+            self.qtc_button.setText("QTc Monitor")
+        else:
+            self.qtc_window.show()
+            self.qtc_window.start()
+            self.qtc_window.set_stream_frozen(self._all_plots_frozen)
+            self.qtc_button.setText("Close QTc")
+
+    def _on_qtc_window_closed(self):
+        if self._is_sensor_connected():
+            self.qtc_button.setText("QTc Monitor")
+        else:
+            self.qtc_button.setText("QTc (no sensor)")
 
     def toggle_poincare_window(self):
         if self.poincare_window.isVisible():
@@ -2296,6 +2770,24 @@ class View(QMainWindow):
                 overlay = self._hrv_overlay
             if overlay is not None:
                 overlay.resize(obj.size())
+        if (
+            obj in {
+                getattr(self, "_top_bar", None),
+                getattr(self, "_header_left_spacer", None),
+                getattr(self, "profile_header_label", None),
+                getattr(self, "_debug_mode_badge", None),
+                getattr(self, "profile_manager_button", None),
+                getattr(self, "_settings_button", None),
+            }
+            and event.type() == QEvent.Type.MouseButtonPress
+        ):
+            mods = event.modifiers()
+            if (mods & Qt.ControlModifier) and (mods & Qt.AltModifier):
+                click_pos = None
+                if isinstance(obj, QWidget) and hasattr(event, "position"):
+                    click_pos = obj.mapTo(self, event.position().toPoint())
+                self._toggle_debug_mode_hotkey(click_pos)
+                return True
         return super().eventFilter(obj, event)
 
     def _start_connect_hints(self):
@@ -2362,20 +2854,32 @@ class View(QMainWindow):
     def _apply_connect_ready_state(self):
         if self.sensor.client is not None:
             self.connect_button.setToolTip("Already connected to a sensor.")
+            self.connect_button.setDefault(False)
             return
         if self._connect_attempt_timer.isActive():
             self.connect_button.setEnabled(False)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
             self.connect_button.setToolTip("Connecting... please wait for timeout or success.")
+            self.connect_button.setDefault(False)
             return
         has_sensors = self._has_sensor_choices()
         self.connect_button.setEnabled(has_sensors)
         if has_sensors:
             self.connect_button.setStyleSheet(self._CONNECT_NORMAL_CSS)
             self.connect_button.setToolTip("Connect to the selected sensor.")
+            self.connect_button.setDefault(True)
         else:
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
             self.connect_button.setToolTip("No sensor selected yet. Click Scan first.")
+            self.connect_button.setDefault(False)
+
+    def _focus_connect_if_ready(self):
+        if not self._has_sensor_choices():
+            return
+        if self.sensor.client is not None or self._connect_attempt_timer.isActive():
+            return
+        self.connect_button.setFocus(Qt.OtherFocusReason)
+        self.connect_button.setDefault(True)
 
     def _pulse_connect_button(self):
         self._connect_pulse_on = not self._connect_pulse_on
@@ -2393,6 +2897,7 @@ class View(QMainWindow):
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, parent=self)
         if dlg.exec() == QDialog.Accepted:
+            self._set_debug_mode(bool(self.settings.DEBUG), announce=False)
             pending_reset = dlg.get_pending_disclaimer_reset()
             if pending_reset in {"active", "all"}:
                 self._apply_disclaimer_prompt_reset(pending_reset)
@@ -2510,7 +3015,7 @@ class View(QMainWindow):
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
         self._last_data_time = time.time()
-        self.model.clear_buffers()
+        self._handle_stream_reset()
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
         if was_good:
@@ -2556,6 +3061,135 @@ class View(QMainWindow):
         self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
         self.show_status("Y-axes reset to baseline-centered ranges.")
 
+    def _update_phase_progress_banner(self, elapsed: float, source: str = "unknown"):
+        settling_duration = float(self.settings.SETTLING_DURATION)
+        baseline_duration = float(self.settings.BASELINE_DURATION)
+        total_calibration_time = settling_duration + baseline_duration
+        phase_name = "idle"
+        if elapsed < settling_duration:
+            phase_name = "settling"
+            self.is_phase_active = True
+            self.recording_statusbar.set_settling(
+                int(max(0.0, elapsed)),
+                max(1, int(settling_duration)),
+            )
+        elif elapsed < total_calibration_time:
+            phase_name = "baseline"
+            self.is_phase_active = True
+            baseline_elapsed = elapsed - settling_duration
+            self.recording_statusbar.set_baseline(
+                int(max(0.0, baseline_elapsed)),
+                max(1, int(baseline_duration)),
+            )
+        self._emit_phase_debug(elapsed=elapsed, phase=phase_name, source=source)
+
+    def _emit_phase_debug(self, elapsed: float, phase: str, source: str):
+        if not self.settings.DEBUG:
+            return
+        now_sec = int(elapsed)
+        if (
+            phase == self._phase_debug_last_name
+            and now_sec == self._phase_debug_last_second
+        ):
+            return
+        self._phase_debug_last_name = phase
+        self._phase_debug_last_second = now_sec
+        print(
+            "[PHASE] "
+            f"source={source} "
+            f"phase={phase} "
+            f"elapsed={elapsed:.1f}s "
+            f"settle={self.settings.SETTLING_DURATION}s "
+            f"baseline={self.settings.BASELINE_DURATION}s"
+        )
+
+    def _set_debug_mode(self, enabled: bool, *, announce: bool = False):
+        self.settings.DEBUG = bool(enabled)
+        self.settings.save()
+        self._profile_store.set_profile_pref(
+            self._session_profile_id,
+            "debug_mode",
+            "1" if self.settings.DEBUG else "0",
+        )
+        self._refresh_debug_mode_ui()
+        if announce:
+            state = "ON" if self.settings.DEBUG else "OFF"
+            self.show_status(
+                f"Debug Mode {state} (Ctrl+Alt+click top bar).",
+                print_to_terminal=False,
+            )
+
+    def _refresh_debug_mode_ui(self):
+        self._debug_mode_badge.setVisible(bool(self.settings.DEBUG))
+
+    def _toggle_debug_mode_hotkey(self, click_pos: QPoint | None = None):
+        self._set_debug_mode(not bool(self.settings.DEBUG), announce=True)
+        if click_pos is not None:
+            self._launch_debug_heart_burst(click_pos, self.settings.DEBUG)
+
+    def _launch_debug_heart_burst(self, center: QPoint, enabled: bool):
+        if enabled:
+            # Debug ON: energetic green/mint burst.
+            palette = ["#00c853", "#00e676", "#69f0ae", "#00b894", "#55efc4"]
+        else:
+            # Debug OFF: warm red/pink burst.
+            palette = ["#ff4d6d", "#ff6b6b", "#ff5fa2", "#ff3b30", "#ff8fab"]
+        count = 8
+        for i in range(count):
+            delay_ms = i * 22 + random.randint(0, 26)
+            QTimer.singleShot(
+                delay_ms,
+                lambda c=center, p=palette: self._spawn_debug_heart(c, p),
+            )
+
+    def _spawn_debug_heart(self, center: QPoint, palette: list[str]):
+        heart = QLabel("❤", self)
+        size = random.randint(12, 22)
+        heart.setStyleSheet(
+            f"color: {random.choice(palette)}; font-size: {size}px; font-weight: 700;"
+        )
+        heart.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        heart.adjustSize()
+        start = QPoint(center.x() - heart.width() // 2, center.y() - heart.height() // 2)
+        heart.move(start)
+        heart.show()
+        heart.raise_()
+
+        angle = random.uniform(0.0, 2.0 * math.pi)
+        radius = random.randint(60, 150)
+        dx = int(math.cos(angle) * radius)
+        dy = int(math.sin(angle) * radius)
+        end = QPoint(start.x() + dx, start.y() + dy)
+        duration = random.randint(650, 1100)
+
+        pos_anim = QPropertyAnimation(heart, b"pos", self)
+        pos_anim.setDuration(duration)
+        pos_anim.setStartValue(start)
+        pos_anim.setEndValue(end)
+        pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        opacity = QGraphicsOpacityEffect(heart)
+        heart.setGraphicsEffect(opacity)
+        fade_anim = QPropertyAnimation(opacity, b"opacity", self)
+        fade_anim.setDuration(duration)
+        fade_anim.setStartValue(1.0)
+        fade_anim.setEndValue(0.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(pos_anim)
+        group.addAnimation(fade_anim)
+        group.finished.connect(lambda g=group, h=heart: self._cleanup_debug_heart(g, h))
+        self._debug_heart_anim_groups.append(group)
+        group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _cleanup_debug_heart(self, group: QParallelAnimationGroup, heart: QLabel):
+        try:
+            self._debug_heart_anim_groups.remove(group)
+        except ValueError:
+            pass
+        heart.deleteLater()
+
     def direct_chart_update(self, hrv_data: NamedSignal):
         try:
             if not hrv_data.value or len(hrv_data.value[1]) == 0:
@@ -2567,8 +3201,10 @@ class View(QMainWindow):
             if self.start_time is None:
                 return
 
-            elapsed = time.time() - self.start_time
-            x = elapsed 
+            now = time.time()
+            elapsed = now - self.start_time
+            x = elapsed - self._plot_start_delay_seconds
+            plot_gate_open = x >= 0
             total_calibration_time = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
 
             # Add smoothed RMSSD to Chart
@@ -2589,18 +3225,15 @@ class View(QMainWindow):
                 while len(self._sdnn_smooth_buf) > smooth_n:
                     self._sdnn_smooth_buf.pop(0)
 
-            if elapsed < self.settings.SETTLING_DURATION:
-                self.is_phase_active = True
-                self.recording_statusbar.set_settling(
-                    int(elapsed), self.settings.SETTLING_DURATION
-                )
-
-            self.hrv_widget.time_series.append(x, smoothed_rmssd)
-            self._session_rmssd_values.append(smoothed_rmssd)
-            if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
-                smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
-                self.sdnn_series.append(x, smoothed_sdnn)
-                self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
+            if plot_gate_open:
+                self._session_rmssd_values.append(smoothed_rmssd)
+                if not self._main_plots_frozen:
+                    self.hrv_widget.time_series.append(x, smoothed_rmssd)
+                if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
+                    smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
+                    self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
+                    if not self._main_plots_frozen:
+                        self.sdnn_series.append(x, smoothed_sdnn)
 
             # Expand-only Y-axes
             if self._hrv_axis_ceiling is None:
@@ -2608,7 +3241,8 @@ class View(QMainWindow):
             rmssd_padded = int(-(-smoothed_rmssd * 1.3 // 5)) * 5
             if rmssd_padded > self._hrv_axis_ceiling:
                 self._hrv_axis_ceiling = rmssd_padded
-            self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
+            if not self._main_plots_frozen:
+                self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
 
             if self._sdnn_axis_ceiling is None:
                 self._sdnn_axis_ceiling = 50
@@ -2616,18 +3250,13 @@ class View(QMainWindow):
                 sdnn_padded = int(-(-self._sdnn_smooth_buf[-1] * 1.3 // 5)) * 5
                 if sdnn_padded > self._sdnn_axis_ceiling:
                     self._sdnn_axis_ceiling = sdnn_padded
-            self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
+            if not self._main_plots_frozen:
+                self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
 
             # --- CONTINUOUS PHASE ENGINE ---
             
             # PHASE 1: BASELINE COLLECTION
             if elapsed < total_calibration_time:
-                self.is_phase_active = True
-                baseline_elapsed = elapsed - self.settings.SETTLING_DURATION
-                baseline_duration = self.settings.BASELINE_DURATION
-                self.recording_statusbar.set_baseline(
-                    int(baseline_elapsed), baseline_duration
-                )
                 self.baseline_values.append(y)
 
             # PHASE 2: CALCULATE AVERAGES
@@ -2664,12 +3293,14 @@ class View(QMainWindow):
                     self.baseline_series.attachAxis(self.hrv_widget.x_axis)
                     self.baseline_series.attachAxis(self.hrv_widget.y_axis)
 
-                self.baseline_series.clear()
-                self.baseline_series.append(x - 60, self.baseline_rmssd)
-                self.baseline_series.append(x + 2, self.baseline_rmssd)
+                if not self._main_plots_frozen:
+                    self.baseline_series.clear()
+                    self.baseline_series.append(x - 60, self.baseline_rmssd)
+                    self.baseline_series.append(x + 2, self.baseline_rmssd)
 
             # CHART VIEWPORT
-            self.hrv_widget.x_axis.setRange(x - 60, x + 2)
+            if plot_gate_open and not self._main_plots_frozen:
+                self.hrv_widget.x_axis.setRange(x - 60, x + 2)
 
         except Exception as e:
             print(f"Direct Chart Error: {e}")
@@ -2678,6 +3309,7 @@ class View(QMainWindow):
         self.address_menu.clear()
         self.address_menu.addItems(addresses.value)
         self._apply_connect_ready_state()
+        self._focus_connect_if_ready()
         if self.sensor.client is None:
             self._start_connect_hints()
 
@@ -2692,6 +3324,39 @@ class View(QMainWindow):
 
     def update_hrv_target(self, target: NamedSignal):
         self.hrv_widget.y_axis.setRange(0, target.value)
+
+    def _sync_aux_windows_to_main_xrange(self, x_lo: float, x_hi: float):
+        self.ecg_window.set_synced_xrange(x_lo, x_hi)
+        self.qtc_window.set_synced_xrange(x_lo, x_hi)
+
+    def _apply_freeze_button_states(self):
+        self.freeze_two_main_plots_button.setText(
+            "Resume Two Main Plots"
+            if self._main_plots_frozen
+            else "Freeze Two Main Plots"
+        )
+        self.freeze_all_button.setText(
+            "Resume All" if self._all_plots_frozen else "Freeze All"
+        )
+        self.freeze_two_main_plots_button.setEnabled(not self._all_plots_frozen)
+
+    def _toggle_two_main_plots_freeze(self):
+        if self._all_plots_frozen:
+            return
+        self._main_plots_frozen = not self._main_plots_frozen
+        self._apply_freeze_button_states()
+
+    def _toggle_freeze_all(self):
+        self._all_plots_frozen = not self._all_plots_frozen
+        if self._all_plots_frozen:
+            self._main_plots_frozen = True
+            self.ecg_window.set_stream_frozen(True)
+            self.qtc_window.set_stream_frozen(True)
+        else:
+            self._main_plots_frozen = False
+            self.ecg_window.set_stream_frozen(False)
+            self.qtc_window.set_stream_frozen(False)
+        self._apply_freeze_button_states()
 
     def toggle_pacer(self):
         if self.pacer_toggle.isChecked():
@@ -2773,6 +3438,13 @@ class View(QMainWindow):
         self._signal_popup_shown = False
         self._signal_degrade_count = 0
 
+    def _handle_stream_reset(self):
+        self.model.clear_buffers()
+        self._session_qtc_payload = default_qtc_payload()
+        self.qtc_window.clear()
+        if self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
+            self.qtc_button.setText("QTc (warming up...)")
+
     def _check_data_timeout(self):
         if self._last_data_time is None:
             return
@@ -2782,7 +3454,7 @@ class View(QMainWindow):
             self._consecutive_good = 0
             self._set_signal_indicator("LOST (No data)", "red")
             self._show_signal_degraded_popup("No data received")
-            self.model.clear_buffers()
+            self._handle_stream_reset()
 
     def _in_settling(self):
         return (self.start_time is not None
@@ -2852,12 +3524,23 @@ class View(QMainWindow):
                     if self._consecutive_good >= self.settings.RECOVERY_BEATS:
                         self._fault_active = False
                         self._reset_signal_popup()
-                        self.model.clear_buffers()
+                        self._handle_stream_reset()
                         self._set_signal_indicator("GOOD", "#00FF00")
         
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":
             self.stress_ratio_label.setText(f"LF/HF: {data.value[0]:.2f}")
+
+        # 2b. QTc payload updates from ECG delineation/calculation pipeline.
+        elif data.name == "qtc":
+            if isinstance(data.value, dict):
+                self._session_qtc_payload = data.value
+                if (
+                    self._is_sensor_connected()
+                    and not self.qtc_window.isVisible()
+                    and self.qtc_button.isEnabled()
+                ):
+                    self.qtc_button.setText("QTc Monitor")
 
         # 3. AVERAGED DATA (RMSSD & Stability)
         elif data.name == "hrv":
@@ -2895,15 +3578,22 @@ class View(QMainWindow):
 
             if self.start_time is None:
                 self.start_time = time.time()
+                self.ecg_window.sync_timeline_to_main(self._plot_start_delay_seconds)
+                self.qtc_window.sync_timeline_to_main(self._plot_start_delay_seconds)
                 self.hr_trend_series.clear()
                 self.sdnn_series.clear()
                 self.hrv_widget.time_series.clear()
                 if self.ecg_button.text() != "ECG (waiting for data...)":
                     self.ecg_button.setText("ECG (waiting for data...)")
+                if self.qtc_button.isEnabled() and self.qtc_button.text() != "QTc (warming up...)":
+                    self.qtc_button.setText("QTc (warming up...)")
                 if self.settings.DEBUG:
                     print("Timer Started")
 
-            elapsed = time.time() - self.start_time
+            now = time.time()
+            elapsed = now - self.start_time
+            self._update_phase_progress_banner(elapsed, source="ibis")
+            plot_elapsed = elapsed - self._plot_start_delay_seconds
 
             w = self.settings.HR_EWMA_WEIGHT
             if self._hr_ewma is None:
@@ -2914,14 +3604,18 @@ class View(QMainWindow):
             if not self.hr_trend_series.count():
                 self._hr_ewma = hr
 
-            self.hr_trend_series.append(elapsed, self._hr_ewma)
-            self._session_hr_values.append(self._hr_ewma)
-
             total_cal = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
             if self.settings.SETTLING_DURATION <= elapsed < total_cal:
                 self.baseline_hr_values.append(self._hr_ewma)
             elif self.baseline_hr is None and self.baseline_hr_values:
                 self.baseline_hr = sum(self.baseline_hr_values) / len(self.baseline_hr_values)
+
+            if plot_elapsed < 0:
+                return
+
+            self._session_hr_values.append(self._hr_ewma)
+            if not self._main_plots_frozen:
+                self.hr_trend_series.append(plot_elapsed, self._hr_ewma)
 
             if self.baseline_hr is not None:
                 if not hasattr(self, 'hr_baseline_series'):
@@ -2934,9 +3628,10 @@ class View(QMainWindow):
                     self.ibis_widget.plot.addSeries(self.hr_baseline_series)
                     self.hr_baseline_series.attachAxis(self.ibis_widget.x_axis)
                     self.hr_baseline_series.attachAxis(self.ibis_widget.y_axis)
-                self.hr_baseline_series.clear()
-                self.hr_baseline_series.append(elapsed - 60, self.baseline_hr)
-                self.hr_baseline_series.append(elapsed + 2, self.baseline_hr)
+                if not self._main_plots_frozen:
+                    self.hr_baseline_series.clear()
+                    self.hr_baseline_series.append(plot_elapsed - 60, self.baseline_hr)
+                    self.hr_baseline_series.append(plot_elapsed + 2, self.baseline_hr)
 
             # Expand-only Y-axis
             min_span = 40
@@ -2961,9 +3656,18 @@ class View(QMainWindow):
                 self._hr_axis_floor = max(int(mid - min_span // 2), 30)
                 self._hr_axis_ceiling = self._hr_axis_floor + min_span
 
-            self.ibis_widget.y_axis.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
-
-            self.ibis_widget.x_axis.setRange(elapsed - 60, elapsed + 2)
+            if not self._main_plots_frozen:
+                self.ibis_widget.y_axis.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
+                self.ibis_widget.x_axis.setRange(plot_elapsed - 60, plot_elapsed + 2)
+                self._sync_aux_windows_to_main_xrange(
+                    plot_elapsed - 60,
+                    plot_elapsed + 2,
+                )
+            else:
+                self._sync_aux_windows_to_main_xrange(
+                    float(self.ibis_widget.x_axis.min()),
+                    float(self.ibis_widget.x_axis.max()),
+                )
 
         except Exception as e:
             print(f"HR Plot Error: {e}")    
