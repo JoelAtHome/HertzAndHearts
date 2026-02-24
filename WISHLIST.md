@@ -258,6 +258,54 @@ Implementation checklist:
 - Status: triaged
 - Notes: Requires careful validation and conservative UX to avoid diagnostic overreach; limited by single-lead constraints.
 
+### 23) [PERF] Remove duplicate IBI update wiring
+- Problem: The app appears to wire `ibi_update -> update_ibis_buffer` in two places, potentially doubling hot-path work and increasing plotting load.
+- Proposed approach: Keep a single authoritative connection for `update_ibis_buffer` and verify beat/update counts remain 1:1.
+- Effort: S
+- Impact: High
+- Status: planned
+- Notes: Treat as the first performance fix because it may be both a correctness and throughput issue.
+
+### 24) [PERF] Move QTc compute off the UI thread
+- Problem: QTc extraction/delineation can block the GUI event loop and cause visible stutter during plotting.
+- Proposed approach: Run QTc pipeline in a worker thread/process with latest-only job policy and throttled UI publish.
+- Effort: M
+- Impact: High
+- Status: planned
+- Notes: Add queue-depth and compute-time telemetry to confirm responsiveness gains.
+
+### 25) [PERF] Bound long-session chart series growth
+- Problem: HR/RMSSD/SDNN chart series can grow without pruning, causing long-session slowdown and memory growth.
+- Proposed approach: Keep only a rolling time window plus small guard buffer in visual series.
+- Effort: M
+- Impact: High
+- Status: planned
+- Notes: Validate 60+ minute session stability before/after.
+
+### 26) [PERF] Reduce ECG redraw allocation churn
+- Problem: Repeated deque-to-array conversion and range work in the redraw loop adds avoidable CPU pressure.
+- Proposed approach: Reuse buffers and minimize per-frame allocations/range resets.
+- Effort: M
+- Impact: High
+- Status: triaged
+- Notes: Benchmark p95 redraw time before/after.
+
+### 27) [PERF] Refresh profiling harness for current package
+- Problem: Existing profiling helpers still reference older package names and are not ready for current hot-path analysis.
+- Proposed approach: Update profiling scripts to current module paths and standardize capture commands.
+- Effort: S
+- Impact: Med
+- Status: planned
+- Notes: Use this to verify impact for each `[PERF]` item.
+
+### 28) [PERF] Optimize BLE ECG packet decode path
+- Problem: Python-loop packet unpacking runs continuously and contributes avoidable CPU overhead.
+- Proposed approach: Vectorize decode logic (or move hot loop to native/compiled path if needed).
+- Effort: M
+- Impact: Med
+- Status: triaged
+- Notes: Keep decoded values bit-for-bit compatible with current output.
+
 ## PlannedNext
 
 Items that are implementation-ready and should be picked up soon.
@@ -294,6 +342,20 @@ Implementation checklist:
 - [x] Migrate existing single-user history to profile-backed indexing safely (legacy fallback profile included).
 - [x] Update history queries/views to filter by active profile.
 - [x] Add tests for profile isolation and migration edge cases.
+
+### C) [PERF] Remove duplicate IBI update wiring (from prioritized item 23)
+- Problem: Duplicate hot-path signal wiring can increase compute load and plotting pressure.
+- Proposed approach: Keep one `ibi_update -> update_ibis_buffer` connection and verify no duplicate processing.
+- Effort: S
+- Impact: High
+- Status: planned
+- Notes: First performance implementation target.
+
+Implementation checklist:
+- [ ] Confirm all `ibi_update` wiring locations and choose single owner.
+- [ ] Remove duplicate connection while preserving `hr_handler` behavior.
+- [ ] Verify `update_ibis_buffer` triggers once per beat in normal streaming.
+- [ ] Smoke-test HR/RMSSD/plot responsiveness and regression-risk paths (connect/reconnect/reset).
 
 ## Done
 
