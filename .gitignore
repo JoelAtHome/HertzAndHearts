@@ -9,3 +9,4 @@ installer_output/
 *.profile
 .DS_Store
 uv.lock
+Sessions/
