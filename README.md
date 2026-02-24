@@ -4,6 +4,10 @@
 
 A desktop application for heart rate variability (HRV) biofeedback training with ECG chest straps.
 
+## Project Wishlist
+
+Track feature ideas and planned improvements in [WISHLIST.md](WISHLIST.md).
+
 ## Compatible sensors
 - Polar H7, H9, H10
 - Decathlon Dual HR (model ZT26D)

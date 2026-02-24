@@ -547,6 +547,7 @@ class SettingsDialog(QDialog):
         self._settings = settings
         self._widgets: dict[str, QCheckBox | QSpinBox | QDoubleSpinBox] = {}
         self._advanced_groups: list[QGroupBox] = []
+        self._pending_disclaimer_reset = "none"
 
         self.setWindowTitle("Hertz & Hearts \u2014 Settings")
         self.setMinimumWidth(500)
@@ -601,6 +602,14 @@ class SettingsDialog(QDialog):
         ann_btn.setToolTip("Open the custom annotation editor.")
         ann_btn.clicked.connect(self._open_annotation_manager)
         btn_row.addWidget(ann_btn)
+        self._reset_disclaimer_btn = QPushButton("Reset Disclaimer Prompt…")
+        self._reset_disclaimer_btn.setMinimumWidth(190)
+        self._reset_disclaimer_btn.setToolTip(
+            "Re-enable startup disclaimer prompts that were hidden via 'Don't show again'."
+        )
+        self._reset_disclaimer_btn.clicked.connect(self._queue_disclaimer_reset)
+        btn_row.addWidget(self._reset_disclaimer_btn)
+        self._update_reset_disclaimer_button_ui()
         btn_row.addStretch()
 
         save_btn = QPushButton("Save && Close")
@@ -687,6 +696,49 @@ class SettingsDialog(QDialog):
     def _open_annotation_manager(self):
         dlg = AnnotationEditorDialog(self._settings, parent=self)
         dlg.exec()
+
+    def _queue_disclaimer_reset(self):
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Queue Disclaimer Reset")
+        msg.setText("Queue a reset for startup disclaimer prompts.")
+        msg.setInformativeText(
+            "The reset will be applied only when you click Save and Close."
+        )
+        active_btn = msg.addButton("Active User", QMessageBox.ButtonRole.AcceptRole)
+        all_btn = msg.addButton("All Users", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = msg.addButton(QMessageBox.Cancel)
+        msg.setDefaultButton(active_btn)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == cancel_btn:
+            return
+        if clicked == all_btn:
+            self._pending_disclaimer_reset = "all"
+            self._update_reset_disclaimer_button_ui()
+            return
+        self._pending_disclaimer_reset = "active"
+        self._update_reset_disclaimer_button_ui()
+
+    def _update_reset_disclaimer_button_ui(self):
+        if self._pending_disclaimer_reset == "all":
+            self._reset_disclaimer_btn.setText("Reset Disclaimer… (All Queued)")
+            self._reset_disclaimer_btn.setToolTip(
+                "Queued: reset disclaimer prompts for all users on Save and Close."
+            )
+        elif self._pending_disclaimer_reset == "active":
+            self._reset_disclaimer_btn.setText("Reset Disclaimer… (Queued)")
+            self._reset_disclaimer_btn.setToolTip(
+                "Queued: reset disclaimer prompt for the active user on Save and Close."
+            )
+        else:
+            self._reset_disclaimer_btn.setText("Reset Disclaimer Prompt…")
+            self._reset_disclaimer_btn.setToolTip(
+                "Re-enable startup disclaimer prompts that were hidden via 'Don't show again'."
+            )
+
+    def get_pending_disclaimer_reset(self) -> str:
+        return self._pending_disclaimer_reset
 
     # --- lifecycle --------------------------------------------------------
 

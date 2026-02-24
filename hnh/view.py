@@ -1,19 +1,28 @@
 from datetime import datetime
 import json
+import math
+import random
 import statistics
 import time
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
-from PySide6.QtGui import QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor
-from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF, QEvent
+from PySide6.QtGui import (
+    QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor, QPixmap,
+    QKeySequence, QShortcut,
+)
+from PySide6.QtCore import (
+    Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
+    QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
+)
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
     QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
-    QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox,
+    QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
     QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
-    QMessageBox,
+    QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     )
 from collections import deque
 from typing import Iterable
@@ -31,6 +40,7 @@ from hnh.config import (
 from hnh.settings import Settings, SettingsDialog, REGISTRY
 from hnh.report import generate_session_report
 from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
+from hnh.profile_store import ProfileStore
 from hnh import __version__ as version, resources  # noqa
 import warnings
 
@@ -44,6 +54,60 @@ YELLOW = QColor(255, 255, 0)
 RED = QColor(255, 0, 0)
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
+
+_CARD0_DISCLAIMER_TEXT = """\
+<h3 style="color: #c0392b; margin-bottom: 8px;">
+RESEARCH USE DISCLAIMER</h3>
+<p>This software ("<b>Hertz &amp; Hearts</b>") is a cardiac monitoring and
+biofeedback research tool. It has <b>NOT</b> been cleared, approved, or
+certified by the U.S. Food and Drug Administration (FDA), the European
+Medicines Agency (EMA), or any other regulatory body as a medical device.</p>
+
+<p>Hertz &amp; Hearts is intended solely for <b>investigational and research use</b>
+under the direct supervision of qualified medical professionals. It is
+NOT intended to diagnose, treat, cure, or prevent any disease or medical
+condition.</p>
+
+<p>The application may display heart rate, HRV, and ECG-derived values for
+research and workflow support. These outputs are informational and must not
+replace independent clinical judgment.</p>
+
+<h3 style="color: #c0392b; margin-top: 12px; margin-bottom: 8px;">
+LIMITATION OF LIABILITY</h3>
+<p>The developers and contributors of Hertz &amp; Hearts provide this software
+"<b>AS IS</b>" without any warranty, express or implied, including but
+not limited to warranties of merchantability, fitness for a particular
+purpose, or non-infringement.</p>
+
+<p>In no event shall the developers, contributors, or affiliated
+institutions be liable for any direct, indirect, incidental, special,
+consequential, or exemplary damages arising from the use of this
+software, including but not limited to patient injury, misdiagnosis,
+treatment error, or any other clinical outcome.</p>
+
+<h3 style="color: #2c3e50; margin-top: 12px; margin-bottom: 8px;">
+CLINICAL RESPONSIBILITY</h3>
+<p>The licensed physician or qualified healthcare provider supervising
+the monitoring session bears <b>sole and complete responsibility</b>
+for:</p>
+
+<ul style="margin-left: 16px;">
+<li>All clinical decisions regarding patient selection, monitoring parameters, and session management</li>
+<li>Verification that all safety checks and protocols are appropriate for the specific patient</li>
+<li>Continuous monitoring of the patient throughout the session</li>
+<li>Immediate intervention in the event of adverse patient response</li>
+<li>Compliance with all applicable institutional review board (IRB) protocols, local regulations, and institutional policies</li>
+</ul>
+
+<p>This software does <b>not</b> replace professional medical judgment.
+Autonomous reliance on software-generated alerts, thresholds, or
+recommendations without independent clinical verification is expressly
+discouraged.</p>
+
+<p style="margin-top: 12px; color: #7f8c8d; font-style: italic;">
+By checking the acknowledgment below, you confirm that you have read,
+understood, and agree to these terms for this monitoring session.</p>
+"""
 
 def _save_last_sensor(name, address):
     try:
@@ -144,6 +208,749 @@ class StatusBanner(QFrame):
 
     def set_error(self, text: str):
         self._apply("error", text)
+
+
+class Card0Dialog(QDialog):
+    """Startup welcome/disclaimer card for Hertz & Hearts."""
+
+    def __init__(self, parent=None, allow_skip_for_profile: bool = False):
+        super().__init__(parent)
+        self._allow_skip_for_profile = allow_skip_for_profile
+        self.setWindowTitle("Hertz & Hearts — Welcome — Research Use Disclaimer")
+        self.setMinimumSize(860, 700)
+        self.setModal(True)
+
+        self._heart_anim_groups = []
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+
+        self._scroll = QScrollArea()
+        self._scroll.setWidgetResizable(True)
+        self._scroll.setFrameShape(QFrame.NoFrame)
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self._scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self._scroll.setStyleSheet("QScrollArea { background: #f4f6f7; border: none; }")
+
+        self._content = QWidget()
+        self._content.setStyleSheet("QWidget { background: #f4f6f7; }")
+        lay = QVBoxLayout(self._content)
+        lay.setContentsMargins(40, 14, 40, 8)
+        lay.setSpacing(0)
+        lay.setAlignment(Qt.AlignTop)
+
+        logo = ClickableLabel()
+        logo_pix = QPixmap(":/logo.png")
+        if not logo_pix.isNull():
+            logo.setPixmap(
+                logo_pix.scaled(
+                    88, 88,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+            logo.setAlignment(Qt.AlignCenter)
+            logo.setStyleSheet("margin-bottom: 4px;")
+            lay.addWidget(logo)
+            logo.clicked.connect(self._launch_heart_burst)
+        self._logo = logo
+
+        self._title = QLabel("Hertz & Hearts")
+        self._title.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._title)
+
+        self._tagline = QLabel("Cardiac Monitoring & Biofeedback Research Assistant")
+        self._tagline.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._tagline)
+
+        self._ver = QLabel(f"v{version}  ·  Investigational Use Only")
+        self._ver.setAlignment(Qt.AlignCenter)
+        ver_row = QHBoxLayout()
+        ver_row.setAlignment(Qt.AlignCenter)
+        ver_row.addWidget(self._ver)
+        lay.addLayout(ver_row)
+
+        self._card = QFrame()
+        self._card.setStyleSheet(
+            "QFrame { background: white; border-radius: 8px; border: 1px solid #e5e8ea; }"
+        )
+        card_lay = QVBoxLayout(self._card)
+        card_lay.setContentsMargins(24, 18, 24, 18)
+
+        self._disclaimer = QLabel(_CARD0_DISCLAIMER_TEXT)
+        self._disclaimer.setWordWrap(True)
+        self._disclaimer.setTextFormat(Qt.RichText)
+        card_lay.addWidget(self._disclaimer)
+        lay.addWidget(self._card)
+        lay.addSpacing(12)
+
+        self._accept_cb = QCheckBox(
+            "I have read, understood, and accept the above terms for this monitoring session"
+        )
+        self._continue_btn = QPushButton("Continue")
+        self._continue_btn.setEnabled(False)
+        self._continue_btn.setDefault(True)
+        self._continue_btn.clicked.connect(self.accept)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self.reject)
+        self._dont_show_cb = QCheckBox("Don't show this disclaimer again for this user")
+        self._dont_show_cb.setVisible(allow_skip_for_profile)
+        # Keep this in a consistent bottom-left action lane to match the next screen.
+        lay.addStretch()
+        self._ack_row = QHBoxLayout()
+        self._ack_row.setContentsMargins(2, 0, 2, 10)
+        self._ack_row.addStretch()
+        self._ack_row.addWidget(self._dont_show_cb, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        self._ack_row.addSpacing(20)
+        self._ack_row.addWidget(self._accept_cb, alignment=Qt.AlignLeft | Qt.AlignVCenter)
+        self._ack_row.addStretch()
+        lay.addLayout(self._ack_row)
+        self._actions_row = QHBoxLayout()
+        self._actions_row.setContentsMargins(2, 0, 2, 10)
+        self._actions_row.addStretch()
+        self._actions_row.addWidget(self._cancel_btn)
+        self._actions_row.addSpacing(10)
+        self._actions_row.addWidget(self._continue_btn)
+        self._actions_row.addStretch()
+        lay.addLayout(self._actions_row)
+
+        self._scroll.setWidget(self._content)
+        root.addWidget(self._scroll)
+
+        self._accept_cb.stateChanged.connect(self._on_ack_changed)
+        QTimer.singleShot(0, self._fit_content_to_viewport)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._fit_content_to_viewport()
+
+    def _apply_scale(self, body_px: int, viewport_w: int):
+        title_px = int(body_px * 2.2)
+        tagline_px = max(13, int(body_px * 0.95))
+        badge_px = max(10, int(body_px * 0.72))
+        checkbox_px = max(12, int(body_px * 0.9))
+        indicator_px = max(22, int(body_px * 1.5))
+        # On narrower windows, the long acceptance label can dominate.
+        # Slightly reduce only that line to keep both checkboxes visually balanced.
+        accept_checkbox_px = max(11, checkbox_px - 1) if viewport_w < 1200 else checkbox_px
+
+        self._title.setStyleSheet(
+            f"color: #1a5276; font-size: {title_px}px; font-weight: 700;"
+        )
+        self._tagline.setStyleSheet(
+            f"color: #7f8c8d; font-size: {tagline_px}px; margin-bottom: 4px;"
+        )
+        self._ver.setStyleSheet(
+            "color: white; background: #c0392b; padding: 3px 14px; "
+            f"border-radius: 4px; margin-bottom: 12px; font-size: {badge_px}px;"
+        )
+        self._ver.setFixedWidth(self._ver.sizeHint().width() + 28)
+        self._disclaimer.setStyleSheet(
+            f"color: #333; font-size: {body_px}px; line-height: 1.35;"
+        )
+        dont_show_css = (
+            "QCheckBox { padding: 8px 0; spacing: 3px; color: #2c3e50; "
+            f"font-size: {checkbox_px}px; font-weight: 600; }}"
+            f"QCheckBox::indicator {{ width: {indicator_px}px; height: {indicator_px}px; }}"
+        )
+        accept_css = (
+            "QCheckBox { padding: 8px 0; spacing: 3px; color: #2c3e50; "
+            f"font-size: {accept_checkbox_px}px; font-weight: 600; }}"
+            f"QCheckBox::indicator {{ width: {indicator_px}px; height: {indicator_px}px; }}"
+        )
+        self._accept_cb.setStyleSheet(accept_css)
+        self._dont_show_cb.setStyleSheet(dont_show_css)
+
+    def _fit_content_to_viewport(self):
+        viewport = self._scroll.viewport()
+        viewport_h = viewport.height()
+        viewport_w = viewport.width()
+        if viewport_h <= 0 or viewport_w <= 0:
+            return
+        # Ensure wrapping is computed against the real viewport width.
+        self._content.setFixedWidth(viewport_w)
+        # Favor readability over fitting the entire card without scrolling.
+        # Keep a large body font and allow vertical scroll as needed.
+        self._apply_scale(16, viewport_w)
+        self._content.layout().activate()
+        self._content.adjustSize()
+        self._scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+    def _on_ack_changed(self, _state: int):
+        self._continue_btn.setEnabled(self._accept_cb.isChecked())
+
+    @property
+    def dont_show_again_for_profile(self) -> bool:
+        return self._allow_skip_for_profile and self._dont_show_cb.isChecked()
+
+    def _launch_heart_burst(self):
+        if self._logo is None or self._logo.pixmap() is None:
+            return
+        center = self._logo.mapTo(self, self._logo.rect().center())
+        palette = ["#ff4d6d", "#ff6b6b", "#ff5fa2", "#ff3b30", "#ff8fab"]
+        count = 18
+        second_wave_delay_ms = 420
+        for i in range(count):
+            delay_ms = i * 55 + random.randint(0, 40)
+            QTimer.singleShot(
+                delay_ms,
+                lambda c=center, p=palette: self._spawn_heart(c, p),
+            )
+            QTimer.singleShot(
+                second_wave_delay_ms + delay_ms,
+                lambda c=center, p=palette: self._spawn_heart(c, p),
+            )
+
+    def _spawn_heart(self, center: QPoint, palette: list[str]):
+        heart = QLabel("❤", self)
+        size = random.randint(18, 34)
+        heart.setStyleSheet(
+            f"color: {random.choice(palette)}; font-size: {size}px; font-weight: 700;"
+        )
+        heart.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        heart.adjustSize()
+        start = QPoint(center.x() - heart.width() // 2, center.y() - heart.height() // 2)
+        heart.move(start)
+        heart.show()
+        heart.raise_()
+
+        # True 360-degree burst around the logo.
+        angle = random.uniform(0.0, 2.0 * math.pi)
+        radius = random.randint(260, 620)
+        dx = int(math.cos(angle) * radius)
+        dy = int(math.sin(angle) * radius)
+        end = QPoint(start.x() + dx, start.y() + dy)
+        duration = random.randint(1800, 3200)
+
+        pos_anim = QPropertyAnimation(heart, b"pos", self)
+        pos_anim.setDuration(duration)
+        pos_anim.setStartValue(start)
+        pos_anim.setEndValue(end)
+        pos_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        opacity = QGraphicsOpacityEffect(heart)
+        heart.setGraphicsEffect(opacity)
+        fade_anim = QPropertyAnimation(opacity, b"opacity", self)
+        fade_anim.setDuration(duration)
+        fade_anim.setStartValue(1.0)
+        fade_anim.setEndValue(0.0)
+        fade_anim.setEasingCurve(QEasingCurve.Type.InQuad)
+
+        group = QParallelAnimationGroup(self)
+        group.addAnimation(pos_anim)
+        group.addAnimation(fade_anim)
+        group.finished.connect(lambda g=group, h=heart: self._cleanup_heart(g, h))
+        self._heart_anim_groups.append(group)
+        group.start(QAbstractAnimation.DeletionPolicy.DeleteWhenStopped)
+
+    def _cleanup_heart(self, group: QParallelAnimationGroup, heart: QLabel):
+        try:
+            self._heart_anim_groups.remove(group)
+        except ValueError:
+            pass
+        heart.deleteLater()
+
+
+class ProfileSelectionDialog(QDialog):
+    """Select the active user profile for this app session."""
+
+    def __init__(self, profiles: list[str], last_profile: str | None, parent=None):
+        super().__init__(parent)
+        self.selected_profile: str | None = None
+        self.setModal(True)
+        self.setWindowTitle("Select Session User")
+        self.setMinimumWidth(520)
+
+        root = QVBoxLayout(self)
+        info = QLabel(
+            "Choose who is using this session. This controls profile-specific settings and history."
+        )
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        row = QHBoxLayout()
+        row.addWidget(QLabel("User profile:"))
+        self._combo = QComboBox()
+        self._combo.setEditable(False)
+        unique_profiles = []
+        seen: set[str] = set()
+        for profile in profiles:
+            p = str(profile).strip()
+            if not p:
+                continue
+            key = p.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_profiles.append(p)
+        if not unique_profiles:
+            unique_profiles = ["Default"]
+        self._combo.addItems(unique_profiles)
+        if last_profile:
+            idx = self._combo.findText(last_profile, Qt.MatchFixedString)
+            if idx >= 0:
+                self._combo.setCurrentIndex(idx)
+        row.addWidget(self._combo, stretch=1)
+        root.addLayout(row)
+
+        buttons = QHBoxLayout()
+        self._new_btn = QPushButton("New Profile...")
+        self._new_btn.clicked.connect(self._create_profile)
+        buttons.addWidget(self._new_btn)
+        buttons.addStretch()
+        self._continue_btn = QPushButton("Continue")
+        self._continue_btn.setDefault(True)
+        self._continue_btn.clicked.connect(self._accept_selected)
+        buttons.addWidget(self._continue_btn)
+        buttons.addSpacing(8)
+        self._guest_btn = QPushButton("Continue as Guest")
+        self._guest_btn.clicked.connect(self._accept_guest)
+        buttons.addWidget(self._guest_btn)
+        buttons.addSpacing(8)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(self._cancel_btn)
+        root.addLayout(buttons)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        self._center_on_screen()
+
+    def _center_on_screen(self):
+        screen = self.screen()
+        if screen is None and self.parentWidget() is not None:
+            screen = self.parentWidget().screen()
+        if screen is None:
+            return
+        frame = self.frameGeometry()
+        frame.moveCenter(screen.availableGeometry().center())
+        self.move(frame.topLeft())
+
+    def _create_profile(self):
+        text, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
+        if not ok:
+            return
+        name = text.strip()
+        if not name:
+            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
+            return
+        idx = self._combo.findText(name, Qt.MatchFixedString)
+        if idx < 0:
+            self._combo.addItem(name)
+            idx = self._combo.count() - 1
+        self._combo.setCurrentIndex(idx)
+
+    def _accept_selected(self):
+        name = self._combo.currentText().strip()
+        if not name:
+            QMessageBox.warning(self, "Profile Required", "Please select a profile.")
+            return
+        self.selected_profile = name
+        self.accept()
+
+    def _accept_guest(self):
+        self.selected_profile = "Guest"
+        self.accept()
+
+
+class SessionHistoryDialog(QDialog):
+    """Read-only session history list for the active profile."""
+
+    def __init__(self, profile_name: str, sessions: list[dict[str, str | None]], parent=None):
+        super().__init__(parent)
+        self.setModal(True)
+        self.setWindowTitle(f"Session History — {profile_name}")
+        self.resize(980, 520)
+
+        root = QVBoxLayout(self)
+        self._summary = QLabel("")
+        self._summary.setStyleSheet("font-size: 12px; color: #2c3e50;")
+        root.addWidget(self._summary)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(
+            ["Started", "Session ID", "State", "Session Folder", "CSV Path"]
+        )
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        root.addWidget(self._table, stretch=1)
+
+        actions = QHBoxLayout()
+        actions.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        actions.addWidget(close_btn)
+        root.addLayout(actions)
+
+        self.populate(profile_name=profile_name, sessions=sessions)
+
+    @staticmethod
+    def _format_started(value: str | None) -> str:
+        if value is None:
+            return "--"
+        raw = str(value).strip()
+        if not raw:
+            return "--"
+        try:
+            dt = datetime.fromisoformat(raw)
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            return raw
+
+    def populate(self, profile_name: str, sessions: list[dict[str, str | None]]):
+        self.setWindowTitle(f"Session History — {profile_name}")
+        self._summary.setText(f"{len(sessions)} session(s) for profile: {profile_name}")
+        self._table.setRowCount(len(sessions))
+        for row_idx, row in enumerate(sessions):
+            started = self._format_started(row.get("started_at"))
+            session_id = str(row.get("session_id") or "--")
+            state = str(row.get("state") or "--")
+            session_dir = str(row.get("session_dir") or "--")
+            csv_path = str(row.get("csv_path") or "--")
+            values = [started, session_id, state, session_dir, csv_path]
+            for col_idx, val in enumerate(values):
+                self._table.setItem(row_idx, col_idx, QTableWidgetItem(val))
+        self._table.resizeRowsToContents()
+
+
+class ProfileManagerDialog(QDialog):
+    """Manage user profiles (create, rename, archive/delete, restore)."""
+
+    def __init__(self, store: ProfileStore, active_profile: str, parent=None):
+        super().__init__(parent)
+        self._store = store
+        self._active_profile = active_profile
+        self.setModal(True)
+        self.setWindowTitle("Profile Manager")
+        self.resize(780, 460)
+
+        root = QVBoxLayout(self)
+        hint = QLabel(
+            "Manage profiles used for session history and per-user preferences."
+        )
+        hint.setWordWrap(True)
+        root.addWidget(hint)
+
+        top = QHBoxLayout()
+        self._show_archived = QCheckBox("Show archived profiles")
+        self._show_archived.stateChanged.connect(self._refresh)
+        top.addWidget(self._show_archived)
+        top.addStretch()
+        root.addLayout(top)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(4)
+        self._table.setHorizontalHeaderLabels(["Profile", "Status", "Last Used", "Created"])
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setAlternatingRowColors(True)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionsClickable(True)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._table.setSortingEnabled(True)
+        root.addWidget(self._table, stretch=1)
+
+        details_group = QGroupBox("Profile Details")
+        details_form = QFormLayout(details_group)
+        demographics_row = QWidget()
+        demographics_lay = QHBoxLayout(demographics_row)
+        demographics_lay.setContentsMargins(0, 0, 0, 0)
+        demographics_lay.setSpacing(8)
+
+        age_label = QLabel("Age")
+        self._age_input = QLineEdit()
+        self._age_input.setPlaceholderText("1-130")
+        self._age_input.setMaximumWidth(80)
+        self._age_input.setAlignment(Qt.AlignRight)
+        demographics_lay.addWidget(age_label)
+        demographics_lay.addWidget(self._age_input)
+
+        gender_label = QLabel("Gender")
+        self._gender_input = QComboBox()
+        self._gender_input.addItems(
+            [
+                "Male",
+                "Female",
+                "Prefer not to Say",
+            ]
+        )
+        self._gender_input.setMaximumWidth(170)
+        demographics_lay.addSpacing(10)
+        demographics_lay.addWidget(gender_label)
+        demographics_lay.addWidget(self._gender_input)
+        demographics_lay.addStretch()
+        details_form.addRow("Demographics", demographics_row)
+
+        self._notes_input = QTextEdit()
+        self._notes_input.setPlaceholderText("Optional profile notes")
+        self._notes_input.setFixedHeight(84)
+        details_form.addRow("Notes", self._notes_input)
+        root.addWidget(details_group)
+
+        actions = QHBoxLayout()
+        self._create_btn = QPushButton("Create")
+        self._create_btn.clicked.connect(self._create_profile)
+        actions.addWidget(self._create_btn)
+
+        self._rename_btn = QPushButton("Rename")
+        self._rename_btn.clicked.connect(self._rename_profile)
+        actions.addWidget(self._rename_btn)
+
+        self._archive_btn = QPushButton("Archive")
+        self._archive_btn.clicked.connect(self._archive_profile)
+        actions.addWidget(self._archive_btn)
+
+        self._restore_btn = QPushButton("Restore")
+        self._restore_btn.clicked.connect(self._restore_profile)
+        actions.addWidget(self._restore_btn)
+
+        self._delete_btn = QPushButton("Delete")
+        self._delete_btn.clicked.connect(self._delete_profile)
+        actions.addWidget(self._delete_btn)
+        actions.addStretch()
+
+        save_close_btn = QPushButton("Save && Close")
+        save_close_btn.clicked.connect(self._save_and_close)
+        actions.addWidget(save_close_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        actions.addWidget(cancel_btn)
+        root.addLayout(actions)
+
+        self._table.itemSelectionChanged.connect(self._update_action_states)
+        self._table.itemSelectionChanged.connect(self._load_selected_details)
+        self._refresh()
+
+    def _selected_profile_name(self) -> str | None:
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        item = self._table.item(row, 0)
+        if item is None:
+            return None
+        value = item.data(Qt.UserRole)
+        return str(value).strip() if value else None
+
+    @staticmethod
+    def _fmt_time(raw: str | None) -> str:
+        if not raw:
+            return "--"
+        try:
+            dt = datetime.fromisoformat(raw)
+            return dt.strftime("%Y-%m-%d %H:%M")
+        except ValueError:
+            return str(raw)
+
+    def _refresh(self):
+        previous = self._selected_profile_name() or self._active_profile
+        rows = self._store.list_profiles_info(
+            include_archived=self._show_archived.isChecked()
+        )
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(rows))
+        for idx, row in enumerate(rows):
+            name = str(row.get("name") or "")
+            archived = bool(row.get("archived"))
+            status = "Archived" if archived else "Active"
+            if name.casefold() == self._active_profile.casefold():
+                status = f"{status} (current)"
+
+            name_item = QTableWidgetItem(name)
+            name_item.setData(Qt.UserRole, name)
+            status_item = QTableWidgetItem(status)
+            last_used_item = QTableWidgetItem(
+                self._fmt_time(row.get("last_used_at") if isinstance(row.get("last_used_at"), str) else None)
+            )
+            created_item = QTableWidgetItem(
+                self._fmt_time(row.get("created_at") if isinstance(row.get("created_at"), str) else None)
+            )
+
+            self._table.setItem(idx, 0, name_item)
+            self._table.setItem(idx, 1, status_item)
+            self._table.setItem(idx, 2, last_used_item)
+            self._table.setItem(idx, 3, created_item)
+        self._table.resizeRowsToContents()
+        self._table.setSortingEnabled(True)
+        if not self._select_row_by_profile(previous) and self._table.rowCount() > 0:
+            self._table.selectRow(0)
+        self._update_action_states()
+        self._load_selected_details()
+
+    def _select_row_by_profile(self, profile_name: str | None) -> bool:
+        if not profile_name:
+            return False
+        needle = profile_name.casefold()
+        for row in range(self._table.rowCount()):
+            item = self._table.item(row, 0)
+            if item is None:
+                continue
+            value = str(item.data(Qt.UserRole) or item.text()).strip()
+            if value.casefold() == needle:
+                self._table.selectRow(row)
+                return True
+        return False
+
+    def _update_action_states(self):
+        name = self._selected_profile_name()
+        has_selection = bool(name)
+        is_current = (
+            has_selection and name is not None and name.casefold() == self._active_profile.casefold()
+        )
+        archived = False
+        if has_selection and name is not None:
+            row = self._table.currentRow()
+            archived_item = self._table.item(row, 1)
+            archived = archived_item is not None and "Archived" in archived_item.text()
+        self._rename_btn.setEnabled(has_selection)
+        self._archive_btn.setEnabled(has_selection and not archived and not is_current)
+        self._restore_btn.setEnabled(has_selection and archived)
+        self._delete_btn.setEnabled(has_selection and not is_current)
+
+    def _load_selected_details(self):
+        name = self._selected_profile_name()
+        if not name:
+            self._age_input.clear()
+            self._gender_input.setCurrentIndex(2)
+            self._notes_input.clear()
+            return
+        try:
+            details = self._store.get_profile_details(name)
+        except ValueError:
+            return
+        age_raw = details.get("age")
+        age_val = int(age_raw) if isinstance(age_raw, int) else 0
+        self._age_input.setText(str(age_val) if 1 <= age_val <= 130 else "")
+        gender_raw = str(details.get("gender") or "").strip()
+        idx = self._gender_input.findText(gender_raw, Qt.MatchFixedString)
+        self._gender_input.setCurrentIndex(idx if idx >= 0 else 2)
+        self._notes_input.setPlainText(str(details.get("notes") or ""))
+
+    def _save_details(self) -> bool:
+        name = self._selected_profile_name()
+        if not name:
+            return True
+        age_text = self._age_input.text().strip()
+        age: int | None = None
+        if age_text:
+            if not age_text.isdigit():
+                QMessageBox.warning(self, "Invalid Age", "Age must be a number between 1 and 130.")
+                return False
+            age = int(age_text)
+            if age < 1 or age > 130:
+                QMessageBox.warning(self, "Invalid Age", "Age must be a number between 1 and 130.")
+                return False
+        gender = self._gender_input.currentText().strip()
+        notes = self._notes_input.toPlainText().strip()
+        try:
+            self._store.update_profile_details(
+                name,
+                age=age,
+                gender=gender,
+                notes=notes or None,
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Save Failed", str(exc))
+            return False
+        self._refresh()
+        self._select_row_by_profile(name)
+        return True
+
+    def _save_and_close(self):
+        if self._save_details():
+            self.accept()
+
+    def _create_profile(self):
+        text, ok = QInputDialog.getText(self, "Create Profile", "Profile name:")
+        if not ok:
+            return
+        name = text.strip()
+        if not name:
+            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
+            return
+        self._store.ensure_profile(name)
+        self._refresh()
+
+    def _rename_profile(self):
+        current = self._selected_profile_name()
+        if not current:
+            return
+        text, ok = QInputDialog.getText(
+            self, "Rename Profile", "New profile name:", text=current
+        )
+        if not ok:
+            return
+        new_name = text.strip()
+        if not new_name:
+            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
+            return
+        try:
+            renamed = self._store.rename_profile(current, new_name)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Rename Failed", str(exc))
+            return
+        if current.casefold() == self._active_profile.casefold():
+            self._active_profile = renamed
+        self._refresh()
+
+    def _archive_profile(self):
+        current = self._selected_profile_name()
+        if not current:
+            return
+        try:
+            self._store.archive_profile(current)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Archive Failed", str(exc))
+            return
+        self._refresh()
+
+    def _restore_profile(self):
+        current = self._selected_profile_name()
+        if not current:
+            return
+        self._store.ensure_profile(current)
+        self._refresh()
+
+    def _delete_profile(self):
+        current = self._selected_profile_name()
+        if not current:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Profile",
+            f"Delete profile '{current}' and its indexed history records?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self._store.delete_profile(current)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Delete Failed", str(exc))
+            return
+        self._refresh()
+
+
+class ClickableLabel(QLabel):
+    clicked = Signal()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit()
+        super().mousePressEvent(event)
 
 
 class PacerWidget(QChartView):
@@ -616,7 +1423,11 @@ class View(QMainWindow):
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
         self._session_root = Path.home() / "Hertz-and-Hearts"
-        self._session_profile_id = "Default"
+        self._profile_store = ProfileStore(self._session_root)
+        self._session_profile_id = (
+            self._profile_store.get_last_active_profile() or "Default"
+        )
+        self._profile_store.ensure_profile(self._session_profile_id)
 
         self.setWindowTitle(f"Hertz & Hearts ({version})")
         self.setWindowIcon(QIcon(":/logo.png"))
@@ -811,6 +1622,10 @@ class View(QMainWindow):
         self.save_recording_button.clicked.connect(self.finalize_session)
         self.export_report_button = QPushButton("Report")
         self.export_report_button.clicked.connect(self.export_report)
+        self.history_button = QPushButton("History")
+        self.history_button.clicked.connect(self._open_history)
+        self.profile_manager_button = QPushButton("Profiles")
+        self.profile_manager_button.clicked.connect(self._open_profile_manager)
 
         self.annotation = QComboBox()
         self.annotation.setEditable(True)
@@ -830,10 +1645,14 @@ class View(QMainWindow):
 
         # Settings button
         self._settings_button = QPushButton("\u2699")
-        self._settings_button.setToolTip("Settings")
+        self._settings_button.setToolTip(
+            "Settings (sampling, thresholds, display, annotations) [Ctrl+,]"
+        )
         self._settings_button.setFixedWidth(28)
         self._settings_button.setStyleSheet("font-size: 14px; padding: 2px;")
         self._settings_button.clicked.connect(self._open_settings)
+        self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        self._settings_shortcut.activated.connect(self._open_settings)
 
         # Tooltips for buttons and key data fields.
         self.scan_button.setToolTip("Scan for nearby Bluetooth heart sensors.")
@@ -847,6 +1666,8 @@ class View(QMainWindow):
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
         self.save_recording_button.setToolTip("Finalize the active session and save artifacts.")
         self.export_report_button.setToolTip("Export a draft/final DOCX report for this session.")
+        self.history_button.setToolTip("Show recent session history for the active user profile.")
+        self.profile_manager_button.setToolTip("Manage user profiles (create, rename, archive, delete).")
         self.annotation.setToolTip("Choose or type a session annotation.")
         self.annotation_button.setToolTip("Add the current annotation to the session log.")
         self.pacer_rate.setToolTip("Breathing pacer rate in breaths per minute.")
@@ -862,6 +1683,26 @@ class View(QMainWindow):
         central = QWidget()
         self.vlayout0 = QVBoxLayout(central)
         self.vlayout0.setSpacing(4)
+
+        # Header row: centered active profile with settings control at top-right.
+        header_row = QHBoxLayout()
+        header_row.setContentsMargins(0, 0, 0, 0)
+        header_row.setSpacing(4)
+        self._header_left_spacer = QWidget()
+        # Balance the right-side header controls so the center label stays visually centered.
+        self._header_left_spacer.setFixedWidth(116)
+        self.profile_header_label = QLabel(f"User: {self._session_profile_id}")
+        self.profile_header_label.setStyleSheet(
+            "font-size: 14px; font-weight: 600; color: #2c3e50;"
+        )
+        self.profile_header_label.setAlignment(Qt.AlignCenter)
+        header_row.addWidget(self._header_left_spacer)
+        header_row.addStretch()
+        header_row.addWidget(self.profile_header_label, alignment=Qt.AlignCenter)
+        header_row.addStretch()
+        header_row.addWidget(self.profile_manager_button)
+        header_row.addWidget(self._settings_button)
+        self.vlayout0.addLayout(header_row)
 
         # Main content row: equal-height plots on left, pacer stack on right.
         self.content_row = QHBoxLayout()
@@ -894,14 +1735,6 @@ class View(QMainWindow):
         self.content_row.addWidget(pacer_container, stretch=0, alignment=Qt.AlignTop)
         self.vlayout0.addLayout(self.content_row, stretch=90)
 
-        # Settings row: keep gear in lower-right utility area.
-        settings_row = QHBoxLayout()
-        settings_row.setContentsMargins(0, 0, 0, 0)
-        settings_row.setSpacing(0)
-        settings_row.addStretch()
-        settings_row.addWidget(self._settings_button)
-        self.vlayout0.addLayout(settings_row)
-
         # BOTTOM ROW 1: Full-width status banner + reset
         progress_row = QHBoxLayout()
         progress_row.setSpacing(8)
@@ -929,6 +1762,10 @@ class View(QMainWindow):
         self.save_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.export_report_button.setMaximumWidth(116)
         self.export_report_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.history_button.setMaximumWidth(80)
+        self.history_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.profile_manager_button.setMaximumWidth(80)
+        self.profile_manager_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.address_menu.setMaximumWidth(320)
         self.address_menu.setStyleSheet("font-size: 11px;")
 
@@ -983,6 +1820,7 @@ class View(QMainWindow):
         toolbar.addWidget(self.start_recording_button)
         toolbar.addWidget(self.save_recording_button)
         toolbar.addWidget(self.export_report_button)
+        toolbar.addWidget(self.history_button)
         toolbar.addWidget(self.annotation)
         toolbar.addWidget(self.annotation_button)
 
@@ -1001,12 +1839,74 @@ class View(QMainWindow):
         self._apply_connect_ready_state()
         self._start_connect_hints()
         self._update_session_actions()
+        QTimer.singleShot(0, self._run_startup_flow)
 
         # Set Axis Labels
         self.ibis_widget.x_axis.setTitleText("Seconds")
         self.ibis_widget.y_axis.setTitleText("Heart Rate (bpm)")
         self.hrv_widget.x_axis.setTitleText("Seconds")
         self.hrv_widget.y_axis.setTitleText("RMSSD (ms)")
+
+    def _prompt_for_session_profile(self) -> str | None:
+        profiles = self._profile_store.list_profiles()
+        last_profile = self._profile_store.get_last_active_profile()
+        dlg = ProfileSelectionDialog(profiles=profiles, last_profile=last_profile, parent=self)
+        if dlg.exec() != QDialog.Accepted:
+            return None
+        if dlg.selected_profile is None:
+            return None
+        return self._profile_store.ensure_profile(dlg.selected_profile)
+
+    def _set_active_profile(self, profile_id: str, announce: bool = False):
+        self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
+        self.profile_header_label.setText(f"User: {self._session_profile_id}")
+        if announce:
+            self.show_status(f"Active user: {self._session_profile_id}")
+
+    def _should_show_disclaimer_for_profile(self, profile_id: str) -> bool:
+        hide_value = self._profile_store.get_profile_pref(
+            profile_id, "hide_disclaimer", default="0"
+        )
+        return hide_value != "1"
+
+    def _show_card0_dialog(self, profile_id: str) -> bool:
+        dlg = Card0Dialog(self, allow_skip_for_profile=True)
+        dlg.showMaximized()
+        if dlg.exec() != QDialog.Accepted:
+            return False
+        # Persist only the opt-out signal here.
+        # Reset to showing the disclaimer is handled explicitly in Settings.
+        if dlg.dont_show_again_for_profile:
+            self._profile_store.set_profile_pref(
+                profile_id,
+                "hide_disclaimer",
+                "1",
+            )
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Information)
+            msg.setWindowTitle("Preference Saved")
+            msg.setText(
+                "This disclaimer will be skipped on next launch for this user.\n"
+                "You can re-enable it at any time in Settings."
+            )
+            msg.setStandardButtons(QMessageBox.Ok)
+            flags = msg.windowFlags()
+            flags &= ~Qt.WindowMinimizeButtonHint
+            flags &= ~Qt.WindowCloseButtonHint
+            flags |= Qt.CustomizeWindowHint | Qt.WindowTitleHint
+            msg.setWindowFlags(flags)
+            msg.exec()
+        return True
+
+    def _run_startup_flow(self):
+        selected_profile = self._prompt_for_session_profile()
+        if selected_profile is None:
+            self.close()
+            return
+        self._set_active_profile(selected_profile, announce=True)
+        if self._should_show_disclaimer_for_profile(selected_profile):
+            if not self._show_card0_dialog(selected_profile):
+                self.close()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1145,6 +2045,9 @@ class View(QMainWindow):
     def start_session(self, auto: bool = False):
         if self._session_state == "recording":
             return
+        if not self._session_profile_id:
+            self.show_status("Select a user profile before starting a session.")
+            return
         if not self._is_sensor_connected():
             self.show_status("Connect a sensor before starting a session.")
             return
@@ -1159,6 +2062,10 @@ class View(QMainWindow):
         self._session_annotations = []
         self._session_hr_values = []
         self._session_rmssd_values = []
+        self._profile_store.record_session_started(
+            profile_name=self._session_profile_id,
+            bundle=self._session_bundle,
+        )
         self.signals.start_recording.emit(str(self._session_bundle.csv_path))
         self._set_session_state("recording")
         self._persist_manifest(state="recording", report_stage="draft")
@@ -1171,6 +2078,11 @@ class View(QMainWindow):
         if self._session_state != "recording":
             return
         self.signals.save_recording.emit()
+        if self._session_bundle is not None:
+            self._profile_store.record_session_finished(
+                session_id=self._session_bundle.session_id,
+                state="abandoned",
+            )
         self._persist_manifest(state="abandoned", report_stage="draft")
         self._set_session_state("finalized")
 
@@ -1187,6 +2099,11 @@ class View(QMainWindow):
             except Exception as exc:
                 if show_message:
                     self.show_status(f"Final report generation failed: {exc}")
+        if self._session_bundle is not None:
+            self._profile_store.record_session_finished(
+                session_id=self._session_bundle.session_id,
+                state="finalized",
+            )
         self._set_session_state("finalized")
         self._persist_manifest(state="finalized", report_stage="final")
         if show_message and self._session_bundle is not None:
@@ -1475,8 +2392,45 @@ class View(QMainWindow):
 
     def _open_settings(self):
         dlg = SettingsDialog(self.settings, parent=self)
-        dlg.exec()
+        if dlg.exec() == QDialog.Accepted:
+            pending_reset = dlg.get_pending_disclaimer_reset()
+            if pending_reset in {"active", "all"}:
+                self._apply_disclaimer_prompt_reset(pending_reset)
         self._refresh_annotation_list()
+
+    def _open_history(self):
+        sessions = self._profile_store.list_sessions(
+            profile_name=self._session_profile_id,
+            limit=200,
+        )
+        dlg = SessionHistoryDialog(
+            profile_name=self._session_profile_id,
+            sessions=sessions,
+            parent=self,
+        )
+        dlg.exec()
+
+    def _open_profile_manager(self):
+        if self._session_state == "recording":
+            self.show_status("Profile changes are disabled during an active recording.")
+            return
+        dlg = ProfileManagerDialog(
+            store=self._profile_store,
+            active_profile=self._session_profile_id,
+            parent=self,
+        )
+        dlg.exec()
+        latest_active = self._profile_store.get_last_active_profile()
+        if latest_active and latest_active.casefold() != self._session_profile_id.casefold():
+            self._set_active_profile(latest_active, announce=True)
+
+    def _apply_disclaimer_prompt_reset(self, scope: str):
+        if scope == "all":
+            self._profile_store.clear_profile_pref_for_all("hide_disclaimer")
+            self.show_status("Disclaimer prompt reset for all users.")
+            return
+        self._profile_store.clear_profile_pref(self._session_profile_id, "hide_disclaimer")
+        self.show_status(f"Disclaimer prompt reset for user: {self._session_profile_id}")
 
     def _on_connect_timeout(self):
         if self.sensor.client is not None:
