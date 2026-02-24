@@ -60,9 +60,6 @@ class Application(QApplication):
         # 1. The "Handshake" connection (Fast & Simple)
         self._view.sensor.ibi_update.connect(self._model.hr_handler)
 
-        # 2. The "Math/Chart" connection (The Heavy Lifting)
-        self._view.sensor.ibi_update.connect(self._model.update_ibis_buffer)
-        
 def main():
     _warn_if_pandas_neurokit_combo_is_risky()
     app = Application(sys.argv)

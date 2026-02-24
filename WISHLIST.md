@@ -306,6 +306,30 @@ Implementation checklist:
 - Status: triaged
 - Notes: Keep decoded values bit-for-bit compatible with current output.
 
+### 29) [PERF/UX] Preserve plot history across disconnects with auto system annotations
+- Problem: Clearing plots on disconnect removes useful clinical context; users may not have time to manually annotate connectivity faults.
+- Proposed approach: Keep existing HR/RMSSD/SDNN traces visible, gray plots during disconnect with overlay copy, resume with a blank timeline gap (no deceptive bridge line), and auto-log system annotations for disconnect/reconnect with reason and duration.
+- Effort: M
+- Impact: High
+- Status: planned
+- Notes: Persist disconnect intervals/count/total duration in manifest and include generated annotations in CSV/report timelines.
+
+### 30) [F33] EDF export implementation (native + CSV backfill path)
+- Problem: Session manifests include an EDF artifact path but EDF writing is still marked planned and not produced.
+- Proposed approach: Implement EDF export at finalize-time from captured session streams, plus a follow-on backfill utility that can generate EDF from existing CSV sessions.
+- Effort: M
+- Impact: High
+- Status: planned
+- Notes: CSV→EDF is feasible but requires careful channel mapping, timestamps/start-time handling, and fixed sample-rate handling (resample/interpolate irregular streams where needed).
+
+### 31) [PERF/UX] Reconnect gap rendering parity (low priority)
+- Problem: After sensor-induced disconnect/reconnect, traces can resume with wonky continuity; button-driven disconnect/reconnect currently clears all plots, creating inconsistent behavior.
+- Proposed approach: Normalize reconnect handling so both disconnect paths preserve history with an explicit blank gap (or clearly marked disconnect segment) and avoid deceptive line continuity.
+- Effort: M
+- Impact: Low
+- Status: triaged
+- Notes: Low-priority polish follow-up after higher-value plotting/performance tasks.
+
 ## PlannedNext
 
 Items that are implementation-ready and should be picked up soon.

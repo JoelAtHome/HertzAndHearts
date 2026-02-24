@@ -1188,17 +1188,27 @@ class EcgWindow(QMainWindow):
 
     def _zoom_in(self):
         if self._follow_main_xrange:
+            # Base first manual zoom step on the currently visible span, not the
+            # default ECG window span, to avoid abrupt jump-in behavior.
+            current_range = self._plot_widget.viewRange()[0]
+            current_span = float(current_range[1] - current_range[0])
+            if current_span > 0:
+                self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
-        self._view_sec = max(0.5, self._view_sec / 2)
+        self._view_sec = max(0.5, self._view_sec / 1.4)
         if self._frozen:
             self._refresh_frozen_view()
 
     def _zoom_out(self):
         if self._follow_main_xrange:
+            current_range = self._plot_widget.viewRange()[0]
+            current_span = float(current_range[1] - current_range[0])
+            if current_span > 0:
+                self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
-        self._view_sec = min(self._max_view_sec, self._view_sec * 2)
+        self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
         if self._frozen:
             self._refresh_frozen_view()
 
@@ -1325,8 +1335,8 @@ class QtcWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hertz & Hearts — QTc Monitor")
-        self.setMinimumSize(600, 300)
-        self.resize(900, 350)
+        self.setMinimumSize(760, 320)
+        self.resize(1120, 380)
 
         self._plot_widget = pg.PlotWidget(background="w")
         self._plot_widget.showGrid(x=True, y=True, alpha=0.25)
@@ -1337,6 +1347,7 @@ class QtcWindow(QMainWindow):
         self._plot_widget.getAxis("left").setPen(pg.mkPen("k"))
         self._plot_widget.getAxis("bottom").setPen(pg.mkPen("k"))
         self._plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
+        self._plot_widget.hideButtons()
         self._plot_widget.setYRange(410, 505, padding=0)
         self._plot_widget.setXRange(0, 60, padding=0)
         self._plot_widget.addLegend(offset=(8, 8))
@@ -1383,12 +1394,13 @@ class QtcWindow(QMainWindow):
         )
 
         self._statusbar = QStatusBar()
-        self._info_button = QPushButton("Info")
-        self._info_button.setFixedWidth(64)
+        self._info_button = QPushButton("i")
+        self._info_button.setFixedWidth(22)
         self._info_button.setToolTip("How to interpret QTc trend and uncertainty.")
+        self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
         self._info_button.clicked.connect(self._show_info)
-        self._freeze_button = QPushButton("Freeze QTc")
-        self._freeze_button.setFixedWidth(92)
+        self._freeze_button = QPushButton("Freeze")
+        self._freeze_button.setFixedWidth(74)
         self._freeze_button.clicked.connect(self._toggle_freeze)
         self._statusbar.addPermanentWidget(self._info_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
@@ -1407,6 +1419,36 @@ class QtcWindow(QMainWindow):
         self._p25 = deque(maxlen=1200)
         self._p75 = deque(maxlen=1200)
         self._lowq = deque(maxlen=1200)
+        self._formula_label = "Formula: pending"
+        self._formula_reason_label = "Rationale: pending"
+
+    @staticmethod
+    def _format_formula_label(payload: dict) -> str:
+        formula_used = payload.get("formula_used")
+        formula_default = payload.get("formula_default")
+        if isinstance(formula_used, str) and formula_used.strip():
+            used = formula_used.strip().lower()
+            if used == "mixed":
+                return "Formula: adaptive (Bazett/Fridericia)"
+            return f"Formula: {used.capitalize()}"
+        if isinstance(formula_default, str) and formula_default.strip():
+            default = formula_default.strip().lower()
+            return f"Formula: {default.capitalize()} (default)"
+        return "Formula: unknown"
+
+    @staticmethod
+    def _format_formula_reason_label(payload: dict) -> str:
+        suggestion = payload.get("method_suggestion")
+        if isinstance(suggestion, dict):
+            reasoning = suggestion.get("reasoning")
+            if isinstance(reasoning, str):
+                cleaned = " ".join(reasoning.strip().split())
+                if cleaned:
+                    # Keep status text concise while preserving the rationale.
+                    first_sentence = cleaned.split(". ")[0].rstrip(".")
+                    if first_sentence:
+                        return f"Rationale: {first_sentence}."
+        return "Rationale: insufficient data."
 
     def _show_info(self):
         msg = QMessageBox(self)
@@ -1456,7 +1498,7 @@ class QtcWindow(QMainWindow):
 
     def set_stream_frozen(self, frozen: bool):
         self._frozen = bool(frozen)
-        self._freeze_button.setText("Resume QTc" if self._frozen else "Freeze QTc")
+        self._freeze_button.setText("Resume" if self._frozen else "Freeze")
         if self._frozen:
             self._statusbar.showMessage("QTc view frozen.")
         else:
@@ -1493,12 +1535,16 @@ class QtcWindow(QMainWindow):
     def append_payload(self, payload: dict):
         if not isinstance(payload, dict):
             return
+        self._formula_label = self._format_formula_label(payload)
+        self._formula_reason_label = self._format_formula_reason_label(payload)
         trend_point = payload.get("trend_point")
         if not isinstance(trend_point, dict):
             quality = payload.get("quality", {}) if isinstance(payload, dict) else {}
             reason = quality.get("reason") if isinstance(quality, dict) else None
             if isinstance(reason, str) and reason.strip():
-                self._statusbar.showMessage(f"QTc waiting: {reason}.")
+                self._statusbar.showMessage(
+                    f"QTc waiting: {reason}. {self._formula_label}. {self._formula_reason_label}"
+                )
             return
         try:
             t_sec = float(trend_point["t_sec"]) + self._timeline_offset_sec
@@ -1567,7 +1613,8 @@ class QtcWindow(QMainWindow):
             self._plot_widget.setXRange(x_lo, x_hi + 2.0, padding=0)
             self._threshold_label.setPos(x_hi + 1.0, 471)
         self._statusbar.showMessage(
-            "QTc streaming. For trend context only; clinical interpretation requires review."
+            f"QTc streaming. {self._formula_label}. {self._formula_reason_label} "
+            "For trend context only; clinical interpretation requires review."
         )
 
     def closeEvent(self, event):
@@ -1749,7 +1796,7 @@ class View(QMainWindow):
         self.baseline_hr_values = []
         self.baseline_hr = None
         self.start_time = None 
-        self._plot_start_delay_seconds = 1.5
+        self._plot_start_delay_seconds = 3.0
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -2642,6 +2689,15 @@ class View(QMainWindow):
         if self.poincare_window.isVisible():
             self.poincare_window.hide()
         self.poincare_window.clear()
+        self.hrv_widget.time_series.clear()
+        self.hr_trend_series.clear()
+        self.sdnn_series.clear()
+        if hasattr(self, 'baseline_series'):
+            self.hrv_widget.chart().removeSeries(self.baseline_series)
+            del self.baseline_series
+        if hasattr(self, 'hr_baseline_series'):
+            self.ibis_widget.plot.removeSeries(self.hr_baseline_series)
+            del self.hr_baseline_series
         self.sensor.disconnect_client()
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
@@ -3033,38 +3089,74 @@ class View(QMainWindow):
         if hasattr(self, 'hr_baseline_series'):
             self.hr_baseline_series.clear()
 
+    @staticmethod
+    def _series_points(series: QLineSeries) -> list[QPointF]:
+        if hasattr(series, "pointsVector"):
+            return list(series.pointsVector())
+        return list(series.points())
+
+    def _visible_series_values(self, series: QLineSeries, x_min: float, x_max: float) -> list[float]:
+        vals: list[float] = []
+        for p in self._series_points(series):
+            x = float(p.x())
+            if x_min <= x <= x_max:
+                vals.append(float(p.y()))
+        return vals
+
     def reset_y_axes(self):
-        # Heart-rate plot: center around baseline/last value with generous +/-50% span.
-        hr_ref = self.baseline_hr
-        if hr_ref is None and self._session_hr_values:
-            hr_ref = self._session_hr_values[-1]
-        if hr_ref is None:
-            hr_ref = 80.0
-        half_span = max(20.0, hr_ref * 0.5)
-        hr_lo = max(30.0, hr_ref - half_span)
-        hr_hi = min(220.0, hr_ref + half_span)
+        x_min = float(self.ibis_widget.x_axis.min())
+        x_max = float(self.ibis_widget.x_axis.max())
+
+        # Heart-rate plot: fit to currently visible points with headroom.
+        hr_vals = self._visible_series_values(self.hr_trend_series, x_min, x_max)
+        if hr_vals:
+            hr_lo = max(30.0, min(hr_vals))
+            hr_hi = min(220.0, max(hr_vals))
+            span = max(40.0, hr_hi - hr_lo)
+            pad = max(8.0, span * 0.15)
+            hr_lo = max(30.0, hr_lo - pad)
+            hr_hi = min(220.0, hr_hi + pad)
+        else:
+            hr_ref = self.baseline_hr
+            if hr_ref is None and self._session_hr_values:
+                hr_ref = self._session_hr_values[-1]
+            if hr_ref is None:
+                hr_ref = 80.0
+            half_span = max(20.0, hr_ref * 0.5)
+            hr_lo = max(30.0, hr_ref - half_span)
+            hr_hi = min(220.0, hr_ref + half_span)
         if hr_hi - hr_lo < 40.0:
-            hr_hi = min(220.0, hr_lo + 40.0)
+            center = (hr_hi + hr_lo) / 2.0
+            hr_lo = max(30.0, center - 20.0)
+            hr_hi = min(220.0, center + 20.0)
         self._hr_axis_floor = int(hr_lo)
         self._hr_axis_ceiling = int(hr_hi)
         self.ibis_widget.y_axis.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
         self.hr_y_axis_right.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
 
-        # RMSSD plot: baseline + 50% (or fallback from current values).
-        rmssd_ref = self.baseline_rmssd
-        if rmssd_ref is None and self._session_rmssd_values:
-            rmssd_ref = self._session_rmssd_values[-1]
-        if rmssd_ref is None:
-            rmssd_ref = 20.0
-        hrv_ceil = max(20.0, rmssd_ref * 1.5)
+        # RMSSD/SDNN: use maxima from currently visible points so highs are not clipped.
+        rmssd_vals = self._visible_series_values(self.hrv_widget.time_series, x_min, x_max)
+        sdnn_vals = self._visible_series_values(self.sdnn_series, x_min, x_max)
+        if rmssd_vals:
+            hrv_ceil = max(20.0, max(rmssd_vals) * 1.2)
+        else:
+            rmssd_ref = self.baseline_rmssd
+            if rmssd_ref is None and self._session_rmssd_values:
+                rmssd_ref = self._session_rmssd_values[-1]
+            if rmssd_ref is None:
+                rmssd_ref = 20.0
+            hrv_ceil = max(20.0, rmssd_ref * 1.5)
         self._hrv_axis_ceiling = int(-(-hrv_ceil // 5)) * 5
         self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
 
-        sdnn_ref = self._sdnn_smooth_buf[-1] if self._sdnn_smooth_buf else (rmssd_ref * 0.75)
-        sdnn_ceil = max(30.0, sdnn_ref * 1.5)
+        if sdnn_vals:
+            sdnn_ceil = max(30.0, max(sdnn_vals) * 1.2)
+        else:
+            sdnn_ref = self._sdnn_smooth_buf[-1] if self._sdnn_smooth_buf else 30.0
+            sdnn_ceil = max(30.0, sdnn_ref * 1.5)
         self._sdnn_axis_ceiling = int(-(-sdnn_ceil // 5)) * 5
         self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
-        self.show_status("Y-axes reset to baseline-centered ranges.")
+        self.show_status("Y-axes reset to visible data range.")
 
     def _update_phase_progress_banner(self, elapsed: float, source: str = "unknown"):
         settling_duration = float(self.settings.SETTLING_DURATION)
@@ -3224,8 +3316,8 @@ class View(QMainWindow):
 
             # Compute and plot SDNN from IBI buffer
             sdnn = None
-            if len(ibis) >= 10:
-                sdnn = statistics.stdev(ibis[-30:])
+            if len(ibis) >= 3:
+                sdnn = statistics.stdev(ibis[-min(30, len(ibis)):])
                 self._sdnn_smooth_buf.append(sdnn)
                 while len(self._sdnn_smooth_buf) > smooth_n:
                     self._sdnn_smooth_buf.pop(0)
