@@ -2,6 +2,7 @@ import numpy as np
 import statistics
 import math
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtBluetooth import QBluetoothDeviceInfo
@@ -30,6 +31,8 @@ class Model(QObject):
     hrv_target_update = Signal(NamedSignal)
     stress_ratio_update = Signal(NamedSignal)
     qtc_update = Signal(NamedSignal)
+    _qtc_compute_done = Signal(int, int, object)
+    _qtc_compute_failed = Signal(int)
 
     def clear_buffers(self):
         """Wipes the data history to allow rapid recovery from noise."""
@@ -40,6 +43,9 @@ class Model(QObject):
         self._ecg_samples_since_qtc = 0
         self._ecg_total_samples = 0
         self.latest_qtc_payload = default_qtc_payload()
+        # Invalidate any in-flight result and drop queued work.
+        self._qtc_latest_request_seq += 1
+        self._qtc_pending_request = None
         self.ewma_hrv = 1.0
 
     def __init__(self):
@@ -73,6 +79,13 @@ class Model(QObject):
         self._ecg_samples_since_qtc = 0
         self._ecg_total_samples = 0
         self.latest_qtc_payload: dict = default_qtc_payload()
+        self._qtc_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="qtc-worker")
+        self._qtc_future: Future | None = None
+        self._qtc_active_seq: int | None = None
+        self._qtc_latest_request_seq: int = 0
+        self._qtc_pending_request: tuple[int, list[float], QtcConfig, int] | None = None
+        self._qtc_compute_done.connect(self._on_qtc_compute_done)
+        self._qtc_compute_failed.connect(self._on_qtc_compute_failed)
 
 
     def hr_handler(self, rr_ms):
@@ -119,7 +132,7 @@ class Model(QObject):
         # Recompute every ~2 seconds of incoming ECG.
         if self._ecg_samples_since_qtc >= ECG_SAMPLE_RATE * 2:
             self._ecg_samples_since_qtc = 0
-            self._compute_qtc()
+            self._schedule_qtc_compute()
 
     
     @Slot(int)
@@ -260,10 +273,8 @@ class Model(QObject):
         )
         self.hrv_seconds.append(0.0)
 
-    def _compute_qtc(self):
-        if len(self._ecg_buffer) < ECG_SAMPLE_RATE * 5:
-            return
-        cfg = QtcConfig(
+    def _build_qtc_config(self) -> QtcConfig:
+        return QtcConfig(
             sampling_rate=ECG_SAMPLE_RATE,
             summary_window_seconds=int(self._settings.QTC_SUMMARY_WINDOW_SECONDS),
             min_valid_beats=int(self._settings.QTC_MIN_VALID_BEATS),
@@ -274,10 +285,64 @@ class Model(QObject):
             trend_enabled=bool(self._settings.QTC_TREND_ENABLED),
             default_formula="bazett",
         )
-        payload = compute_qtc_payload_from_ecg(list(self._ecg_buffer), cfg)
+
+    def _schedule_qtc_compute(self):
+        if len(self._ecg_buffer) < ECG_SAMPLE_RATE * 5:
+            return
+
+        self._qtc_latest_request_seq += 1
+        seq = self._qtc_latest_request_seq
+        request = (seq, list(self._ecg_buffer), self._build_qtc_config(), self._ecg_total_samples)
+        if self._qtc_active_seq is None:
+            self._submit_qtc_job(request)
+        else:
+            # Latest-only policy: keep exactly one pending request, always newest.
+            self._qtc_pending_request = request
+
+    def _submit_qtc_job(self, request: tuple[int, list[float], QtcConfig, int]):
+        seq, ecg_samples, cfg, total_samples = request
+        self._qtc_active_seq = seq
+        future = self._qtc_executor.submit(compute_qtc_payload_from_ecg, ecg_samples, cfg)
+        self._qtc_future = future
+
+        def _done_callback(done_future: Future, done_seq: int = seq, done_total_samples: int = total_samples):
+            try:
+                payload = done_future.result()
+            except Exception:
+                self._qtc_compute_failed.emit(done_seq)
+                return
+            self._qtc_compute_done.emit(done_seq, done_total_samples, payload)
+
+        future.add_done_callback(_done_callback)
+
+    @Slot(int, int, object)
+    def _on_qtc_compute_done(self, seq: int, total_samples: int, payload: object):
+        if seq == self._qtc_active_seq:
+            self._qtc_active_seq = None
+            self._qtc_future = None
+
+        if isinstance(payload, dict) and seq == self._qtc_latest_request_seq:
+            self._publish_qtc_payload(payload, total_samples)
+
+        if self._qtc_active_seq is None and self._qtc_pending_request is not None:
+            pending = self._qtc_pending_request
+            self._qtc_pending_request = None
+            self._submit_qtc_job(pending)
+
+    @Slot(int)
+    def _on_qtc_compute_failed(self, seq: int):
+        if seq == self._qtc_active_seq:
+            self._qtc_active_seq = None
+            self._qtc_future = None
+        if self._qtc_active_seq is None and self._qtc_pending_request is not None:
+            pending = self._qtc_pending_request
+            self._qtc_pending_request = None
+            self._submit_qtc_job(pending)
+
+    def _publish_qtc_payload(self, payload: dict, total_samples: int):
         trend_point = payload.get("trend_point")
         if isinstance(trend_point, dict):
-            trend_point["t_sec"] = float(self._ecg_total_samples) / float(ECG_SAMPLE_RATE)
+            trend_point["t_sec"] = float(total_samples) / float(ECG_SAMPLE_RATE)
             if not payload.get("quality", {}).get("is_valid", False):
                 trend_point["is_low_quality"] = True
         self.latest_qtc_payload = payload
