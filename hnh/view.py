@@ -1921,7 +1921,7 @@ class View(QMainWindow):
         self.stress_ratio_label = QLabel("LF/HF: --")
         self.health_indicator = QLabel("\u25cf")
         self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
-        self.health_label = QLabel("Signal: Identifying...")
+        self.health_label = QLabel("Signal: Waiting for sensor")
 
         # Pacer controls
         self.pacer_label = QLabel("Rate: 7")
@@ -1972,13 +1972,13 @@ class View(QMainWindow):
         self.freeze_all_button = QPushButton("Freeze All")
         self.freeze_all_button.clicked.connect(self._toggle_freeze_all)
 
-        self.ecg_button = QPushButton("ECG (starting...)")
+        self.ecg_button = QPushButton("ECG (no sensor)")
         self.ecg_button.setEnabled(False)
         self.ecg_button.clicked.connect(self.toggle_ecg_window)
-        self.qtc_button = QPushButton("QTc (starting...)")
+        self.qtc_button = QPushButton("QTc (no sensor)")
         self.qtc_button.setEnabled(False)
         self.qtc_button.clicked.connect(self.toggle_qtc_window)
-        self.poincare_button = QPushButton("Poincare (starting...)")
+        self.poincare_button = QPushButton("Poincare (no sensor)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.clicked.connect(self.toggle_poincare_window)
 
@@ -2314,6 +2314,10 @@ class View(QMainWindow):
         if self._should_show_disclaimer_for_profile(selected_profile):
             if not self._show_card0_dialog(selected_profile):
                 self.close()
+                return
+        # Startup modal dialogs can steal/restore window state on some platforms;
+        # re-assert maximized state once startup flow is complete.
+        QTimer.singleShot(0, self.showMaximized)
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -2655,6 +2659,7 @@ class View(QMainWindow):
         self._apply_freeze_button_states()
         self.is_phase_active = False
         self._reset_signal_popup()
+        self._set_signal_indicator("Disconnected", "gray")
         self.recording_statusbar.set_disconnected()
         self._start_connect_hints()
         self._update_session_actions()
@@ -3388,9 +3393,12 @@ class View(QMainWindow):
                     _save_last_sensor(parts[0].strip(), parts[1].strip())
             self._auto_start_recording()
         elif "error" in status.lower() or "Disconnecting" in status:
+            # If connect failed or link dropped, unblock reconnect immediately.
+            self._connect_attempt_timer.stop()
             self._apply_connect_ready_state()
             self.disconnect_button.setEnabled(False)
             self.scan_button.setEnabled(True)
+            self._set_signal_indicator("Disconnected", "gray")
             if self.sensor.client is None:
                 self._start_connect_hints()
 
