@@ -1635,17 +1635,45 @@ class PoincareWindow(QMainWindow):
         self._window_beats = 120
         self._auto_scale = True
         self._locked_bounds: tuple[float, float] | None = None
+        self._latest_auto_bounds: tuple[float, float] | None = None
+        self._axis_hi_soft_cap_ms: float = 2500.0
+        self._zoom_out_factor: float = 1.4
+        self._zoom_in_factor: float = 1.0 / self._zoom_out_factor
 
         central = QWidget()
         layout = QVBoxLayout(central)
         layout.setContentsMargins(6, 6, 6, 6)
         layout.setSpacing(6)
         header = QHBoxLayout()
-        self._scale_button = QPushButton("Scale: AUTO")
+        self._scale_button = QPushButton("Scale AUTO")
         self._scale_button.setToolTip("Toggle between auto-scaling and locked scale.")
         self._scale_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._scale_button.setMinimumWidth(110)
         self._scale_button.clicked.connect(self._toggle_scale_mode)
         header.addWidget(self._scale_button)
+        self._zoom_out_button = QPushButton("-")
+        self._zoom_out_button.setToolTip("Zoom out locked scale.")
+        self._zoom_out_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._zoom_out_button.setFixedWidth(28)
+        self._zoom_out_button.clicked.connect(
+            lambda: self._adjust_locked_scale(self._zoom_out_factor)
+        )
+        header.addWidget(self._zoom_out_button)
+        self._zoom_in_button = QPushButton("+")
+        self._zoom_in_button.setToolTip("Zoom in locked scale.")
+        self._zoom_in_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._zoom_in_button.setFixedWidth(28)
+        self._zoom_in_button.clicked.connect(
+            lambda: self._adjust_locked_scale(self._zoom_in_factor)
+        )
+        header.addWidget(self._zoom_in_button)
+        self._zoom_reset_button = QPushButton("Reset")
+        self._zoom_reset_button.setToolTip("Reset locked scale to current data bounds.")
+        self._zoom_reset_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._zoom_reset_button.setMinimumWidth(52)
+        self._zoom_reset_button.clicked.connect(self._reset_locked_scale)
+        header.addWidget(self._zoom_reset_button)
+        self._set_locked_zoom_controls_visible(False)
         header.addStretch()
         self._info_button = QPushButton("i")
         self._info_button.setFixedWidth(22)
@@ -1663,7 +1691,7 @@ class PoincareWindow(QMainWindow):
         self._plot.getAxis("bottom").setTextPen("k")
         self._plot.getAxis("left").setPen(pg.mkPen("k"))
         self._plot.getAxis("bottom").setPen(pg.mkPen("k"))
-        self._plot.setMouseEnabled(x=True, y=True)
+        self._plot.setMouseEnabled(x=False, y=False)
         self._plot.hideButtons()
 
         self._identity = self._plot.plot(
@@ -1695,28 +1723,95 @@ class PoincareWindow(QMainWindow):
         self.statusBar().showMessage("Waiting for beat data...")
 
     def _apply_square_bounds(self, lo: float, hi: float):
+        lo, hi = self._sanitize_bounds(lo, hi)
         self._plot.setXRange(lo, hi, padding=0)
         self._plot.setYRange(lo, hi, padding=0)
         self._identity.setData([lo, hi], [lo, hi])
 
+    def _sanitize_bounds(self, lo: float, hi: float) -> tuple[float, float]:
+        # RR intervals are non-negative, so keep chart bounds non-negative too.
+        lo = float(lo)
+        hi = float(hi)
+        if hi < lo:
+            lo, hi = hi, lo
+        lo = max(0.0, lo)
+        cap_hi = self._current_hi_cap()
+        hi = min(hi, cap_hi)
+        if lo > (cap_hi - 10.0):
+            lo = max(0.0, cap_hi - 10.0)
+        hi = max(lo + 10.0, hi)
+        return lo, hi
+
+    def _current_hi_cap(self) -> float:
+        if self._latest_auto_bounds is None:
+            return self._axis_hi_soft_cap_ms
+        # Keep zoom from drifting excessively wide while still allowing
+        # higher ranges when data itself needs it.
+        return max(self._axis_hi_soft_cap_ms, float(self._latest_auto_bounds[1]) + 200.0)
+
+    def _bounds_from_current_view(self) -> tuple[float, float]:
+        x_rng, y_rng = self._plot.viewRange()
+        return self._sanitize_bounds(
+            float(min(x_rng[0], y_rng[0])),
+            float(max(x_rng[1], y_rng[1])),
+        )
+
+    def _set_locked_zoom_controls_visible(self, visible: bool):
+        self._zoom_out_button.setVisible(visible)
+        self._zoom_in_button.setVisible(visible)
+        self._zoom_reset_button.setVisible(visible)
+
+    def _apply_interaction_mode(self):
+        # AUTO keeps scale system-controlled; LOCKED allows user-driven zoom/pan.
+        if self._auto_scale:
+            self._plot.setMouseEnabled(x=False, y=False)
+        else:
+            self._plot.setMouseEnabled(x=True, y=True)
+
+    def _adjust_locked_scale(self, factor: float):
+        if self._auto_scale:
+            return
+        if self._locked_bounds is None:
+            self._locked_bounds = self._bounds_from_current_view()
+        lo, hi = self._locked_bounds
+        span = max(10.0, hi - lo) * float(factor)
+        span = max(10.0, min(span, 5000.0))
+        center = (lo + hi) / 2.0
+        new_lo = center - (span / 2.0)
+        new_hi = center + (span / 2.0)
+        self._locked_bounds = self._sanitize_bounds(new_lo, new_hi)
+        self._apply_square_bounds(new_lo, new_hi)
+
+    def _reset_locked_scale(self):
+        if self._auto_scale:
+            return
+        if self._latest_auto_bounds is not None:
+            self._locked_bounds = self._sanitize_bounds(*self._latest_auto_bounds)
+            self._apply_square_bounds(*self._locked_bounds)
+            return
+        self._locked_bounds = self._bounds_from_current_view()
+        self._apply_square_bounds(*self._locked_bounds)
+
     def _toggle_scale_mode(self):
         self._auto_scale = not self._auto_scale
         if self._auto_scale:
-            self._scale_button.setText("Scale: AUTO")
+            self._scale_button.setText("Scale AUTO")
             self._locked_bounds = None
+            self._set_locked_zoom_controls_visible(False)
+            self._apply_interaction_mode()
             self.statusBar().showMessage("Scale mode: AUTO")
             return
-        self._scale_button.setText("Scale: LOCK")
-        x_rng, y_rng = self._plot.viewRange()
-        lo = float(min(x_rng[0], y_rng[0]))
-        hi = float(max(x_rng[1], y_rng[1]))
+        self._scale_button.setText("Scale LOCKED")
+        self._set_locked_zoom_controls_visible(True)
+        self._apply_interaction_mode()
+        lo, hi = self._bounds_from_current_view()
         if hi - lo < 10.0:
             center = (hi + lo) / 2.0
             lo = center - 5.0
             hi = center + 5.0
-        self._locked_bounds = (lo, hi)
+        self._locked_bounds = self._sanitize_bounds(lo, hi)
         self._apply_square_bounds(lo, hi)
-        self.statusBar().showMessage("Scale mode: LOCK")
+        self.statusBar().showMessage("Scale mode: LOCKED")
 
     def clear(self):
         self._scatter.setData([], [])
@@ -1743,11 +1838,17 @@ class PoincareWindow(QMainWindow):
         pad = max(20.0, (xy_max - xy_min) * 0.1)
         lo = xy_min - pad
         hi = xy_max + pad
+        self._latest_auto_bounds = self._sanitize_bounds(lo, hi)
         if self._auto_scale:
             self._apply_square_bounds(lo, hi)
         else:
             if self._locked_bounds is None:
-                self._locked_bounds = (lo, hi)
+                self._locked_bounds = self._sanitize_bounds(lo, hi)
+            else:
+                # Preserve manual zoom/pan actions (e.g., mouse wheel) in locked mode.
+                current_bounds = self._bounds_from_current_view()
+                if current_bounds != self._locked_bounds:
+                    self._locked_bounds = current_bounds
             self._apply_square_bounds(*self._locked_bounds)
 
         rr_diff = np.diff(rr)
@@ -1761,7 +1862,7 @@ class PoincareWindow(QMainWindow):
         self._sd1_label.setText(f"SD1: {sd1:.2f} ms")
         self._sd2_label.setText(f"SD2: {sd2:.2f} ms")
         self._ratio_label.setText(f"SD1/SD2: {ratio:.3f}")
-        mode = "AUTO" if self._auto_scale else "LOCK"
+        mode = "AUTO" if self._auto_scale else "LOCKED"
         self.statusBar().showMessage(f"Showing last {rr.size} beats | Scale: {mode}")
 
     def closeEvent(self, event):
@@ -1807,6 +1908,7 @@ class View(QMainWindow):
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
         self._sdnn_axis_ceiling = None
+        self._main_plot_warmup_until: float | None = None
         self._main_plots_frozen = False
         self._all_plots_frozen = False
         self._phase_debug_last_second = -1
@@ -3301,7 +3403,7 @@ class View(QMainWindow):
             now = time.time()
             elapsed = now - self.start_time
             x = elapsed - self._plot_start_delay_seconds
-            plot_gate_open = x >= 0
+            plot_gate_open = self._main_plot_gate_open(now) and x >= 0
             total_calibration_time = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
 
             # Add smoothed RMSSD to Chart
@@ -3541,9 +3643,20 @@ class View(QMainWindow):
     def _handle_stream_reset(self):
         self.model.clear_buffers()
         self._session_qtc_payload = default_qtc_payload()
+        self._arm_main_plot_warmup(clear_series=True)
         self.qtc_window.clear()
         if self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
             self.qtc_button.setText("QTc (warming up...)")
+
+    def _arm_main_plot_warmup(self, clear_series: bool) -> None:
+        self._main_plot_warmup_until = time.time() + float(self._plot_start_delay_seconds)
+        if clear_series:
+            self.hr_trend_series.clear()
+            self.sdnn_series.clear()
+            self.hrv_widget.time_series.clear()
+
+    def _main_plot_gate_open(self, now: float) -> bool:
+        return self._main_plot_warmup_until is None or now >= self._main_plot_warmup_until
 
     def _check_data_timeout(self):
         if self._last_data_time is None:
@@ -3678,11 +3791,9 @@ class View(QMainWindow):
 
             if self.start_time is None:
                 self.start_time = time.time()
+                self._arm_main_plot_warmup(clear_series=True)
                 self.ecg_window.sync_timeline_to_main(self._plot_start_delay_seconds)
                 self.qtc_window.sync_timeline_to_main(self._plot_start_delay_seconds)
-                self.hr_trend_series.clear()
-                self.sdnn_series.clear()
-                self.hrv_widget.time_series.clear()
                 if self.ecg_button.text() != "ECG (waiting for data...)":
                     self.ecg_button.setText("ECG (waiting for data...)")
                 if self.qtc_button.isEnabled() and self.qtc_button.text() != "QTc (warming up...)":
@@ -3710,7 +3821,7 @@ class View(QMainWindow):
             elif self.baseline_hr is None and self.baseline_hr_values:
                 self.baseline_hr = sum(self.baseline_hr_values) / len(self.baseline_hr_values)
 
-            if plot_elapsed < 0:
+            if plot_elapsed < 0 or not self._main_plot_gate_open(now):
                 return
 
             self._session_hr_values.append(self._hr_ewma)

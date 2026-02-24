@@ -271,8 +271,8 @@ Implementation checklist:
 - Proposed approach: Run QTc pipeline in a worker thread/process with latest-only job policy and throttled UI publish.
 - Effort: M
 - Impact: High
-- Status: planned
-- Notes: Add queue-depth and compute-time telemetry to confirm responsiveness gains.
+- Status: implemented
+- Notes: Shipped single-worker QTc background compute with latest-only request coalescing and stale-result suppression; formulas/thresholds/payload schema were preserved. Optional follow-up: add queue-depth and compute-time telemetry for ongoing verification.
 
 ### 25) [PERF] Bound long-session chart series growth
 - Problem: HR/RMSSD/SDNN chart series can grow without pruning, causing long-session slowdown and memory growth.
