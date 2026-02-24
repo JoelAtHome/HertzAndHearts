@@ -11,13 +11,14 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QPushButton, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel,
-    QMessageBox, QScrollArea, QWidget,
+    QMessageBox, QScrollArea, QWidget, QLineEdit, QListWidget,
+    QInputDialog, QAbstractItemView,
 )
 from PySide6.QtCore import Qt
 
-from vns_ta import config as _defaults
+from hnh import config as _defaults
 
-SETTINGS_FILE = Path.home() / ".vns_ta_settings.json"
+SETTINGS_FILE = Path.home() / ".hnh_settings.json"
 
 # ──────────────────────────────────────────────────────────────────────
 #  Registry of user-facing settings
@@ -26,55 +27,6 @@ SETTINGS_FILE = Path.home() / ".vns_ta_settings.json"
 # Keys must match config.py attribute names exactly.
 # "advanced": True marks settings hidden behind the Advanced toggle.
 REGISTRY = OrderedDict([
-    # --- Protocol Thresholds ---
-    ("READINESS_HR_MAX", {
-        "display": "Max Resting HR",
-        "tooltip": (
-            "Heart rate ceiling for the Autonomic Readiness Check.  "
-            "If resting HR exceeds this, the readiness gate fails."
-        ),
-        "type": int, "min": 60, "max": 200, "unit": "BPM",
-        "section": "Protocol Thresholds",
-    }),
-    ("READINESS_RMSSD_MIN", {
-        "display": "Min RMSSD (GO)",
-        "tooltip": (
-            "Minimum baseline RMSSD to pass the readiness check.  "
-            "Above this value, vagal tone is considered adequate for "
-            "stimulation.  Healthy 16 y/o female \u2248 69 ms; medicated "
-            "catatonic patients may sit lower."
-        ),
-        "type": int, "min": 5, "max": 120, "unit": "ms",
-        "section": "Protocol Thresholds",
-    }),
-    ("READINESS_RMSSD_NOGO", {
-        "display": "Critical RMSSD (NO-GO)",
-        "tooltip": (
-            "RMSSD floor below which high sympathetic dominance is "
-            "indicated.  Triggers a NO-GO warning recommending "
-            "pharmacological grounding instead of taVNS."
-        ),
-        "type": int, "min": 5, "max": 60, "unit": "ms",
-        "section": "Protocol Thresholds",
-    }),
-    ("READINESS_SPO2_MIN", {
-        "display": "Min SpO\u2082",
-        "tooltip": (
-            "Lower bound of the acceptable SpO\u2082 range.  "
-            "Values below this fail the readiness check."
-        ),
-        "type": int, "min": 80, "max": 100, "unit": "%",
-        "section": "Protocol Thresholds",
-    }),
-    ("READINESS_SPO2_MAX", {
-        "display": "Max SpO\u2082",
-        "tooltip": (
-            "Upper bound of the acceptable SpO\u2082 range."
-        ),
-        "type": int, "min": 95, "max": 100, "unit": "%",
-        "section": "Protocol Thresholds",
-    }),
-
     # --- Session Timing ---
     ("SETTLING_DURATION", {
         "display": "Settling Duration",
@@ -363,6 +315,226 @@ class Settings:
             self._custom_annotations.append(text)
             self.save()
 
+    def get_custom_annotations(self) -> list[str]:
+        return list(self._custom_annotations)
+
+    def set_custom_annotations(self, items: list[str]):
+        seen: set[str] = set()
+        cleaned: list[str] = []
+        presets_lower = {p.casefold() for p in _defaults.ANNOTATION_PRESETS}
+        for raw in items:
+            text = str(raw).strip()
+            if not text:
+                continue
+            key = text.casefold()
+            if key in presets_lower or key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(text)
+        self._custom_annotations = cleaned
+        self.save()
+
+    def clear_custom_annotations(self):
+        self._custom_annotations = []
+        self.save()
+
+
+class AnnotationEditorDialog(QDialog):
+    """Small dialog to manage custom annotation items."""
+
+    def __init__(self, settings: Settings, parent=None):
+        super().__init__(parent)
+        self._settings = settings
+        self._custom_items: list[str] = settings.get_custom_annotations()
+
+        self.setWindowTitle("Annotation Manager")
+        self.setMinimumSize(560, 420)
+
+        root = QVBoxLayout(self)
+
+        # Search
+        self._search = QLineEdit()
+        self._search.setPlaceholderText("Search annotations...")
+        self._search.textChanged.connect(self._apply_filter)
+        root.addWidget(self._search)
+
+        # Built-in list (read-only)
+        presets_group = QGroupBox("Built-in Presets (read-only)")
+        presets_layout = QVBoxLayout(presets_group)
+        self._presets_list = QListWidget()
+        self._presets_list.setSelectionMode(QAbstractItemView.NoSelection)
+        for item in _defaults.ANNOTATION_PRESETS:
+            self._presets_list.addItem(item)
+        presets_layout.addWidget(self._presets_list)
+        root.addWidget(presets_group)
+
+        # Custom list (editable)
+        custom_group = QGroupBox("Custom Annotations")
+        custom_layout = QVBoxLayout(custom_group)
+        self._custom_list = QListWidget()
+        self._custom_list.setSelectionMode(QAbstractItemView.SingleSelection)
+        custom_layout.addWidget(self._custom_list)
+
+        actions = QHBoxLayout()
+        self._add_btn = QPushButton("Add")
+        self._add_btn.clicked.connect(self._add_item)
+        self._edit_btn = QPushButton("Edit")
+        self._edit_btn.clicked.connect(self._edit_item)
+        self._delete_btn = QPushButton("Delete")
+        self._delete_btn.clicked.connect(self._delete_item)
+        self._up_btn = QPushButton("Move Up")
+        self._up_btn.clicked.connect(self._move_up)
+        self._down_btn = QPushButton("Move Down")
+        self._down_btn.clicked.connect(self._move_down)
+        for btn in (self._add_btn, self._edit_btn, self._delete_btn, self._up_btn, self._down_btn):
+            actions.addWidget(btn)
+        custom_layout.addLayout(actions)
+        root.addWidget(custom_group)
+
+        # Bottom buttons
+        bottom = QHBoxLayout()
+        self._reset_btn = QPushButton("Reset Custom List")
+        self._reset_btn.clicked.connect(self._reset_custom)
+        bottom.addWidget(self._reset_btn)
+        bottom.addStretch()
+        self._close_btn = QPushButton("Close")
+        self._close_btn.clicked.connect(self.reject)
+        self._save_btn = QPushButton("Save")
+        self._save_btn.setDefault(True)
+        self._save_btn.clicked.connect(self._save_and_close)
+        bottom.addWidget(self._close_btn)
+        bottom.addWidget(self._save_btn)
+        root.addLayout(bottom)
+
+        self._reload_custom()
+        self._update_action_state()
+        self._custom_list.itemSelectionChanged.connect(self._update_action_state)
+
+    def _reload_custom(self):
+        self._custom_list.clear()
+        for item in self._custom_items:
+            self._custom_list.addItem(item)
+        self._apply_filter()
+
+    def _current_index(self) -> int:
+        row = self._custom_list.currentRow()
+        return row if 0 <= row < len(self._custom_items) else -1
+
+    def _update_action_state(self):
+        idx = self._current_index()
+        has_sel = idx >= 0
+        self._edit_btn.setEnabled(has_sel)
+        self._delete_btn.setEnabled(has_sel)
+        self._up_btn.setEnabled(has_sel and idx > 0)
+        self._down_btn.setEnabled(has_sel and idx < (len(self._custom_items) - 1))
+
+    def _apply_filter(self):
+        term = self._search.text().strip().casefold()
+        for i in range(self._presets_list.count()):
+            item = self._presets_list.item(i)
+            item.setHidden(bool(term) and term not in item.text().casefold())
+        for i in range(self._custom_list.count()):
+            item = self._custom_list.item(i)
+            item.setHidden(bool(term) and term not in item.text().casefold())
+
+    def _validate_new_text(self, text: str, skip_index: int = -1) -> tuple[bool, str]:
+        value = text.strip()
+        if not value:
+            return False, "Annotation cannot be empty."
+        if len(value) > 80:
+            return False, "Annotation is too long (max 80 characters)."
+        presets = {p.casefold() for p in _defaults.ANNOTATION_PRESETS}
+        if value.casefold() in presets:
+            return False, "That entry already exists as a built-in preset."
+        for idx, existing in enumerate(self._custom_items):
+            if idx == skip_index:
+                continue
+            if value.casefold() == existing.casefold():
+                return False, "That custom annotation already exists."
+        return True, value
+
+    def _add_item(self):
+        text, ok = QInputDialog.getText(self, "Add Annotation", "New annotation:")
+        if not ok:
+            return
+        valid, result = self._validate_new_text(text)
+        if not valid:
+            QMessageBox.warning(self, "Invalid Annotation", result)
+            return
+        self._custom_items.append(result)
+        self._reload_custom()
+        self._custom_list.setCurrentRow(len(self._custom_items) - 1)
+        self._update_action_state()
+
+    def _edit_item(self):
+        idx = self._current_index()
+        if idx < 0:
+            return
+        current = self._custom_items[idx]
+        text, ok = QInputDialog.getText(self, "Edit Annotation", "Annotation:", text=current)
+        if not ok:
+            return
+        valid, result = self._validate_new_text(text, skip_index=idx)
+        if not valid:
+            QMessageBox.warning(self, "Invalid Annotation", result)
+            return
+        self._custom_items[idx] = result
+        self._reload_custom()
+        self._custom_list.setCurrentRow(idx)
+        self._update_action_state()
+
+    def _delete_item(self):
+        idx = self._current_index()
+        if idx < 0:
+            return
+        del self._custom_items[idx]
+        self._reload_custom()
+        if self._custom_items:
+            self._custom_list.setCurrentRow(min(idx, len(self._custom_items) - 1))
+        self._update_action_state()
+
+    def _move_up(self):
+        idx = self._current_index()
+        if idx <= 0:
+            return
+        self._custom_items[idx - 1], self._custom_items[idx] = (
+            self._custom_items[idx],
+            self._custom_items[idx - 1],
+        )
+        self._reload_custom()
+        self._custom_list.setCurrentRow(idx - 1)
+        self._update_action_state()
+
+    def _move_down(self):
+        idx = self._current_index()
+        if idx < 0 or idx >= len(self._custom_items) - 1:
+            return
+        self._custom_items[idx + 1], self._custom_items[idx] = (
+            self._custom_items[idx],
+            self._custom_items[idx + 1],
+        )
+        self._reload_custom()
+        self._custom_list.setCurrentRow(idx + 1)
+        self._update_action_state()
+
+    def _reset_custom(self):
+        reply = QMessageBox.question(
+            self,
+            "Reset Custom List",
+            "Remove all custom annotations?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self._custom_items = []
+        self._reload_custom()
+        self._update_action_state()
+
+    def _save_and_close(self):
+        self._settings.set_custom_annotations(self._custom_items)
+        self.accept()
+
 
 # ──────────────────────────────────────────────────────────────────────
 #  Settings dialog
@@ -376,7 +548,7 @@ class SettingsDialog(QDialog):
         self._widgets: dict[str, QCheckBox | QSpinBox | QDoubleSpinBox] = {}
         self._advanced_groups: list[QGroupBox] = []
 
-        self.setWindowTitle("VNS-TA \u2014 Settings")
+        self.setWindowTitle("Hertz & Hearts \u2014 Settings")
         self.setMinimumWidth(500)
 
         root = QVBoxLayout(self)
@@ -425,6 +597,10 @@ class SettingsDialog(QDialog):
         restore_btn.setToolTip("Reset every setting to its factory default.")
         restore_btn.clicked.connect(self._restore_defaults)
         btn_row.addWidget(restore_btn)
+        ann_btn = QPushButton("Manage Annotations…")
+        ann_btn.setToolTip("Open the custom annotation editor.")
+        ann_btn.clicked.connect(self._open_annotation_manager)
+        btn_row.addWidget(ann_btn)
         btn_row.addStretch()
 
         save_btn = QPushButton("Save && Close")
@@ -507,6 +683,10 @@ class SettingsDialog(QDialog):
         SettingsDialog._show_advanced = show
         for group in self._advanced_groups:
             group.setVisible(show)
+
+    def _open_annotation_manager(self):
+        dlg = AnnotationEditorDialog(self._settings, parent=self)
+        dlg.exec()
 
     # --- lifecycle --------------------------------------------------------
 

@@ -4,6 +4,7 @@ venv/
 misc/
 build/
 dist/
+installer_output/
 *.egg-info
 *.profile
 .DS_Store

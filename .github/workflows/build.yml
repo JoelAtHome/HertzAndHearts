@@ -28,23 +28,22 @@ jobs:
     - name: release build
       if: github.event_name == 'release'
       run: |
-        pyinstaller --onefile --icon=docs/logo.ico --name=VNS-TA.bin vns_ta/app.py --windowed
+        pyinstaller --onefile --icon=docs/logo.ico --name=Hertz-and-Hearts.bin hnh/app.py --windowed
 
     - name: manual build
       if: github.event_name == 'workflow_dispatch'
       run: |
-        pyinstaller --onefile --icon=docs/logo.ico --name=VNS-TA.bin vns_ta/app.py
+        pyinstaller --onefile --icon=docs/logo.ico --name=Hertz-and-Hearts.bin hnh/app.py
 
     - name: upload build artifact
       uses: actions/upload-artifact@v4
       with:
-        name: VNS-TA
-        path: dist/VNS-TA.bin
+        name: Hertz-and-Hearts
+        path: dist/Hertz-and-Hearts.bin
 
     - name: upload build artifact to release
       if: github.event_name == 'release'
       env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}    # token generated implicitly
-      # See https://cli.github.com/manual/gh_release_upload.
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-        gh release upload ${{ github.ref_name }} dist/VNS-TA.bin
+        gh release upload ${{ github.ref_name }} dist/Hertz-and-Hearts.bin

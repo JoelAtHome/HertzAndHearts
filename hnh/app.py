@@ -1,7 +1,8 @@
 import sys
+from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
-from vns_ta.view import View
-from vns_ta.model import Model
+from hnh.view import View
+from hnh.model import Model
 
 class Application(QApplication):
     def __init__(self, sys_argv):
@@ -17,7 +18,8 @@ class Application(QApplication):
         
 def main():
     app = Application(sys.argv)
-    app._view.showMaximized()
+    app._view.show()
+    QTimer.singleShot(0, app._view.showMaximized)
     sys.exit(app.exec())
 
 if __name__ == "__main__":
