@@ -1075,6 +1075,8 @@ class EcgWindow(QMainWindow):
         self._follow_main_xrange = True
         self._last_x_range: tuple[float, float] | None = None
         self._last_y_range: tuple[float, float] | None = None
+        self._suppress_manual_range_signal = False
+        self._pinned = False
 
         self._zoom_out_button = QPushButton("\u2212")
         self._zoom_out_button.setFixedWidth(28)
@@ -1085,10 +1087,22 @@ class EcgWindow(QMainWindow):
         self._zoom_in_button.setFixedWidth(28)
         self._zoom_in_button.setToolTip("Zoom In (show less time)")
         self._zoom_in_button.clicked.connect(self._zoom_in)
+        self._zoom_reset_button = QPushButton("Reset")
+        self._zoom_reset_button.setFixedWidth(56)
+        self._zoom_reset_button.setToolTip("Reset manual zoom to current display window.")
+        self._zoom_reset_button.clicked.connect(self._reset_zoom)
 
         self._freeze_button = QPushButton("Freeze")
         self._freeze_button.setFixedWidth(80)
         self._freeze_button.clicked.connect(self._toggle_freeze)
+        self._pin_button = QPushButton("\U0001F4CC")
+        self._pin_button.setCheckable(True)
+        self._pin_button.setFixedWidth(24)
+        self._pin_button.setToolTip("Pin/unpin this window on top.")
+        self._pin_button.setFlat(True)
+        self._pin_button.setStyleSheet("font-size: 14px; border: none; padding: 0 2px;")
+        self._pin_button.toggled.connect(self._set_pinned)
+        self._update_pin_button_visual()
         self._relock_button = QPushButton("Relock")
         self._relock_button.setFixedWidth(64)
         self._relock_button.setToolTip("Relock this chart to the main plot time range.")
@@ -1101,12 +1115,17 @@ class EcgWindow(QMainWindow):
         self._statusbar.addPermanentWidget(zoom_label)
         self._statusbar.addPermanentWidget(self._zoom_out_button)
         self._statusbar.addPermanentWidget(self._zoom_in_button)
+        self._statusbar.addPermanentWidget(self._zoom_reset_button)
         self._statusbar.addPermanentWidget(self._relock_button)
+        self._statusbar.addPermanentWidget(self._pin_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
         self.setStatusBar(self._statusbar)
         self._statusbar.showMessage("Waiting for ECG data...")
 
         self.setCentralWidget(self._plot_widget)
+        view_box = self._plot_widget.getViewBox()
+        if hasattr(view_box, "sigRangeChangedManually"):
+            view_box.sigRangeChangedManually.connect(self._on_manual_range_changed)
 
         self._refresh_timer = QTimer()
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
@@ -1117,6 +1136,7 @@ class EcgWindow(QMainWindow):
         self._view_sec = float(self._display_sec)
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
+        self._apply_interaction_mode()
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
         buf_size = ECG_SAMPLE_RATE * self._history_sec
@@ -1160,7 +1180,7 @@ class EcgWindow(QMainWindow):
         self._got_first_data = False
         self._frozen = False
         self._freeze_button.setText("Freeze")
-        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._apply_interaction_mode()
         self._last_x_range = None
         self._last_y_range = None
         self._curve.setData([], [])
@@ -1170,25 +1190,62 @@ class EcgWindow(QMainWindow):
         self._refresh_timer.stop()
         self._frozen = False
         self._freeze_button.setText("Freeze")
-        self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._apply_interaction_mode()
         self._statusbar.showMessage("ECG stopped.")
 
     def _toggle_freeze(self):
         self.set_stream_frozen(not self._frozen)
 
+    def _update_pin_button_visual(self):
+        self._pin_button.setChecked(self._pinned)
+        if self._pinned:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid #1b6ec2; border-radius: 3px; "
+                "padding: 0 2px; background: #e8f2ff;"
+            )
+        else:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid transparent; border-radius: 3px; "
+                "padding: 0 2px; background: transparent;"
+            )
+
+    def _set_pinned(self, pinned: bool):
+        self._pinned = bool(pinned)
+        self._update_pin_button_visual()
+        was_visible = self.isVisible()
+        was_minimized = self.isMinimized()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self._pinned)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowTitleHint, True)
+        if was_visible:
+            if was_minimized:
+                self.showMinimized()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+
     def set_stream_frozen(self, frozen: bool):
         self._frozen = bool(frozen)
         if self._frozen:
+            if self._follow_main_xrange:
+                self._follow_main_xrange = False
+                self._relock_button.setEnabled(True)
             self._freeze_button.setText("Resume")
-            self._plot_widget.setMouseEnabled(x=True, y=False)
+            self._apply_interaction_mode()
             self._statusbar.showMessage("ECG frozen \u2014 drag to pan, scroll wheel or +/\u2212 to zoom.")
         else:
             self._freeze_button.setText("Freeze")
-            self._plot_widget.setMouseEnabled(x=False, y=False)
-            self._view_sec = float(self._display_sec)
+            self._apply_interaction_mode()
             self._statusbar.showMessage(
                 "ECG streaming..." if self._got_first_data else "Waiting for ECG data..."
             )
+
+    def _apply_interaction_mode(self):
+        # Manual mode mirrors Poincare-style drag+wheel on X.
+        manual_mode = not self._follow_main_xrange
+        self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
 
     def _zoom_in(self):
         if self._follow_main_xrange:
@@ -1200,9 +1257,9 @@ class EcgWindow(QMainWindow):
                 self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._apply_interaction_mode()
         self._view_sec = max(0.5, self._view_sec / 1.4)
-        if self._frozen:
-            self._refresh_frozen_view()
+        self._refresh_frozen_view()
 
     def _zoom_out(self):
         if self._follow_main_xrange:
@@ -1212,14 +1269,22 @@ class EcgWindow(QMainWindow):
                 self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._apply_interaction_mode()
         self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
-        if self._frozen:
+        self._refresh_frozen_view()
+
+    def _reset_zoom(self):
+        self._view_sec = float(self._display_sec)
+        if self._follow_main_xrange:
+            self._relock_to_main_xrange()
+        else:
             self._refresh_frozen_view()
 
     def _relock_to_main_xrange(self):
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
-        if self._synced_xrange is not None and not self._frozen:
+        self._apply_interaction_mode()
+        if self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
             self._set_xrange_if_needed(x_lo, x_hi)
 
@@ -1229,7 +1294,9 @@ class EcgWindow(QMainWindow):
             prev_lo, prev_hi = self._last_x_range
             if abs(prev_lo - target[0]) < 1e-6 and abs(prev_hi - target[1]) < 1e-6:
                 return
+        self._suppress_manual_range_signal = True
         self._plot_widget.setXRange(target[0], target[1], padding=0)
+        self._suppress_manual_range_signal = False
         self._last_x_range = target
 
     def _set_yrange_if_needed(self, y_lo: float, y_hi: float):
@@ -1287,8 +1354,14 @@ class EcgWindow(QMainWindow):
                     maxlen=self._times.maxlen,
                 )
                 self._timeline_offset_sec += delta
-        if self._follow_main_xrange and not self._frozen:
+        if self._follow_main_xrange:
             self._set_xrange_if_needed(float(x_lo), float(x_hi))
+
+    def _on_manual_range_changed(self, *_args):
+        if self._suppress_manual_range_signal or self._follow_main_xrange:
+            return
+        x_rng = self._plot_widget.viewRange()[0]
+        self._view_sec = max(0.5, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
 
     def _redraw(self):
         if self._frozen:
@@ -1344,6 +1417,9 @@ class EcgWindow(QMainWindow):
         self._curve.setData(self._times, self._values)
 
     def closeEvent(self, event):
+        if self._pinned:
+            self._pinned = False
+            self._update_pin_button_visual()
         self.stop()
         self.closed.emit()
         super().closeEvent(event)
@@ -1414,6 +1490,32 @@ class QtcWindow(QMainWindow):
         )
 
         self._statusbar = QStatusBar()
+        zoom_label = QLabel("Zoom:")
+        zoom_label.setStyleSheet("font-size: 11px;")
+        self._zoom_out_button = QPushButton("\u2212")
+        self._zoom_out_button.setFixedWidth(28)
+        self._zoom_out_button.setToolTip("Zoom Out (show more time)")
+        self._zoom_out_button.clicked.connect(self._zoom_out)
+        self._zoom_in_button = QPushButton("+")
+        self._zoom_in_button.setFixedWidth(28)
+        self._zoom_in_button.setToolTip("Zoom In (show less time)")
+        self._zoom_in_button.clicked.connect(self._zoom_in)
+        self._zoom_reset_button = QPushButton("Reset")
+        self._zoom_reset_button.setFixedWidth(56)
+        self._zoom_reset_button.setToolTip("Reset manual zoom to 60 seconds.")
+        self._zoom_reset_button.clicked.connect(self._reset_zoom)
+        self._relock_button = QPushButton("Relock")
+        self._relock_button.setFixedWidth(64)
+        self._relock_button.setToolTip("Relock this chart to the main plot time range.")
+        self._relock_button.clicked.connect(self._relock_to_main_xrange)
+        self._relock_button.setEnabled(False)
+        self._pin_button = QPushButton("\U0001F4CC")
+        self._pin_button.setCheckable(True)
+        self._pin_button.setFixedWidth(24)
+        self._pin_button.setToolTip("Pin/unpin this window on top.")
+        self._pin_button.setFlat(True)
+        self._pin_button.setStyleSheet("font-size: 14px; border: none; padding: 0 2px;")
+        self._pin_button.toggled.connect(self._set_pinned)
         self._info_button = QPushButton("i")
         self._info_button.setFixedWidth(22)
         self._info_button.setToolTip("How to interpret QTc trend and uncertainty.")
@@ -1422,6 +1524,12 @@ class QtcWindow(QMainWindow):
         self._freeze_button = QPushButton("Freeze")
         self._freeze_button.setFixedWidth(74)
         self._freeze_button.clicked.connect(self._toggle_freeze)
+        self._statusbar.addPermanentWidget(zoom_label)
+        self._statusbar.addPermanentWidget(self._zoom_out_button)
+        self._statusbar.addPermanentWidget(self._zoom_in_button)
+        self._statusbar.addPermanentWidget(self._zoom_reset_button)
+        self._statusbar.addPermanentWidget(self._relock_button)
+        self._statusbar.addPermanentWidget(self._pin_button)
         self._statusbar.addPermanentWidget(self._info_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
         self.setStatusBar(self._statusbar)
@@ -1434,6 +1542,13 @@ class QtcWindow(QMainWindow):
         self._timeline_offset_sec = 0.0
         self._synced_xrange: tuple[float, float] | None = None
         self._history_sec = 20 * 60
+        self._follow_main_xrange = True
+        self._view_sec = 60.0
+        self._max_view_sec = float(self._history_sec)
+        self._last_x_range: tuple[float, float] | None = None
+        self._suppress_manual_range_signal = False
+        self._pinned = False
+        self._update_pin_button_visual()
         self._times = deque(maxlen=1200)
         self._medians = deque(maxlen=1200)
         self._p25 = deque(maxlen=1200)
@@ -1441,6 +1556,9 @@ class QtcWindow(QMainWindow):
         self._lowq = deque(maxlen=1200)
         self._formula_label = "Formula: pending"
         self._formula_reason_label = "Rationale: pending"
+        view_box = self._plot_widget.getViewBox()
+        if hasattr(view_box, "sigRangeChangedManually"):
+            view_box.sigRangeChangedManually.connect(self._on_manual_range_changed)
 
     @staticmethod
     def _format_formula_label(payload: dict) -> str:
@@ -1499,6 +1617,11 @@ class QtcWindow(QMainWindow):
         self._lowq.clear()
         self._timeline_offset_sec = 0.0
         self._synced_xrange = None
+        self._follow_main_xrange = True
+        self._view_sec = 60.0
+        self._last_x_range = None
+        self._relock_button.setEnabled(False)
+        self._apply_interaction_mode()
         self._median_curve.setData([], [])
         self._low_quality_curve.setData([], [])
         self._upper_curve.setData([], [])
@@ -1508,22 +1631,140 @@ class QtcWindow(QMainWindow):
     def start(self):
         self._frozen = False
         self._freeze_button.setText("Freeze QTc")
+        self._follow_main_xrange = True
+        self._relock_button.setEnabled(False)
+        self._apply_interaction_mode()
 
     def stop(self):
         self._frozen = False
         self._freeze_button.setText("Freeze QTc")
+        self._apply_interaction_mode()
 
     def _toggle_freeze(self):
         self.set_stream_frozen(not self._frozen)
 
+    def _update_pin_button_visual(self):
+        self._pin_button.setChecked(self._pinned)
+        if self._pinned:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid #1b6ec2; border-radius: 3px; "
+                "padding: 0 2px; background: #e8f2ff;"
+            )
+        else:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid transparent; border-radius: 3px; "
+                "padding: 0 2px; background: transparent;"
+            )
+
+    def _set_pinned(self, pinned: bool):
+        self._pinned = bool(pinned)
+        self._update_pin_button_visual()
+        was_visible = self.isVisible()
+        was_minimized = self.isMinimized()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self._pinned)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowTitleHint, True)
+        if was_visible:
+            if was_minimized:
+                self.showMinimized()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+
     def set_stream_frozen(self, frozen: bool):
         self._frozen = bool(frozen)
+        if self._frozen and self._follow_main_xrange:
+            self._follow_main_xrange = False
+            self._relock_button.setEnabled(True)
         self._freeze_button.setText("Resume" if self._frozen else "Freeze")
+        self._apply_interaction_mode()
         if self._frozen:
             self._statusbar.showMessage("QTc view frozen.")
         else:
             self._statusbar.showMessage("QTc streaming.")
             self._redraw()
+
+    def _apply_interaction_mode(self):
+        manual_mode = not self._follow_main_xrange
+        self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
+
+    def _set_xrange_if_needed(self, x_lo: float, x_hi: float):
+        target = (float(x_lo), float(x_hi))
+        if self._last_x_range is not None:
+            prev_lo, prev_hi = self._last_x_range
+            if abs(prev_lo - target[0]) < 1e-6 and abs(prev_hi - target[1]) < 1e-6:
+                return
+        self._suppress_manual_range_signal = True
+        self._plot_widget.setXRange(target[0], target[1], padding=0)
+        self._suppress_manual_range_signal = False
+        self._last_x_range = target
+
+    def _zoom_in(self):
+        if self._follow_main_xrange:
+            current_range = self._plot_widget.viewRange()[0]
+            current_span = float(current_range[1] - current_range[0])
+            if current_span > 0:
+                self._view_sec = min(self._max_view_sec, max(2.0, current_span))
+            self._follow_main_xrange = False
+            self._relock_button.setEnabled(True)
+            self._apply_interaction_mode()
+        self._view_sec = max(2.0, self._view_sec / 1.4)
+        self._refresh_manual_view()
+
+    def _zoom_out(self):
+        if self._follow_main_xrange:
+            current_range = self._plot_widget.viewRange()[0]
+            current_span = float(current_range[1] - current_range[0])
+            if current_span > 0:
+                self._view_sec = min(self._max_view_sec, max(2.0, current_span))
+            self._follow_main_xrange = False
+            self._relock_button.setEnabled(True)
+            self._apply_interaction_mode()
+        self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
+        self._refresh_manual_view()
+
+    def _reset_zoom(self):
+        self._view_sec = 60.0
+        if self._follow_main_xrange:
+            self._relock_to_main_xrange()
+        else:
+            self._refresh_manual_view()
+
+    def _relock_to_main_xrange(self):
+        self._follow_main_xrange = True
+        self._relock_button.setEnabled(False)
+        self._apply_interaction_mode()
+        if self._synced_xrange is not None:
+            x_lo, x_hi = self._synced_xrange
+            self._set_xrange_if_needed(x_lo, x_hi)
+
+    def _refresh_manual_view(self):
+        if len(self._times) < 1:
+            return
+        current_range = self._plot_widget.viewRange()[0]
+        center = (current_range[0] + current_range[1]) / 2.0
+        half = self._view_sec / 2.0
+        t_min = float(self._times[0])
+        t_max = float(self._times[-1]) + 2.0
+        x_lo = max(t_min, center - half)
+        x_hi = x_lo + self._view_sec
+        if x_hi > t_max:
+            x_hi = t_max
+            x_lo = max(t_min, x_hi - self._view_sec)
+        self._set_xrange_if_needed(x_lo, x_hi)
+        self._threshold_label.setPos(x_hi - 1.0, 471)
+
+    def _on_manual_range_changed(self, *_args):
+        if self._suppress_manual_range_signal:
+            return
+        if self._follow_main_xrange:
+            self._follow_main_xrange = False
+            self._relock_button.setEnabled(True)
+            self._apply_interaction_mode()
+        x_rng = self._plot_widget.viewRange()[0]
+        self._view_sec = max(2.0, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
 
     def sync_timeline_to_main(self, main_plot_delay_sec: float):
         current_raw_t = float(self._times[-1]) if self._times else 0.0
@@ -1538,7 +1779,7 @@ class QtcWindow(QMainWindow):
 
     def set_synced_xrange(self, x_lo: float, x_hi: float):
         self._synced_xrange = (float(x_lo), float(x_hi))
-        if self._times:
+        if self._follow_main_xrange and self._times:
             target_right = float(x_hi) - 2.0
             latest = float(self._times[-1])
             delta = target_right - latest
@@ -1549,8 +1790,8 @@ class QtcWindow(QMainWindow):
                     maxlen=self._times.maxlen,
                 )
                 self._timeline_offset_sec += delta
-        if not self._frozen:
-            self._plot_widget.setXRange(float(x_lo), float(x_hi), padding=0)
+        if self._follow_main_xrange:
+            self._set_xrange_if_needed(float(x_lo), float(x_hi))
 
     def append_payload(self, payload: dict):
         if not isinstance(payload, dict):
@@ -1625,19 +1866,24 @@ class QtcWindow(QMainWindow):
         x_lo = max(0.0, x_hi - 60.0)
         if len(x) == 1:
             x_lo = max(0.0, x_hi - 2.0)
-        if self._synced_xrange is not None:
+        if self._follow_main_xrange and self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
-            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
+            self._set_xrange_if_needed(x_lo, x_hi)
             self._threshold_label.setPos(x_hi - 1.0, 471)
         else:
-            self._plot_widget.setXRange(x_lo, x_hi + 2.0, padding=0)
-            self._threshold_label.setPos(x_hi + 1.0, 471)
+            auto_hi = x_hi + 2.0
+            auto_lo = max(0.0, auto_hi - self._view_sec)
+            self._set_xrange_if_needed(auto_lo, auto_hi)
+            self._threshold_label.setPos(auto_hi - 1.0, 471)
         self._statusbar.showMessage(
             f"QTc streaming. {self._formula_label}. {self._formula_reason_label} "
             "For trend context only; clinical interpretation requires review."
         )
 
     def closeEvent(self, event):
+        if self._pinned:
+            self._pinned = False
+            self._update_pin_button_visual()
         self.stop()
         self.closed.emit()
         super().closeEvent(event)
@@ -1701,6 +1947,14 @@ class PoincareWindow(QMainWindow):
         self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
         self._info_button.clicked.connect(self.info_requested.emit)
         header.addWidget(self._info_button)
+        self._pin_button = QPushButton("\U0001F4CC")
+        self._pin_button.setCheckable(True)
+        self._pin_button.setToolTip("Pin/unpin this window on top.")
+        self._pin_button.setStyleSheet("font-size: 14px; border: none; padding: 0 2px;")
+        self._pin_button.setFixedWidth(24)
+        self._pin_button.setFlat(True)
+        self._pin_button.toggled.connect(self._set_pinned)
+        header.addWidget(self._pin_button)
         layout.addLayout(header)
 
         self._plot = pg.PlotWidget(background="w")
@@ -1741,6 +1995,38 @@ class PoincareWindow(QMainWindow):
 
         self.setCentralWidget(central)
         self.statusBar().showMessage("Waiting for beat data...")
+        self._pinned = False
+        self._update_pin_button_visual()
+
+    def _update_pin_button_visual(self):
+        self._pin_button.setChecked(self._pinned)
+        if self._pinned:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid #1b6ec2; border-radius: 3px; "
+                "padding: 0 2px; background: #e8f2ff;"
+            )
+        else:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid transparent; border-radius: 3px; "
+                "padding: 0 2px; background: transparent;"
+            )
+
+    def _set_pinned(self, pinned: bool):
+        self._pinned = bool(pinned)
+        self._update_pin_button_visual()
+        was_visible = self.isVisible()
+        was_minimized = self.isMinimized()
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self._pinned)
+        self.setWindowFlag(Qt.WindowCloseButtonHint, True)
+        self.setWindowFlag(Qt.WindowMinimizeButtonHint, True)
+        self.setWindowFlag(Qt.WindowTitleHint, True)
+        if was_visible:
+            if was_minimized:
+                self.showMinimized()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
 
     def _apply_square_bounds(self, lo: float, hi: float):
         lo, hi = self._sanitize_bounds(lo, hi)
@@ -1821,7 +2107,7 @@ class PoincareWindow(QMainWindow):
             self._apply_interaction_mode()
             self.statusBar().showMessage("Scale mode: AUTO")
             return
-        self._scale_button.setText("Scale LOCKED")
+        self._scale_button.setText("Scale MANUAL")
         self._set_locked_zoom_controls_visible(True)
         self._apply_interaction_mode()
         lo, hi = self._bounds_from_current_view()
@@ -1831,7 +2117,7 @@ class PoincareWindow(QMainWindow):
             hi = center + 5.0
         self._locked_bounds = self._sanitize_bounds(lo, hi)
         self._apply_square_bounds(lo, hi)
-        self.statusBar().showMessage("Scale mode: LOCKED")
+        self.statusBar().showMessage("Scale mode: MANUAL")
 
     def clear(self):
         self._scatter.setData([], [])
@@ -1882,10 +2168,13 @@ class PoincareWindow(QMainWindow):
         self._sd1_label.setText(f"SD1: {sd1:.2f} ms")
         self._sd2_label.setText(f"SD2: {sd2:.2f} ms")
         self._ratio_label.setText(f"SD1/SD2: {ratio:.3f}")
-        mode = "AUTO" if self._auto_scale else "LOCKED"
+        mode = "AUTO" if self._auto_scale else "MANUAL"
         self.statusBar().showMessage(f"Showing last {rr.size} beats | Scale: {mode}")
 
     def closeEvent(self, event):
+        if self._pinned:
+            self._pinned = False
+            self._update_pin_button_visual()
         self.closed.emit()
         super().closeEvent(event)
 
@@ -1940,6 +2229,7 @@ class View(QMainWindow):
         self._main_plot_guard_sec = 12.0
         self._series_prune_stride = 32
         self._last_data_time = None
+        self._suppress_comm_error_popups = False
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
         self._session_rmssd_values: list[float] = []
@@ -1998,6 +2288,9 @@ class View(QMainWindow):
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
         self.poincare_window = PoincareWindow()
         self.poincare_window.closed.connect(self._on_poincare_window_closed)
+        self.ecg_window.installEventFilter(self)
+        self.qtc_window.installEventFilter(self)
+        self.poincare_window.installEventFilter(self)
         self.poincare_window.info_requested.connect(self.show_poincare_info)
         self.model.ibis_buffer_update.connect(self._update_poincare)
 
@@ -2498,14 +2791,18 @@ class View(QMainWindow):
             QTimer.singleShot(0, self.showMaximized)
 
     def closeEvent(self, event):
+        self._suppress_comm_error_popups = True
         if self._session_state == "recording":
-            reply = QMessageBox.question(
-                self,
-                "Finalize Session",
-                "You have an active session. Finalize and save artifacts before closing?",
-                QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel,
-                QMessageBox.Yes,
-            )
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Question)
+            msg.setWindowTitle("Finalize Session")
+            msg.setText("You have an active session. Finalize and save artifacts before closing?")
+            msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel)
+            msg.setDefaultButton(QMessageBox.Yes)
+            # Ensure this prompt stays reachable even if an auxiliary popup was pinned.
+            msg.setWindowModality(Qt.ApplicationModal)
+            msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            reply = msg.exec()
             if reply == QMessageBox.Cancel:
                 event.ignore()
                 return
@@ -2513,6 +2810,12 @@ class View(QMainWindow):
                 self.finalize_session(show_message=False)
             else:
                 self._abandon_active_session()
+        # Ensure auxiliary plot windows close with the main app window.
+        for popup in (self.ecg_window, self.qtc_window, self.poincare_window):
+            try:
+                popup.close()
+            except Exception:
+                pass
         # Ensure BLE resources are released on app exit to reduce reconnect issues
         # on next launch (especially on Windows stacks that linger briefly).
         if self.sensor.client is not None:
@@ -2538,6 +2841,7 @@ class View(QMainWindow):
 
     def _update_session_actions(self):
         connected = self._is_sensor_connected()
+        connecting = self._connect_attempt_timer.isActive()
         is_recording = self._session_state == "recording"
         self.start_recording_button.setEnabled(connected and not is_recording)
         self.save_recording_button.setEnabled(is_recording)
@@ -2546,14 +2850,13 @@ class View(QMainWindow):
         self.poincare_button.setEnabled(connected)
         if not connected:
             self.qtc_button.setEnabled(False)
-            self.qtc_button.setText("QTc (no sensor)")
-        elif self.ecg_button.isEnabled() and not self.qtc_window.isVisible():
+            if not connecting:
+                self.ecg_button.setText("ECG (no sensor)")
+                self.qtc_button.setText("QTc (no sensor)")
+                self.poincare_button.setText("Poincare (no sensor)")
+        elif self.ecg_button.isEnabled():
             self.qtc_button.setEnabled(True)
-            self.qtc_button.setText("QTc Monitor")
-        if not connected:
-            self.poincare_button.setText("Poincare (no sensor)")
-        elif not self.poincare_window.isVisible():
-            self.poincare_button.setText("Poincare")
+        self._refresh_popup_control_labels()
 
     def _current_sensor_label(self) -> str:
         text = self.address_menu.currentText().strip()
@@ -2724,6 +3027,7 @@ class View(QMainWindow):
         self._do_connect(parts[0].strip(), parts[1].strip())
 
     def _do_connect(self, name: str, address: str):
+        self._suppress_comm_error_popups = False
         sensor = [s for s in self.model.sensors if get_sensor_address(s) == address]
 
         if not sensor:
@@ -2788,6 +3092,7 @@ class View(QMainWindow):
         self.show_status("Connecting to Sensor... Please wait.")
 
     def disconnect_sensor(self):
+        self._suppress_comm_error_popups = True
         if self._session_state == "recording":
             reply = QMessageBox.question(
                 self,
@@ -2846,55 +3151,91 @@ class View(QMainWindow):
         self._update_session_actions()
 
     def toggle_ecg_window(self):
-        if self.ecg_window.isVisible():
-            self.ecg_window.stop()
-            self.ecg_window.hide()
-            self.ecg_button.setText("ECG Monitor")
-        else:
+        if not self.ecg_window.isVisible():
             self.ecg_window.show()
+            self.ecg_window.showNormal()
+            self.ecg_window.raise_()
+            self.ecg_window.activateWindow()
             self.ecg_window.start()
             self.ecg_window.set_stream_frozen(self._all_plots_frozen)
-            self.ecg_button.setText("Close ECG")
+        elif self.ecg_window.isMinimized():
+            self.ecg_window.showNormal()
+            self.ecg_window.raise_()
+            self.ecg_window.activateWindow()
+        else:
+            self.ecg_window.showMinimized()
+        self._refresh_popup_control_labels()
 
     def _on_ecg_ready(self):
         self.ecg_button.setEnabled(True)
-        self.ecg_button.setText("ECG Monitor")
         self.qtc_button.setEnabled(True)
-        self.qtc_button.setText("QTc Monitor")
+        self._refresh_popup_control_labels()
 
     def _on_ecg_window_closed(self):
-        self.ecg_button.setText("ECG Monitor")
+        self._refresh_popup_control_labels()
 
     def toggle_qtc_window(self):
-        if self.qtc_window.isVisible():
-            self.qtc_window.stop()
-            self.qtc_window.hide()
-            self.qtc_button.setText("QTc Monitor")
-        else:
+        if not self.qtc_window.isVisible():
             self.qtc_window.show()
+            self.qtc_window.showNormal()
+            self.qtc_window.raise_()
+            self.qtc_window.activateWindow()
             self.qtc_window.start()
             self.qtc_window.set_stream_frozen(self._all_plots_frozen)
-            self.qtc_button.setText("Close QTc")
+        elif self.qtc_window.isMinimized():
+            self.qtc_window.showNormal()
+            self.qtc_window.raise_()
+            self.qtc_window.activateWindow()
+        else:
+            self.qtc_window.showMinimized()
+        self._refresh_popup_control_labels()
 
     def _on_qtc_window_closed(self):
-        if self._is_sensor_connected():
-            self.qtc_button.setText("QTc Monitor")
-        else:
-            self.qtc_button.setText("QTc (no sensor)")
+        self._refresh_popup_control_labels()
 
     def toggle_poincare_window(self):
-        if self.poincare_window.isVisible():
-            self.poincare_window.hide()
-            self.poincare_button.setText("Poincare")
-        else:
+        if not self.poincare_window.isVisible():
             self.poincare_window.show()
-            self.poincare_button.setText("Close Poincare")
+            self.poincare_window.showNormal()
+            self.poincare_window.raise_()
+            self.poincare_window.activateWindow()
+        elif self.poincare_window.isMinimized():
+            self.poincare_window.showNormal()
+            self.poincare_window.raise_()
+            self.poincare_window.activateWindow()
+        else:
+            self.poincare_window.showMinimized()
+        self._refresh_popup_control_labels()
 
     def _on_poincare_window_closed(self):
-        if self._is_sensor_connected():
-            self.poincare_button.setText("Poincare")
-        else:
-            self.poincare_button.setText("Poincare (no sensor)")
+        self._refresh_popup_control_labels()
+
+    @staticmethod
+    def _popup_button_mode(window: QMainWindow) -> str:
+        if not window.isVisible():
+            return "open"
+        if window.isMinimized():
+            return "show"
+        return "minimize"
+
+    @staticmethod
+    def _popup_button_text(label: str, mode: str) -> str:
+        if mode == "show":
+            return f"Show {label}"
+        if mode == "minimize":
+            return f"Minimize {label}"
+        return f"Open {label}"
+
+    def _refresh_popup_control_labels(self):
+        if self.ecg_button.isEnabled():
+            ecg_mode = self._popup_button_mode(self.ecg_window)
+            self.ecg_button.setText(self._popup_button_text("ECG", ecg_mode))
+        if self.qtc_button.isEnabled():
+            qtc_mode = self._popup_button_mode(self.qtc_window)
+            self.qtc_button.setText(self._popup_button_text("QTc", qtc_mode))
+        if self.poincare_button.isEnabled():
+            poincare_mode = self._popup_button_mode(self.poincare_window)
+            self.poincare_button.setText(self._popup_button_text("Poincare", poincare_mode))
 
     def show_poincare_info(self):
         parent = self.poincare_window if self.poincare_window.isVisible() else self
@@ -2948,6 +3289,13 @@ class View(QMainWindow):
         return lbl
 
     def eventFilter(self, obj, event):
+        if obj in {self.ecg_window, self.qtc_window, self.poincare_window} and event.type() in {
+            QEvent.Type.WindowStateChange,
+            QEvent.Type.Show,
+            QEvent.Type.Hide,
+            QEvent.Type.Close,
+        }:
+            QTimer.singleShot(0, self._refresh_popup_control_labels)
         if event.type() == QEvent.Type.Resize:
             overlay = None
             if obj is self.ibis_widget:
@@ -3621,6 +3969,7 @@ class View(QMainWindow):
 
     def show_status(self, status: str, print_to_terminal=True):
         if "Connected" in status and "Disconnecting" not in status:
+            self._suppress_comm_error_popups = False
             self._connect_attempt_timer.stop()
             self._stop_connect_hints()
             self.is_phase_active = False
@@ -3655,6 +4004,8 @@ class View(QMainWindow):
             print(status)
 
     def _show_signal_degraded_popup(self, reason: str):
+        if self._suppress_comm_error_popups:
+            return
         if self._signal_popup_shown:
             return
         self._signal_popup_shown = True
@@ -3794,12 +4145,7 @@ class View(QMainWindow):
         elif data.name == "qtc":
             if isinstance(data.value, dict):
                 self._session_qtc_payload = data.value
-                if (
-                    self._is_sensor_connected()
-                    and not self.qtc_window.isVisible()
-                    and self.qtc_button.isEnabled()
-                ):
-                    self.qtc_button.setText("QTc Monitor")
+                self._refresh_popup_control_labels()
 
         # 3. AVERAGED DATA (RMSSD & Stability)
         elif data.name == "hrv":
