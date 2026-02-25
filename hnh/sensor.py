@@ -1,4 +1,5 @@
 import struct
+import numpy as np
 from PySide6.QtCore import QObject, Signal, QByteArray, QUuid
 from PySide6.QtBluetooth import (
     QBluetoothDeviceDiscoveryAgent,
@@ -13,6 +14,20 @@ from math import ceil
 from typing import Union
 from hnh.utils import get_sensor_address, get_sensor_remote_address
 from hnh.config import COMPATIBLE_SENSORS, DEBUG
+
+
+def _decode_pmd_ecg_samples(raw_payload: bytes) -> list[float]:
+    sample_bytes = (len(raw_payload) // 3) * 3
+    if sample_bytes == 0:
+        return []
+    packed = np.frombuffer(raw_payload[:sample_bytes], dtype=np.uint8).reshape(-1, 3)
+    values = (
+        packed[:, 0].astype(np.int32)
+        | (packed[:, 1].astype(np.int32) << 8)
+        | (packed[:, 2].astype(np.int32) << 16)
+    )
+    values[values >= 0x800000] -= 0x1000000
+    return (values.astype(np.float64) / 1000.0).tolist()
 
 
 class SensorScanner(QObject):
@@ -313,14 +328,7 @@ class SensorClient(QObject):
             return
         if raw[0] != 0x00:
             return
-        samples = []
-        i = 10
-        while i + 2 <= len(raw):
-            val = raw[i] | (raw[i + 1] << 8) | (raw[i + 2] << 16)
-            if val >= 0x800000:
-                val -= 0x1000000
-            samples.append(val / 1000.0)
-            i += 3
+        samples = _decode_pmd_ecg_samples(raw[10:])
         if samples:
             if not self._ecg_data_received:
                 self._ecg_data_received = True
