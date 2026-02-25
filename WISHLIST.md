@@ -279,16 +279,16 @@ Implementation checklist:
 - Proposed approach: Keep only a rolling time window plus small guard buffer in visual series.
 - Effort: M
 - Impact: High
-- Status: planned
-- Notes: Validate 60+ minute session stability before/after.
+- Status: implemented
+- Notes: Implemented rolling pruning for main HR/RMSSD/SDNN chart series (visible window + guard) with periodic trim checks to keep long-session UI memory and append cost bounded.
 
 ### 26) [PERF] Reduce ECG redraw allocation churn
 - Problem: Repeated deque-to-array conversion and range work in the redraw loop adds avoidable CPU pressure.
 - Proposed approach: Reuse buffers and minimize per-frame allocations/range resets.
 - Effort: M
 - Impact: High
-- Status: triaged
-- Notes: Benchmark p95 redraw time before/after.
+- Status: implemented
+- Notes: Reduced redraw churn by avoiding redundant numpy conversions for range math and suppressing no-op X/Y range resets in the ECG refresh path.
 
 ### 27) [PERF] Refresh profiling harness for current package
 - Problem: Existing profiling helpers still reference older package names and are not ready for current hot-path analysis.

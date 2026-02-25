@@ -1073,6 +1073,8 @@ class EcgWindow(QMainWindow):
         self._timeline_offset_sec = 0.0
         self._synced_xrange: tuple[float, float] | None = None
         self._follow_main_xrange = True
+        self._last_x_range: tuple[float, float] | None = None
+        self._last_y_range: tuple[float, float] | None = None
 
         self._zoom_out_button = QPushButton("\u2212")
         self._zoom_out_button.setFixedWidth(28)
@@ -1159,6 +1161,8 @@ class EcgWindow(QMainWindow):
         self._frozen = False
         self._freeze_button.setText("Freeze")
         self._plot_widget.setMouseEnabled(x=False, y=False)
+        self._last_x_range = None
+        self._last_y_range = None
         self._curve.setData([], [])
         self._statusbar.showMessage("Waiting for ECG data...")
 
@@ -1217,21 +1221,40 @@ class EcgWindow(QMainWindow):
         self._relock_button.setEnabled(False)
         if self._synced_xrange is not None and not self._frozen:
             x_lo, x_hi = self._synced_xrange
-            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
+            self._set_xrange_if_needed(x_lo, x_hi)
+
+    def _set_xrange_if_needed(self, x_lo: float, x_hi: float):
+        target = (float(x_lo), float(x_hi))
+        if self._last_x_range is not None:
+            prev_lo, prev_hi = self._last_x_range
+            if abs(prev_lo - target[0]) < 1e-6 and abs(prev_hi - target[1]) < 1e-6:
+                return
+        self._plot_widget.setXRange(target[0], target[1], padding=0)
+        self._last_x_range = target
+
+    def _set_yrange_if_needed(self, y_lo: float, y_hi: float):
+        target = (float(y_lo), float(y_hi))
+        if self._last_y_range is not None:
+            prev_lo, prev_hi = self._last_y_range
+            if abs(prev_lo - target[0]) < 1e-6 and abs(prev_hi - target[1]) < 1e-6:
+                return
+        self._plot_widget.setYRange(target[0], target[1], padding=0)
+        self._last_y_range = target
 
     def _refresh_frozen_view(self):
         if len(self._times) < 2:
             return
-        t_arr = np.array(self._times)
         current_range = self._plot_widget.viewRange()[0]
         center = (current_range[0] + current_range[1]) / 2
         half = self._view_sec / 2
-        t_lo = max(float(t_arr[0]), center - half)
+        t_min = float(self._times[0])
+        t_max = float(self._times[-1])
+        t_lo = max(t_min, center - half)
         t_hi = t_lo + self._view_sec
-        if t_hi > float(t_arr[-1]):
-            t_hi = float(t_arr[-1])
-            t_lo = max(float(t_arr[0]), t_hi - self._view_sec)
-        self._plot_widget.setXRange(t_lo, t_hi, padding=0)
+        if t_hi > t_max:
+            t_hi = t_max
+            t_lo = max(t_min, t_hi - self._view_sec)
+        self._set_xrange_if_needed(t_lo, t_hi)
 
     def append_samples(self, samples: list):
         self._pending.extend(samples)
@@ -1265,7 +1288,7 @@ class EcgWindow(QMainWindow):
                 )
                 self._timeline_offset_sec += delta
         if self._follow_main_xrange and not self._frozen:
-            self._plot_widget.setXRange(float(x_lo), float(x_hi), padding=0)
+            self._set_xrange_if_needed(float(x_lo), float(x_hi))
 
     def _redraw(self):
         if self._frozen:
@@ -1299,29 +1322,26 @@ class EcgWindow(QMainWindow):
         if n < 2:
             return
 
-        t_arr = np.array(self._times)
-        v_arr = np.array(self._values)
-
-        y_lo = float(v_arr.min())
-        y_hi = float(v_arr.max())
+        y_lo = float(min(self._values))
+        y_hi = float(max(self._values))
         margin = max(0.1, (y_hi - y_lo) * 0.15)
         target_lo = y_lo - margin
         target_hi = y_hi + margin
         alpha = 0.15
         self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
         self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
-        self._plot_widget.setYRange(self._y_min_smooth, self._y_max_smooth, padding=0)
+        self._set_yrange_if_needed(self._y_min_smooth, self._y_max_smooth)
 
-        t_max = float(t_arr[-1])
+        t_max = float(self._times[-1])
         if self._follow_main_xrange and self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
-            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
+            self._set_xrange_if_needed(x_lo, x_hi)
         else:
             x_hi = t_max + 2.0
             x_lo = x_hi - self._view_sec
-            self._plot_widget.setXRange(x_lo, x_hi, padding=0)
+            self._set_xrange_if_needed(x_lo, x_hi)
 
-        self._curve.setData(t_arr, v_arr)
+        self._curve.setData(self._times, self._values)
 
     def closeEvent(self, event):
         self.stop()
@@ -1916,6 +1936,9 @@ class View(QMainWindow):
         self._debug_heart_anim_groups = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._main_plot_visible_sec = 60.0
+        self._main_plot_guard_sec = 12.0
+        self._series_prune_stride = 32
         self._last_data_time = None
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
@@ -3205,6 +3228,27 @@ class View(QMainWindow):
                 vals.append(float(p.y()))
         return vals
 
+    def _prune_series_before(self, series: QLineSeries, min_x: float) -> None:
+        count = series.count()
+        if count <= self._series_prune_stride:
+            return
+        if float(series.at(0).x()) >= min_x:
+            return
+        max_drop = max(0, count - 2)
+        drop = 0
+        while drop < max_drop and float(series.at(drop).x()) < min_x:
+            drop += 1
+        if drop > 0:
+            series.removePoints(0, drop)
+
+    def _prune_main_chart_series(self, current_x: float) -> None:
+        prune_before = current_x - (self._main_plot_visible_sec + self._main_plot_guard_sec)
+        if prune_before <= 0:
+            return
+        self._prune_series_before(self.hr_trend_series, prune_before)
+        self._prune_series_before(self.hrv_widget.time_series, prune_before)
+        self._prune_series_before(self.sdnn_series, prune_before)
+
     def reset_y_axes(self):
         x_min = float(self.ibis_widget.x_axis.min())
         x_max = float(self.ibis_widget.x_axis.max())
@@ -3433,6 +3477,8 @@ class View(QMainWindow):
                     self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
                     if not self._main_plots_frozen:
                         self.sdnn_series.append(x, smoothed_sdnn)
+                if not self._main_plots_frozen and self.hrv_widget.time_series.count() % self._series_prune_stride == 0:
+                    self._prune_main_chart_series(x)
 
             # Expand-only Y-axes
             if self._hrv_axis_ceiling is None:
@@ -3827,6 +3873,8 @@ class View(QMainWindow):
             self._session_hr_values.append(self._hr_ewma)
             if not self._main_plots_frozen:
                 self.hr_trend_series.append(plot_elapsed, self._hr_ewma)
+                if self.hr_trend_series.count() % self._series_prune_stride == 0:
+                    self._prune_main_chart_series(plot_elapsed)
 
             if self.baseline_hr is not None:
                 if not hasattr(self, 'hr_baseline_series'):
