@@ -3619,6 +3619,12 @@ class View(QMainWindow):
             half_span = max(20.0, hr_ref * 0.5)
             hr_lo = max(30.0, hr_ref - half_span)
             hr_hi = min(220.0, hr_ref + half_span)
+        # Guardrail: never hide baseline HR reference after a manual Y-axis reset.
+        if self.baseline_hr is not None:
+            hr_lo = min(hr_lo, float(self.baseline_hr) - 2.0)
+            hr_hi = max(hr_hi, float(self.baseline_hr) + 2.0)
+            hr_lo = max(30.0, hr_lo)
+            hr_hi = min(220.0, hr_hi)
         if hr_hi - hr_lo < 40.0:
             center = (hr_hi + hr_lo) / 2.0
             hr_lo = max(30.0, center - 20.0)
@@ -3640,6 +3646,9 @@ class View(QMainWindow):
             if rmssd_ref is None:
                 rmssd_ref = 20.0
             hrv_ceil = max(20.0, rmssd_ref * 1.5)
+        # Guardrail: keep baseline RMSSD visible after manual Y-axis reset.
+        if self.baseline_rmssd is not None:
+            hrv_ceil = max(hrv_ceil, float(self.baseline_rmssd) + 2.0)
         self._hrv_axis_ceiling = int(-(-hrv_ceil // 5)) * 5
         self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
 
@@ -4025,7 +4034,12 @@ class View(QMainWindow):
             "snug against the skin."
         )
         msg.setStandardButtons(QMessageBox.Ok)
+        # Keep warning reachable even when auxiliary popup windows are pinned.
+        msg.setWindowModality(Qt.ApplicationModal)
+        msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         msg.open()
+        msg.raise_()
+        msg.activateWindow()
 
     def _on_rmssd_degraded(self):
         self._signal_degrade_count += 1

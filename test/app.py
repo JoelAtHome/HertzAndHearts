@@ -3,7 +3,7 @@ import time
 import uuid
 from random import randint
 from PySide6.QtCore import QObject, Signal, QTimer
-from openhrv.utils import get_sensor_address
+from hnh.utils import get_sensor_address
 
 
 class MockBluetoothMac:
@@ -98,12 +98,12 @@ def main():
     the latter are imported elsewhere:
     https://stackoverflow.com/questions/3765222/monkey-patch-python-class
     """
-    from openhrv import sensor  # noqa
+    from hnh import sensor  # noqa
 
     sensor.SensorClient = MockSensorClient
     sensor.SensorScanner = MockSensorScanner
 
-    from openhrv.app import main as mock_main  # noqa
+    from hnh.app import main as mock_main  # noqa
 
     mock_main()
 

@@ -295,8 +295,8 @@ Implementation checklist:
 - Proposed approach: Update profiling scripts to current module paths and standardize capture commands.
 - Effort: S
 - Impact: Med
-- Status: planned
-- Notes: Use this to verify impact for each `[PERF]` item.
+- Status: implemented
+- Notes: Updated profiling helpers to current `hnh` package paths and added standardized capture/viewer options (`--output`, `--no-view`) for repeatable hot-path analysis.
 
 ### 28) [PERF] Optimize BLE ECG packet decode path
 - Problem: Python-loop packet unpacking runs continuously and contributes avoidable CPU overhead.
