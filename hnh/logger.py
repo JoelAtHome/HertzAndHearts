@@ -39,7 +39,7 @@ class Logger(QObject):
         saved_path = self.current_path or self.file.name
         self.file.close()
         self.recording_status.emit(1)
-        self.status_update.emit(f"Saved recording at {saved_path}.")
+        self.status_update.emit(f"Saved recording file: {saved_path}")
         self.file = None
         self.current_path = None
 

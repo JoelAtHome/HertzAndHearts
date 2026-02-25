@@ -263,8 +263,8 @@ Implementation checklist:
 - Proposed approach: Keep a single authoritative connection for `update_ibis_buffer` and verify beat/update counts remain 1:1.
 - Effort: S
 - Impact: High
-- Status: planned
-- Notes: Treat as the first performance fix because it may be both a correctness and throughput issue.
+- Status: done
+- Notes: Duplicate `ibi_update -> update_ibis_buffer` wiring has been removed; follow-up live-stream validation is still pending to explicitly confirm 1:1 beat/update behavior under normal streaming.
 
 ### 24) [PERF] Move QTc compute off the UI thread
 - Problem: QTc extraction/delineation can block the GUI event loop and cause visible stutter during plotting.
@@ -372,12 +372,12 @@ Implementation checklist:
 - Proposed approach: Keep one `ibi_update -> update_ibis_buffer` connection and verify no duplicate processing.
 - Effort: S
 - Impact: High
-- Status: planned
-- Notes: First performance implementation target.
+- Status: done
+- Notes: Implemented single authoritative wiring; one follow-up check remains for explicit 1:1 beat/update verification during live streaming.
 
 Implementation checklist:
-- [ ] Confirm all `ibi_update` wiring locations and choose single owner.
-- [ ] Remove duplicate connection while preserving `hr_handler` behavior.
+- [x] Confirm all `ibi_update` wiring locations and choose single owner.
+- [x] Remove duplicate connection while preserving `hr_handler` behavior.
 - [ ] Verify `update_ibis_buffer` triggers once per beat in normal streaming.
 - [ ] Smoke-test HR/RMSSD/plot responsiveness and regression-risk paths (connect/reconnect/reset).
 
@@ -409,6 +409,11 @@ Completed items. Include completion date and optional version reference.
 - Completed: 2026-02-24
 - Outcome: Presentation format locked to phased rollout: end-of-session QTc summary first, optional dedicated trend plot second.
 - Notes: Implementation must enforce quality gating, non-diagnostic copy, and explicit trend-context labeling before enabling trend by default.
+
+### [PERF] Remove duplicate IBI update wiring
+- Completed: 2026-02-25
+- Outcome: `ibi_update -> update_ibis_buffer` is now wired through a single authoritative connection.
+- Notes: Follow-up validation remains: explicitly confirm 1:1 beat/update behavior under live streaming and complete regression smoke checks for connect/reconnect/reset paths.
 
 ## Triage Workflow
 

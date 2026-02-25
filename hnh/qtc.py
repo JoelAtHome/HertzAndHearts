@@ -165,6 +165,7 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
             if len(rpeaks) < 3:
                 return [], "insufficient r peaks"
             q_onsets: list = []
+            s_offsets: list = []
             t_offsets: list = []
             for method in ("dwt", "cwt", "peak"):
                 try:
@@ -181,10 +182,15 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
                 if not q_candidates:
                     # "peak" mode may not provide onset boundaries.
                     q_candidates = waves.get("ECG_Q_Peaks", [])
+                s_candidates = waves.get("ECG_S_Offsets", [])
+                if not s_candidates:
+                    # Fallback when offset boundaries are unavailable.
+                    s_candidates = waves.get("ECG_S_Peaks", [])
                 t_candidates = waves.get("ECG_T_Offsets", [])
                 n_local = min(len(rpeaks), len(q_candidates), len(t_candidates))
                 if n_local >= 2:
                     q_onsets = q_candidates
+                    s_offsets = s_candidates
                     t_offsets = t_candidates
                     break
     except Exception:
@@ -197,6 +203,7 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
     candidates: list[dict] = []
     for idx in range(1, n):
         q_idx = _to_int_or_none(q_onsets[idx])
+        s_idx = _to_int_or_none(s_offsets[idx]) if idx < len(s_offsets) else None
         t_idx = _to_int_or_none(t_offsets[idx])
         r_prev = _to_int_or_none(rpeaks[idx - 1])
         r_idx = _to_int_or_none(rpeaks[idx])
@@ -206,6 +213,9 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
             continue
         qt_ms = (t_idx - q_idx) * 1000.0 / cfg.sampling_rate
         rr_ms = (r_idx - r_prev) * 1000.0 / cfg.sampling_rate
+        qrs_ms = None
+        if s_idx is not None and s_idx > q_idx:
+            qrs_ms = (s_idx - q_idx) * 1000.0 / cfg.sampling_rate
         hr_bpm = 60000.0 / rr_ms if rr_ms > 0 else 0.0
         is_valid = (
             200.0 <= qt_ms <= 650.0
@@ -217,6 +227,7 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
                 "t_sec": float(r_idx) / float(cfg.sampling_rate),
                 "qt_ms": float(qt_ms),
                 "rr_ms": float(rr_ms),
+                "qrs_ms": float(qrs_ms) if qrs_ms is not None else None,
                 "hr_bpm": float(hr_bpm),
                 "is_valid": bool(is_valid),
                 "reason": None if is_valid else "signal quality too low",
@@ -230,6 +241,7 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
 def build_qtc_payload(candidates: list[dict], cfg: QtcConfig) -> dict:
     payload = {
         "session_value_ms": None,
+        "qrs_ms": None,
         "summary_method": "median_valid_window",
         "summary_window_seconds": int(cfg.summary_window_seconds),
         "status": "unavailable",
@@ -253,6 +265,31 @@ def build_qtc_payload(candidates: list[dict], cfg: QtcConfig) -> dict:
     }
     if not candidates:
         return payload
+
+    # Keep QRS available as a separate, robust summary metric even when
+    # strict QTc gating marks the window unavailable.
+    qrs_window: list[float] = []
+    qrs_times: list[float] = []
+    for c in candidates:
+        qrs_ms = c.get("qrs_ms")
+        t_sec = c.get("t_sec")
+        if qrs_ms is None or t_sec is None:
+            continue
+        try:
+            qrs_val = float(qrs_ms)
+            t_val = float(t_sec)
+        except (TypeError, ValueError):
+            continue
+        # Practical physiologic guardrails for single-lead beat delineation.
+        if 50.0 <= qrs_val <= 180.0:
+            qrs_window.append(qrs_val)
+            qrs_times.append(t_val)
+    if qrs_window:
+        max_qrs_t = max(qrs_times)
+        min_qrs_t = max_qrs_t - float(cfg.summary_window_seconds)
+        window_vals = [v for v, t in zip(qrs_window, qrs_times) if t >= min_qrs_t]
+        if window_vals:
+            payload["qrs_ms"] = float(median(window_vals))
 
     valid = [c for c in candidates if c.get("is_valid")]
     if not valid:

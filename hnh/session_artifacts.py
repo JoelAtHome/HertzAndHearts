@@ -66,6 +66,7 @@ def default_qtc_payload() -> dict:
     """Canonical QTc metadata scaffold until QTc estimation is implemented."""
     return {
         "session_value_ms": None,
+        "qrs_ms": None,
         "summary_method": "median_valid_window",
         "summary_window_seconds": 30,
         "status": "unavailable",

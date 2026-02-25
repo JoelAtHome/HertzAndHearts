@@ -1,4 +1,5 @@
 from datetime import datetime
+import hashlib
 import json
 import math
 import random
@@ -10,16 +11,16 @@ import pyqtgraph as pg
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
 from PySide6.QtGui import (
     QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor, QPixmap,
-    QKeySequence, QShortcut,
+    QKeySequence, QShortcut, QDesktopServices,
 )
 from PySide6.QtCore import (
     Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
     QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
-    QEventLoop,
+    QEventLoop, QUrl,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
-    QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
+    QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
     QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog,
@@ -61,59 +62,25 @@ RED = QColor(255, 0, 0)
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
 
-_CARD0_DISCLAIMER_TEXT = """\
-<h3 style="color: #c0392b; margin-bottom: 8px;">
-RESEARCH USE DISCLAIMER</h3>
-<p>This software ("<b>Hertz &amp; Hearts</b>") is a cardiac monitoring and
-biofeedback research tool. It has <b>NOT</b> been cleared, approved, or
-certified by the U.S. Food and Drug Administration (FDA), the European
-Medicines Agency (EMA), or any other regulatory body as a medical device.</p>
+_CARD0_DISCLAIMER_PATH = Path(__file__).with_name("disclaimer.md")
+_RESEARCH_USE_WARNING = "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT."
+_CARD0_DISCLAIMER_FALLBACK = (
+    "# Research Use Disclaimer\n\n"
+    "This software is intended only for investigational and research use under\n"
+    "qualified clinical supervision. It is not intended for diagnosis or treatment.\n\n"
+    "Please review the full disclaimer in `hnh/disclaimer.md`."
+)
 
-<p>Hertz &amp; Hearts is intended solely for <b>investigational and research use</b>
-under the direct supervision of qualified medical professionals. It is
-NOT intended to diagnose, treat, cure, or prevent any disease or medical
-condition.</p>
 
-<p>The application may display heart rate, HRV, and ECG-derived values for
-research and workflow support. These outputs are informational and must not
-replace independent clinical judgment.</p>
+def _load_card0_disclaimer_text() -> str:
+    try:
+        text = _CARD0_DISCLAIMER_PATH.read_text(encoding="utf-8").strip()
+    except Exception:
+        return _CARD0_DISCLAIMER_FALLBACK
+    return text or _CARD0_DISCLAIMER_FALLBACK
 
-<h3 style="color: #c0392b; margin-top: 12px; margin-bottom: 8px;">
-LIMITATION OF LIABILITY</h3>
-<p>The developers and contributors of Hertz &amp; Hearts provide this software
-"<b>AS IS</b>" without any warranty, express or implied, including but
-not limited to warranties of merchantability, fitness for a particular
-purpose, or non-infringement.</p>
 
-<p>In no event shall the developers, contributors, or affiliated
-institutions be liable for any direct, indirect, incidental, special,
-consequential, or exemplary damages arising from the use of this
-software, including but not limited to patient injury, misdiagnosis,
-treatment error, or any other clinical outcome.</p>
-
-<h3 style="color: #2c3e50; margin-top: 12px; margin-bottom: 8px;">
-CLINICAL RESPONSIBILITY</h3>
-<p>The licensed physician or qualified healthcare provider supervising
-the monitoring session bears <b>sole and complete responsibility</b>
-for:</p>
-
-<ul style="margin-left: 16px;">
-<li>All clinical decisions regarding patient selection, monitoring parameters, and session management</li>
-<li>Verification that all safety checks and protocols are appropriate for the specific patient</li>
-<li>Continuous monitoring of the patient throughout the session</li>
-<li>Immediate intervention in the event of adverse patient response</li>
-<li>Compliance with all applicable institutional review board (IRB) protocols, local regulations, and institutional policies</li>
-</ul>
-
-<p>This software does <b>not</b> replace professional medical judgment.
-Autonomous reliance on software-generated alerts, thresholds, or
-recommendations without independent clinical verification is expressly
-discouraged.</p>
-
-<p style="margin-top: 12px; color: #7f8c8d; font-style: italic;">
-By checking the acknowledgment below, you confirm that you have read,
-understood, and agree to these terms for this monitoring session.</p>
-"""
+_CARD0_DISCLAIMER_TEXT = _load_card0_disclaimer_text()
 
 def _save_last_sensor(name, address):
     try:
@@ -285,13 +252,22 @@ class Card0Dialog(QDialog):
 
         self._disclaimer = QLabel(_CARD0_DISCLAIMER_TEXT)
         self._disclaimer.setWordWrap(True)
-        self._disclaimer.setTextFormat(Qt.RichText)
+        self._disclaimer.setTextFormat(Qt.MarkdownText)
         card_lay.addWidget(self._disclaimer)
         lay.addWidget(self._card)
         lay.addSpacing(12)
 
+        self._ack_notice = QLabel(
+            "By checking the acknowledgment below, you confirm that you have read, "
+            "understood, and agree to these terms for this monitoring session."
+        )
+        self._ack_notice.setWordWrap(True)
+        self._ack_notice.setAlignment(Qt.AlignCenter)
+        lay.addWidget(self._ack_notice)
+        lay.addSpacing(4)
+
         self._accept_cb = QCheckBox(
-            "I have read, understood, and accept the above terms for this monitoring session"
+            "I acknowledge that I have read and understood the disclaimer."
         )
         self._continue_btn = QPushButton("Continue")
         self._continue_btn.setEnabled(False)
@@ -353,6 +329,9 @@ class Card0Dialog(QDialog):
         self._ver.setFixedWidth(self._ver.sizeHint().width() + 28)
         self._disclaimer.setStyleSheet(
             f"color: #333; font-size: {body_px}px; line-height: 1.35;"
+        )
+        self._ack_notice.setStyleSheet(
+            f"color: #7f8c8d; font-size: {max(12, int(body_px * 0.9))}px; font-style: italic;"
         )
         dont_show_css = (
             "QCheckBox { padding: 8px 0; spacing: 3px; color: #2c3e50; "
@@ -1035,7 +1014,8 @@ class EcgWindow(QMainWindow):
 
         self._settings = Settings()
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
-        self._view_sec = float(self._display_sec)
+        self._default_view_sec = 10.0
+        self._view_sec = float(self._default_view_sec)
         # Keep a larger rolling history so zoom-out works immediately.
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
@@ -1133,7 +1113,7 @@ class EcgWindow(QMainWindow):
 
     def start(self):
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
-        self._view_sec = float(self._display_sec)
+        self._view_sec = min(self._max_view_sec, float(self._default_view_sec))
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
         self._apply_interaction_mode()
@@ -1286,7 +1266,14 @@ class EcgWindow(QMainWindow):
         self._apply_interaction_mode()
         if self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
-            self._set_xrange_if_needed(x_lo, x_hi)
+            self._set_follow_main_xrange(x_lo, x_hi)
+
+    def _set_follow_main_xrange(self, x_lo: float, x_hi: float):
+        # Keep ECG right edge aligned to the main plots while using ECG's own zoom span.
+        target_hi = float(x_hi)
+        min_lo = float(x_lo)
+        target_lo = max(min_lo, target_hi - self._view_sec)
+        self._set_xrange_if_needed(target_lo, target_hi)
 
     def _set_xrange_if_needed(self, x_lo: float, x_hi: float):
         target = (float(x_lo), float(x_hi))
@@ -1355,7 +1342,7 @@ class EcgWindow(QMainWindow):
                 )
                 self._timeline_offset_sec += delta
         if self._follow_main_xrange:
-            self._set_xrange_if_needed(float(x_lo), float(x_hi))
+            self._set_follow_main_xrange(float(x_lo), float(x_hi))
 
     def _on_manual_range_changed(self, *_args):
         if self._suppress_manual_range_signal or self._follow_main_xrange:
@@ -1408,7 +1395,7 @@ class EcgWindow(QMainWindow):
         t_max = float(self._times[-1])
         if self._follow_main_xrange and self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
-            self._set_xrange_if_needed(x_lo, x_hi)
+            self._set_follow_main_xrange(x_lo, x_hi)
         else:
             x_hi = t_max + 2.0
             x_lo = x_hi - self._view_sec
@@ -2189,14 +2176,6 @@ class View(QMainWindow):
     def __init__(self, model: Model):
         super().__init__()
         self._maximized_once = False
-        self.setStyleSheet(
-            "QToolTip {"
-            "color: #ffffff;"
-            "background-color: #111111;"
-            "border: 1px solid #aab2bd;"
-            "padding: 3px 6px;"
-            "}"
-        )
 
         # 1. TRACKERS & STATE
         self.settings = Settings()
@@ -2230,12 +2209,15 @@ class View(QMainWindow):
         self._series_prune_stride = 32
         self._last_data_time = None
         self._suppress_comm_error_popups = False
+        self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
         self._session_rmssd_values: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
+        self._disclaimer_acknowledged_at: str | None = None
+        self._disclaimer_ack_mode = "not_recorded"
         self._session_root = Path.home() / "Hertz-and-Hearts"
         self._profile_store = ProfileStore(self._session_root)
         self._session_profile_id = (
@@ -2269,6 +2251,9 @@ class View(QMainWindow):
         self._data_watchdog = QTimer()
         self._data_watchdog.setInterval(5000)
         self._data_watchdog.timeout.connect(self._check_data_timeout)
+        self._ibi_diag_timer = QTimer()
+        self._ibi_diag_timer.setInterval(10000)
+        self._ibi_diag_timer.timeout.connect(self._emit_ibi_diagnostics)
 
         self.scanner = SensorScanner()
         self.scanner.sensor_update.connect(self.model.update_sensors)
@@ -2322,7 +2307,7 @@ class View(QMainWindow):
         self.hr_trend_series.attachAxis(self.ibis_widget.y_axis)
 
         self.ibis_widget.plot.legend().setVisible(True)
-        self.ibis_widget.plot.legend().setAlignment(Qt.AlignTop)
+        self.ibis_widget.plot.legend().setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         self.hr_y_axis_right = QValueAxis()
         self.hr_y_axis_right.setLabelsVisible(False)
@@ -2335,7 +2320,7 @@ class View(QMainWindow):
         self.hrv_widget.y_axis.setRange(0, 10)
         self.hrv_widget.time_series.setName("RMSSD (ms)")
         self.hrv_widget.plot.legend().setVisible(True)
-        self.hrv_widget.plot.legend().setAlignment(Qt.AlignTop)
+        self.hrv_widget.plot.legend().setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         self.sdnn_series = QLineSeries()
         self.sdnn_series.setName("HRV/SDNN (ms)")
@@ -2384,6 +2369,7 @@ class View(QMainWindow):
         self.rmssd_label = QLabel("RMSSD: --")
         self.sdnn_label = QLabel("SDNN: --")
         self.stress_ratio_label = QLabel("LF/HF: --")
+        self.qrs_label = QLabel("QRS: -- ms")
         self.health_indicator = QLabel("\u25cf")
         self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
         self.health_label = QLabel("Signal: Waiting for sensor")
@@ -2513,26 +2499,30 @@ class View(QMainWindow):
         self.rmssd_label.setToolTip("Current RMSSD heart rate variability metric.")
         self.sdnn_label.setToolTip("Current SDNN heart rate variability metric.")
         self.stress_ratio_label.setToolTip("Current LF/HF ratio estimate.")
+        self.qrs_label.setToolTip("Current median QRS duration estimate.")
         self.health_label.setToolTip("Current signal quality status.")
         self.recording_statusbar.setToolTip("Session progress and recording state.")
 
         # 5. LAYOUT ASSEMBLY — monitoring dashboard
         central = QWidget()
         self.vlayout0 = QVBoxLayout(central)
-        self.vlayout0.setSpacing(4)
+        self.vlayout0.setSpacing(2)
 
-        # Header row: centered active profile with settings control at top-right.
+        # Header row: center active profile over plot column, keep controls on right.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(4)
-        self._header_left_spacer = QWidget()
-        # Balance the right-side header controls so the center label stays visually centered.
-        self._header_left_spacer.setFixedWidth(116)
         self.profile_header_label = QLabel(f"User: {self._session_profile_id}")
         self.profile_header_label.setStyleSheet(
             "font-size: 14px; font-weight: 600; color: #2c3e50;"
         )
         self.profile_header_label.setAlignment(Qt.AlignCenter)
+        self._disclaimer_link = QLabel('<a href="open-disclaimer">Legal Disclaimer</a>')
+        self._disclaimer_link.setTextFormat(Qt.RichText)
+        self._disclaimer_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        self._disclaimer_link.setOpenExternalLinks(False)
+        self._disclaimer_link.setToolTip("Open the full legal disclaimer file.")
+        self._disclaimer_link.linkActivated.connect(self._open_disclaimer_file)
         self._debug_mode_badge = QLabel("DEBUG ON")
         self._debug_mode_badge.setStyleSheet(
             "font-size: 10px; font-weight: 700; color: #7e0000; "
@@ -2540,21 +2530,33 @@ class View(QMainWindow):
             "border-radius: 3px; padding: 1px 6px;"
         )
         self._debug_mode_badge.setVisible(False)
-        header_row.addWidget(self._header_left_spacer)
-        header_row.addStretch()
-        header_row.addWidget(self.profile_header_label, alignment=Qt.AlignCenter)
-        header_row.addSpacing(8)
-        header_row.addWidget(self._debug_mode_badge, alignment=Qt.AlignVCenter)
-        header_row.addStretch()
-        header_row.addWidget(self.profile_manager_button)
-        header_row.addWidget(self._settings_button)
+        profile_zone = QWidget()
+        profile_zone_layout = QHBoxLayout(profile_zone)
+        profile_zone_layout.setContentsMargins(0, 0, 0, 0)
+        profile_zone_layout.setSpacing(8)
+        profile_zone_layout.addStretch()
+        profile_zone_layout.addWidget(self.profile_header_label, alignment=Qt.AlignCenter)
+        profile_zone_layout.addWidget(self._debug_mode_badge, alignment=Qt.AlignVCenter)
+        profile_zone_layout.addStretch()
+        controls_zone = QWidget()
+        controls_zone_layout = QHBoxLayout(controls_zone)
+        controls_zone_layout.setContentsMargins(0, 0, 0, 0)
+        controls_zone_layout.setSpacing(8)
+        controls_zone_layout.addWidget(self._disclaimer_link, alignment=Qt.AlignVCenter)
+        controls_zone_layout.addWidget(self.profile_manager_button)
+        controls_zone_layout.addWidget(self._settings_button)
+        controls_zone_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        header_row.addWidget(profile_zone, stretch=1)
+        header_row.addWidget(controls_zone)
         self._top_bar = QWidget()
         self._top_bar.setLayout(header_row)
         self.vlayout0.addWidget(self._top_bar)
         for _w in (
             self._top_bar,
-            self._header_left_spacer,
+            profile_zone,
+            controls_zone,
             self.profile_header_label,
+            self._disclaimer_link,
             self._debug_mode_badge,
             self.profile_manager_button,
             self._settings_button,
@@ -2572,15 +2574,23 @@ class View(QMainWindow):
         plots_column.setSpacing(2)
         plots_column.addWidget(self.ibis_widget, stretch=1)
         freeze_row = QHBoxLayout()
+        freeze_row.setSpacing(0)
         freeze_row.addStretch()
+        freeze_group = QHBoxLayout()
+        freeze_group.setSpacing(8)
         self.freeze_two_main_plots_button.setFixedWidth(160)
-        freeze_row.addWidget(self.freeze_two_main_plots_button)
+        freeze_group.addWidget(self.freeze_two_main_plots_button)
         self.freeze_all_button.setFixedWidth(92)
-        freeze_row.addSpacing(8)
-        freeze_row.addWidget(self.freeze_all_button)
-        self.reset_axes_button.setFixedWidth(100)
-        freeze_row.addSpacing(8)
-        freeze_row.addWidget(self.reset_axes_button)
+        freeze_group.addWidget(self.freeze_all_button)
+        freeze_row.addLayout(freeze_group)
+        freeze_row.addSpacing(24)
+        reset_group = QHBoxLayout()
+        reset_group.setSpacing(8)
+        self.reset_axes_button.setFixedWidth(108)
+        self.reset_button.setFixedWidth(108)
+        reset_group.addWidget(self.reset_axes_button)
+        reset_group.addWidget(self.reset_button)
+        freeze_row.addLayout(reset_group)
         freeze_row.addStretch()
         plots_column.addLayout(freeze_row)
         plots_column.addWidget(self.hrv_widget, stretch=1)
@@ -2603,8 +2613,6 @@ class View(QMainWindow):
         progress_row = QHBoxLayout()
         progress_row.setSpacing(8)
         progress_row.addWidget(self.recording_statusbar, stretch=1)
-        self.reset_button.setFixedWidth(90)
-        progress_row.addWidget(self.reset_button)
         self.vlayout0.addLayout(progress_row)
 
         # BOTTOM ROW 2: Compact toolbar
@@ -2632,6 +2640,9 @@ class View(QMainWindow):
         self.history_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.profile_manager_button.setMaximumWidth(80)
         self.profile_manager_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._disclaimer_link.setStyleSheet(
+            "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
+        )
         self.address_menu.setMaximumWidth(320)
         self.address_menu.setStyleSheet("font-size: 11px;")
 
@@ -2661,6 +2672,7 @@ class View(QMainWindow):
             self.rmssd_label,
             self.sdnn_label,
             self.stress_ratio_label,
+            self.qrs_label,
         ]
         stat_width = 120
         spacer = QWidget()
@@ -2684,7 +2696,7 @@ class View(QMainWindow):
         self.annotation.setPlaceholderText(self._annotation_enabled_placeholder)
         self.annotation_button.setMaximumWidth(64)
         self.annotation_button.setStyleSheet(
-            "font-size: 11px; padding: 2px 6px;"
+            "QPushButton { font-size: 11px; padding: 2px 6px; }"
             "QPushButton:disabled { color: #7f8c8d; background-color: #e0e0e0; }"
         )
         toolbar.addWidget(self.start_recording_button)
@@ -2751,6 +2763,8 @@ class View(QMainWindow):
         dlg.showMaximized()
         if dlg.exec() != QDialog.Accepted:
             return False
+        self._disclaimer_acknowledged_at = datetime.now().isoformat()
+        self._disclaimer_ack_mode = "interactive_dialog"
         # Persist only the opt-out signal here.
         # Reset to showing the disclaimer is handled explicitly in Settings.
         if dlg.dont_show_again_for_profile:
@@ -2785,6 +2799,9 @@ class View(QMainWindow):
             if not self._show_card0_dialog(selected_profile):
                 self.close()
                 return
+        else:
+            self._disclaimer_acknowledged_at = None
+            self._disclaimer_ack_mode = "profile_skip_preference"
         # Startup modal dialogs can steal/restore window state on some platforms;
         # re-assert maximized state once startup flow is complete.
         QTimer.singleShot(0, self.showMaximized)
@@ -2874,6 +2891,7 @@ class View(QMainWindow):
                 self.poincare_button.setText("Poincare (no sensor)")
         elif self.ecg_button.isEnabled():
             self.qtc_button.setEnabled(True)
+        self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
 
     def _current_sensor_label(self) -> str:
@@ -2910,6 +2928,18 @@ class View(QMainWindow):
             "csv_path": csv_path,
             "report_stage": report_stage,
             "qtc": qtc_payload,
+            "disclaimer": self._current_disclaimer_payload(),
+        }
+
+    def _current_disclaimer_payload(self) -> dict:
+        text = _CARD0_DISCLAIMER_TEXT.strip() or _CARD0_DISCLAIMER_FALLBACK
+        return {
+            "warning": _RESEARCH_USE_WARNING,
+            "source_path": str(_CARD0_DISCLAIMER_PATH),
+            "text": text,
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "acknowledgment_mode": self._disclaimer_ack_mode,
+            "acknowledged_at": self._disclaimer_acknowledged_at,
         }
 
     def _manifest_payload(self, state: str, report_stage: str | None = None) -> dict:
@@ -2946,6 +2976,7 @@ class View(QMainWindow):
                 "qtc": qtc_payload,
                 "annotation_count": len(self._session_annotations),
             },
+            "disclaimer": self._current_disclaimer_payload(),
             "artifacts": {
                 "csv": {"path": str(bundle.csv_path), "exists": bundle.csv_path.exists()},
                 "docx_final": {
@@ -2996,6 +3027,16 @@ class View(QMainWindow):
             bundle=self._session_bundle,
         )
         self.signals.start_recording.emit(str(self._session_bundle.csv_path))
+        disclaimer = self._current_disclaimer_payload()
+        self.signals.annotation.emit(NamedSignal("LegalWarning", disclaimer["warning"]))
+        self.signals.annotation.emit(NamedSignal("DisclaimerSHA256", disclaimer["sha256"]))
+        self.signals.annotation.emit(
+            NamedSignal("DisclaimerAckMode", disclaimer["acknowledgment_mode"])
+        )
+        if disclaimer["acknowledged_at"]:
+            self.signals.annotation.emit(
+                NamedSignal("DisclaimerAckAt", disclaimer["acknowledged_at"])
+            )
         self._set_session_state("recording")
         self._persist_manifest(state="recording", report_stage="draft")
         if auto:
@@ -3046,6 +3087,8 @@ class View(QMainWindow):
 
     def _do_connect(self, name: str, address: str):
         self._suppress_comm_error_popups = False
+        self.model.reset_ibi_diagnostics()
+        self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         sensor = [s for s in self.model.sensors if get_sensor_address(s) == address]
 
         if not sensor:
@@ -3140,6 +3183,8 @@ class View(QMainWindow):
         self.hrv_widget.time_series.clear()
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
+        self.model.reset_ibi_diagnostics()
+        self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         if hasattr(self, 'baseline_series'):
             self.hrv_widget.chart().removeSeries(self.baseline_series)
             del self.baseline_series
@@ -3325,8 +3370,8 @@ class View(QMainWindow):
         if (
             obj in {
                 getattr(self, "_top_bar", None),
-                getattr(self, "_header_left_spacer", None),
                 getattr(self, "profile_header_label", None),
+                getattr(self, "_disclaimer_link", None),
                 getattr(self, "_debug_mode_badge", None),
                 getattr(self, "profile_manager_button", None),
                 getattr(self, "_settings_button", None),
@@ -3341,6 +3386,16 @@ class View(QMainWindow):
                 self._toggle_debug_mode_hotkey(click_pos)
                 return True
         return super().eventFilter(obj, event)
+
+    def _open_disclaimer_file(self, _link: str = ""):
+        if not _CARD0_DISCLAIMER_PATH.exists():
+            self.show_status(
+                f"Disclaimer file not found: {_CARD0_DISCLAIMER_PATH}",
+                print_to_terminal=False,
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(_CARD0_DISCLAIMER_PATH))):
+            self.show_status("Unable to open disclaimer file.", print_to_terminal=False)
 
     def _start_connect_hints(self):
         self._hr_overlay.show()
@@ -3525,7 +3580,7 @@ class View(QMainWindow):
         try:
             generate_session_report(str(report_path), report_data)
             self._persist_manifest(state=self._session_state, report_stage=report_stage)
-            self.show_status(f"Saved {report_stage} report at {report_path}")
+            self.show_status(f"Saved report file: {report_path}")
         except Exception as e:
             self.show_status(f"Report export failed: {e}")
 
@@ -3724,6 +3779,34 @@ class View(QMainWindow):
             f"baseline={self.settings.BASELINE_DURATION}s"
         )
 
+    def _emit_ibi_diagnostics(self):
+        if not self.settings.DEBUG:
+            return
+        if not self._is_sensor_connected():
+            return
+        snap = self.model.ibi_diagnostics_snapshot()
+        beats = snap["beats_received"]
+        updates = snap["buffer_updates"]
+        delta = snap["delta"]
+        beats_inc = beats - int(self._ibi_diag_last_counts.get("beats_received", 0))
+        updates_inc = updates - int(self._ibi_diag_last_counts.get("buffer_updates", 0))
+        self._ibi_diag_last_counts = {
+            "beats_received": beats,
+            "buffer_updates": updates,
+        }
+        if delta != 0:
+            print(
+                "[IBI-DIAG] WARNING "
+                f"total beats={beats} updates={updates} delta={delta} "
+                f"last10s beats={beats_inc} updates={updates_inc}"
+            )
+        else:
+            print(
+                "[IBI-DIAG] OK "
+                f"total beats={beats} updates={updates} delta={delta} "
+                f"last10s beats={beats_inc} updates={updates_inc}"
+            )
+
     def _set_debug_mode(self, enabled: bool, *, announce: bool = False):
         self.settings.DEBUG = bool(enabled)
         self.settings.save()
@@ -3733,6 +3816,11 @@ class View(QMainWindow):
             "1" if self.settings.DEBUG else "0",
         )
         self._refresh_debug_mode_ui()
+        if self.settings.DEBUG:
+            if not self._ibi_diag_timer.isActive():
+                self._ibi_diag_timer.start()
+        else:
+            self._ibi_diag_timer.stop()
         if announce:
             state = "ON" if self.settings.DEBUG else "OFF"
             self.show_status(
@@ -3953,6 +4041,7 @@ class View(QMainWindow):
         self.qtc_window.set_synced_xrange(x_lo, x_hi)
 
     def _apply_freeze_button_states(self):
+        connected = self._is_sensor_connected()
         self.freeze_two_main_plots_button.setText(
             "Resume Two Main Plots"
             if self._main_plots_frozen
@@ -3961,7 +4050,11 @@ class View(QMainWindow):
         self.freeze_all_button.setText(
             "Resume All" if self._all_plots_frozen else "Freeze All"
         )
-        self.freeze_two_main_plots_button.setEnabled(not self._all_plots_frozen)
+        self.freeze_two_main_plots_button.setEnabled(
+            connected and not self._all_plots_frozen
+        )
+        self.freeze_all_button.setEnabled(connected)
+        self.reset_axes_button.setEnabled(connected)
 
     def _toggle_two_main_plots_freeze(self):
         if self._all_plots_frozen:
@@ -3997,7 +4090,38 @@ class View(QMainWindow):
     def show_recording_status(self, status: int):
         self.recording_statusbar.setRange(0, max(status, 1))
 
+    def _copy_text_to_clipboard(self, text: str) -> bool:
+        try:
+            clipboard = QApplication.clipboard()
+            if clipboard is None:
+                return False
+            clipboard.setText(text)
+            return True
+        except Exception:
+            return False
+
     def show_status(self, status: str, print_to_terminal=True):
+        report_file_prefix = "Saved report file: "
+        if status.startswith(report_file_prefix):
+            report_path = status[len(report_file_prefix):].strip()
+            if self._copy_text_to_clipboard(report_path):
+                status = f"Report path saved to clipboard: {report_path}"
+
+        recording_path = None
+        recording_file_prefix = "Saved recording file: "
+        recording_saved_prefix = "Saved recording at "
+        if status.startswith(recording_file_prefix):
+            recording_path = status[len(recording_file_prefix):].strip()
+        elif status.startswith(recording_saved_prefix):
+            # Backward-compatible parsing for legacy status text.
+            recording_path = status[len(recording_saved_prefix):].rstrip(".").strip()
+
+        if recording_path:
+            if self._session_bundle is not None and Path(recording_path) == self._session_bundle.session_dir:
+                recording_path = str(self._session_bundle.csv_path)
+            if self._copy_text_to_clipboard(recording_path):
+                status = f"Recording path saved to clipboard: {recording_path}"
+
         if "Connected" in status and "Disconnecting" not in status:
             self._suppress_comm_error_popups = False
             self._connect_attempt_timer.stop()
@@ -4180,6 +4304,13 @@ class View(QMainWindow):
         elif data.name == "qtc":
             if isinstance(data.value, dict):
                 self._session_qtc_payload = data.value
+                qrs_val = data.value.get("qrs_ms")
+                try:
+                    if qrs_val is None:
+                        raise TypeError
+                    self.qrs_label.setText(f"QRS: {float(qrs_val):.1f} ms")
+                except (TypeError, ValueError):
+                    self.qrs_label.setText("QRS: -- ms")
                 self._refresh_popup_control_labels()
 
         # 3. AVERAGED DATA (RMSSD & Stability)
