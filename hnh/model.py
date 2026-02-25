@@ -86,10 +86,12 @@ class Model(QObject):
         self._qtc_pending_request: tuple[int, list[float], QtcConfig, int] | None = None
         self._qtc_compute_done.connect(self._on_qtc_compute_done)
         self._qtc_compute_failed.connect(self._on_qtc_compute_failed)
+        self.reset_ibi_diagnostics()
 
 
     def hr_handler(self, rr_ms):
         try:
+            self.ibi_beats_received_count += 1
             self.current_hr = int(60000 / rr_ms)
             self.rr_intervals.append(rr_ms)
             
@@ -104,6 +106,7 @@ class Model(QObject):
 
     @Slot(int)
     def update_ibis_buffer(self, ibi: int):
+        self.ibi_buffer_updates_count += 1
         validated_ibi = self.validate_ibi(ibi)
         self.update_ibis_seconds(validated_ibi / 1000)
         self.ibis_buffer.append(validated_ibi)
@@ -118,6 +121,17 @@ class Model(QObject):
         self.update_counter += 1
         if self.update_counter % 5 == 0:
             self.compute_local_hrv()
+
+    def reset_ibi_diagnostics(self):
+        self.ibi_beats_received_count = 0
+        self.ibi_buffer_updates_count = 0
+
+    def ibi_diagnostics_snapshot(self) -> dict:
+        return {
+            "beats_received": int(self.ibi_beats_received_count),
+            "buffer_updates": int(self.ibi_buffer_updates_count),
+            "delta": int(self.ibi_beats_received_count - self.ibi_buffer_updates_count),
+        }
 
     @Slot(object)
     def update_ecg_samples(self, samples):
