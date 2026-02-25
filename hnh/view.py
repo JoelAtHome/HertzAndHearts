@@ -2458,6 +2458,8 @@ class View(QMainWindow):
         self.profile_manager_button = QPushButton("Profiles")
         self.profile_manager_button.clicked.connect(self._open_profile_manager)
 
+        self._annotation_enabled_placeholder = "Choose from list or enter new text"
+        self._annotation_disabled_placeholder = "Recording only"
         self.annotation = QComboBox()
         self.annotation.setEditable(True)
         self.annotation.setInsertPolicy(QComboBox.NoInsert)
@@ -2465,10 +2467,10 @@ class View(QMainWindow):
         self.annotation.completer().setCompletionMode(
             QCompleter.PopupCompletion
         )
-        self.annotation.setPlaceholderText("Choose from list or enter new text")
+        self.annotation.setPlaceholderText(self._annotation_enabled_placeholder)
         if self.annotation.lineEdit() is not None:
             self.annotation.lineEdit().setPlaceholderText(
-                "Choose from list or enter new text"
+                self._annotation_enabled_placeholder
             )
         self._refresh_annotation_list()
         self.annotation_button = QPushButton("Annotate")
@@ -2679,9 +2681,12 @@ class View(QMainWindow):
 
         self.annotation.setMaximumWidth(200)
         self.annotation.setStyleSheet("font-size: 11px;")
-        self.annotation.setPlaceholderText("Choose from list or enter new text")
+        self.annotation.setPlaceholderText(self._annotation_enabled_placeholder)
         self.annotation_button.setMaximumWidth(64)
-        self.annotation_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.annotation_button.setStyleSheet(
+            "font-size: 11px; padding: 2px 6px;"
+            "QPushButton:disabled { color: #7f8c8d; background-color: #e0e0e0; }"
+        )
         toolbar.addWidget(self.start_recording_button)
         toolbar.addWidget(self.save_recording_button)
         toolbar.addWidget(self.export_report_button)
@@ -2843,8 +2848,21 @@ class View(QMainWindow):
         connected = self._is_sensor_connected()
         connecting = self._connect_attempt_timer.isActive()
         is_recording = self._session_state == "recording"
+        annotation_available = is_recording
         self.start_recording_button.setEnabled(connected and not is_recording)
         self.save_recording_button.setEnabled(is_recording)
+        self.annotation.setEnabled(annotation_available)
+        self.annotation_button.setEnabled(annotation_available)
+        annotation_placeholder = (
+            self._annotation_enabled_placeholder
+            if annotation_available
+            else self._annotation_disabled_placeholder
+        )
+        self.annotation.setPlaceholderText(annotation_placeholder)
+        if self.annotation.lineEdit() is not None:
+            self.annotation.lineEdit().setPlaceholderText(annotation_placeholder)
+        if not annotation_available:
+            self.annotation.setCurrentText("")
         self.export_report_button.setEnabled(self._session_bundle is not None)
         self.export_report_button.setText("Report (Draft)" if is_recording else "Report")
         self.poincare_button.setEnabled(connected)
@@ -3512,6 +3530,9 @@ class View(QMainWindow):
             self.show_status(f"Report export failed: {e}")
 
     def emit_annotation(self):
+        if self._session_state != "recording":
+            self.show_status(self._annotation_disabled_placeholder)
+            return
         text = self.annotation.currentText().strip()
         if not text:
             return
