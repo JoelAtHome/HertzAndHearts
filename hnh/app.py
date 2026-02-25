@@ -1,5 +1,7 @@
 import sys
 from importlib import metadata
+from datetime import datetime
+from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 from hnh.view import View
@@ -51,6 +53,20 @@ def _warn_if_pandas_neurokit_combo_is_risky() -> None:
         )
 
 
+def _emit_research_use_startup_warning() -> None:
+    warning = "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT."
+    print(warning, file=sys.stderr)
+    try:
+        log_dir = Path.home() / "Hertz-and-Hearts"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = log_dir / "startup.log"
+        timestamp = datetime.now().isoformat(timespec="seconds")
+        with log_path.open("a", encoding="utf-8", errors="ignore") as fh:
+            fh.write(f"{timestamp} {warning}\n")
+    except Exception:
+        return
+
+
 class Application(QApplication):
     def __init__(self, sys_argv):
         super(Application, self).__init__(sys_argv)
@@ -62,6 +78,7 @@ class Application(QApplication):
 
 def main():
     _warn_if_pandas_neurokit_combo_is_risky()
+    _emit_research_use_startup_warning()
     app = Application(sys.argv)
     app._view.show()
     QTimer.singleShot(0, app._view.showMaximized)

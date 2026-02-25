@@ -13,6 +13,9 @@ build = ["pyinstaller"]
 [tool.setuptools.packages.find]
 include = ["hnh*"]
 
+[tool.setuptools.package-data]
+hnh = ["disclaimer.md"]
+
 [tool.mypy]
 check_untyped_defs = true
 

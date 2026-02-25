@@ -3,6 +3,12 @@
 # VNS-TA
 
 A desktop application for heart rate variability (HRV) biofeedback training with ECG chest straps.
+RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT.
+This software is intended only for investigational and research use.
+
+## Research Use Disclaimer (Full Text)
+
+See the full text in [`hnh/disclaimer.md`](hnh/disclaimer.md).
 
 ## Project Wishlist
 

@@ -67,6 +67,7 @@ def generate_session_report(path: str, data: dict) -> None:
         annotations  -- list of (timestamp_str, text)
         hr_values, rmssd_values  -- lists of floats for stats
         notes  -- str from user
+        disclaimer -- dict with warning/text/source/hash/ack metadata
     """
     doc = Document()
 
@@ -182,6 +183,28 @@ def generate_session_report(path: str, data: dict) -> None:
         )
         for run in draft_note.runs:
             run.bold = True
+
+    # Section 7: Legal Disclaimer
+    disclaimer = data.get("disclaimer", {}) or {}
+    if disclaimer:
+        _add_heading(doc, "Legal Disclaimer")
+        warning = str(disclaimer.get("warning", "")).strip()
+        if warning:
+            warning_run = doc.add_paragraph().add_run(warning)
+            warning_run.bold = True
+        acknowledged_at = disclaimer.get("acknowledged_at") or "--"
+        disclaimer_rows = [
+            ("Acknowledgment Mode", str(disclaimer.get("acknowledgment_mode", "--"))),
+            ("Acknowledged At", str(acknowledged_at)),
+            ("Source", str(disclaimer.get("source_path", "--"))),
+            ("Text SHA256", str(disclaimer.get("sha256", "--"))),
+        ]
+        _add_key_value_table(doc, disclaimer_rows)
+        disclaimer_text = str(disclaimer.get("text", "")).strip()
+        if disclaimer_text:
+            _add_heading(doc, "Disclaimer Text Snapshot", level=3)
+            for line in disclaimer_text.splitlines():
+                doc.add_paragraph(line if line.strip() else "")
 
     # Footer
     doc.add_paragraph("")
