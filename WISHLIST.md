@@ -191,8 +191,8 @@ Implementation checklist:
 - Proposed approach: Add a concise one-page summary export focused on key pre/post values, quality, and notable events.
 - Effort: M
 - Impact: High
-- Status: planned
-- Notes: Keep this as a companion export, not a replacement for the full report.
+- Status: done
+- Notes: Implemented as a companion one-page share PDF with layout/formatting polish and one-page guardrails.
 
 ### 11) [F15] Versioned analysis metadata
 - Problem: Reproducibility is harder without explicit algorithm/settings version traces per session.
@@ -351,8 +351,8 @@ Implementation checklist:
 - Proposed approach: Implement EDF export at finalize-time from captured session streams, plus a follow-on backfill utility that can generate EDF from existing CSV sessions.
 - Effort: M
 - Impact: High
-- Status: planned
-- Notes: CSV→EDF is feasible but requires careful channel mapping, timestamps/start-time handling, and fixed sample-rate handling (resample/interpolate irregular streams where needed).
+- Status: done
+- Notes: Native finalize-time EDF+ export is implemented with optional toggle, normalized channels, and tests; CSV backfill remains optional future tooling.
 
 ### 31) [PERF/UX] Reconnect gap rendering parity (low priority)
 - Problem: After sensor-induced disconnect/reconnect, traces can resume with wonky continuity; button-driven disconnect/reconnect currently clears all plots, creating inconsistent behavior.
@@ -456,6 +456,21 @@ Completed items. Include completion date and optional version reference.
 - Completed: 2026-02-25
 - Outcome: Signal degraded warnings now use a non-modal, no-focus alert path so they stay visible with pinned plot windows without stealing focus from other applications.
 - Notes: When the app is not active, alerts are queued and shown on return to the app; indicator/status messaging remains immediate.
+
+### [F12] One-page clinical summary PDF
+- Completed: 2026-02-26
+- Outcome: Added one-page share PDF export and aligned formatting/content with report conventions (including generated timestamp formatting and visual ordering).
+- Notes: Designed as a companion artifact to full DOCX report, with one-page readability constraints.
+
+### [F33] EDF export implementation (native + CSV backfill path)
+- Completed: 2026-02-26
+- Outcome: Added finalize-time EDF+ export with HR/RMSSD channels, normalized derivation-friendly channels, and ECG waveform support.
+- Notes: Optional export toggle and test coverage are in place; CSV backfill path can be added later if still needed.
+
+### Save/Report destination path memory split
+- Completed: 2026-02-26
+- Outcome: Save and Report actions now prompt for destination folders and remember separate per-profile last-used paths.
+- Notes: Includes backward-compatible fallback to legacy shared save-path preference.
 
 ## Triage Workflow
 
