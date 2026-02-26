@@ -452,6 +452,11 @@ Completed items. Include completion date and optional version reference.
 - Outcome: Recording banner now prioritizes live connectivity/stream state over stale phase state, preventing contradictory combinations like `BASELINES LOCKED` alongside `ECG (waiting for data...)`/`QTc (no sensor)`.
 - Notes: Stream reset and disconnected paths now explicitly clear phase-active state and refresh banner text immediately.
 
+### Signal degraded alerts: non-modal and background-safe
+- Completed: 2026-02-25
+- Outcome: Signal degraded warnings now use a non-modal, no-focus alert path so they stay visible with pinned plot windows without stealing focus from other applications.
+- Notes: When the app is not active, alerts are queued and shown on return to the app; indicator/status messaging remains immediate.
+
 ## Triage Workflow
 
 1. Add new suggestions to `Intake` using the template.
