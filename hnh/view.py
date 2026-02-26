@@ -10,11 +10,11 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
 from PySide6.QtGui import (
-    QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor, QPixmap,
+    QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor, QPixmap, QFont,
     QKeySequence, QShortcut, QDesktopServices,
 )
 from PySide6.QtCore import (
-    Qt, QThread, Signal, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
+    Qt, QThread, Signal, Slot, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
     QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
     QEventLoop, QUrl,
 )
@@ -1005,6 +1005,7 @@ class XYSeriesWidget(QChartView):
 
 class EcgWindow(QMainWindow):
     closed = Signal()
+    cursor_measurement_captured = Signal(object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1048,8 +1049,71 @@ class EcgWindow(QMainWindow):
         self._curve = self._plot_widget.plot(
             pen=pg.mkPen(color='k', width=1.2)
         )
+        self._cursor_active = "A"
+        self._cursor_suppress_events = False
+        self._cursor_a_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            movable=True,
+            pen=pg.mkPen((30, 30, 180, 220), width=1.5),
+            label="A",
+            labelOpts={"position": 0.9, "color": (30, 30, 180), "fill": (255, 255, 255, 160)},
+        )
+        self._cursor_b_line = pg.InfiniteLine(
+            pos=0.0,
+            angle=90,
+            movable=True,
+            pen=pg.mkPen((180, 30, 30, 220), width=1.5),
+            label="B",
+            labelOpts={"position": 0.9, "color": (180, 30, 30), "fill": (255, 255, 255, 160)},
+        )
+        self._cursor_a_line.setVisible(False)
+        self._cursor_b_line.setVisible(False)
+        self._plot_widget.addItem(self._cursor_a_line)
+        self._plot_widget.addItem(self._cursor_b_line)
+        self._cursor_a_line.sigPositionChanged.connect(lambda _line: self._on_cursor_line_changed("A"))
+        self._cursor_b_line.sigPositionChanged.connect(lambda _line: self._on_cursor_line_changed("B"))
+        self._cursor_a_line.sigPositionChangeFinished.connect(
+            lambda _line: self._on_cursor_line_change_finished("A")
+        )
+        self._cursor_b_line.sigPositionChangeFinished.connect(
+            lambda _line: self._on_cursor_line_change_finished("B")
+        )
+        self._cursor_delta_line = pg.PlotCurveItem(
+            pen=pg.mkPen((65, 105, 225, 210), width=1.6)
+        )
+        self._cursor_delta_line.setVisible(False)
+        self._plot_widget.addItem(self._cursor_delta_line)
+        self._cursor_arrow_a = pg.ArrowItem(
+            angle=0,
+            headLen=10,
+            tipAngle=30,
+            baseAngle=20,
+            brush=pg.mkBrush(65, 105, 225, 210),
+            pen=pg.mkPen((65, 105, 225, 210), width=1),
+        )
+        self._cursor_arrow_b = pg.ArrowItem(
+            angle=180,
+            headLen=10,
+            tipAngle=30,
+            baseAngle=20,
+            brush=pg.mkBrush(65, 105, 225, 210),
+            pen=pg.mkPen((65, 105, 225, 210), width=1),
+        )
+        self._cursor_arrow_a.setVisible(False)
+        self._cursor_arrow_b.setVisible(False)
+        self._plot_widget.addItem(self._cursor_arrow_a)
+        self._plot_widget.addItem(self._cursor_arrow_b)
+        self._cursor_delta_text = pg.TextItem(
+            html='<span style="color:#4169e1; font-size:10pt;"><b>Δt</b></span>',
+            anchor=(0.5, 1.0),
+        )
+        self._cursor_delta_text.setVisible(False)
+        self._plot_widget.addItem(self._cursor_delta_text)
 
         self._frozen = False
+        self._pre_freeze_view_sec: float | None = None
+        self._pre_freeze_follow_main: bool = True
         self._timeline_offset_sec = 0.0
         self._synced_xrange: tuple[float, float] | None = None
         self._follow_main_xrange = True
@@ -1074,13 +1138,14 @@ class EcgWindow(QMainWindow):
 
         self._freeze_button = QPushButton("Freeze")
         self._freeze_button.setFixedWidth(80)
+        self._freeze_button.setToolTip("Freeze ECG stream (enables cursor measurement tools).")
         self._freeze_button.clicked.connect(self._toggle_freeze)
         self._pin_button = QPushButton("\U0001F4CC")
         self._pin_button.setCheckable(True)
-        self._pin_button.setFixedWidth(24)
-        self._pin_button.setToolTip("Pin/unpin this window on top.")
+        self._pin_button.setFixedWidth(30)
+        self._pin_button.setFont(QFont("Segoe UI Emoji", 11))
         self._pin_button.setFlat(True)
-        self._pin_button.setStyleSheet("font-size: 14px; border: none; padding: 0 2px;")
+        self._pin_button.setStyleSheet("font-size: 13px; border: none; padding: 0 2px;")
         self._pin_button.toggled.connect(self._set_pinned)
         self._update_pin_button_visual()
         self._relock_button = QPushButton("Relock")
@@ -1089,20 +1154,59 @@ class EcgWindow(QMainWindow):
         self._relock_button.clicked.connect(self._relock_to_main_xrange)
         self._relock_button.setEnabled(False)
 
-        self._statusbar = QStatusBar()
+        self._controls_bar = QWidget()
+        controls_row = QHBoxLayout(self._controls_bar)
+        controls_row.setContentsMargins(6, 2, 6, 2)
+        controls_row.setSpacing(6)
         zoom_label = QLabel("Zoom:")
         zoom_label.setStyleSheet("font-size: 11px;")
-        self._statusbar.addPermanentWidget(zoom_label)
-        self._statusbar.addPermanentWidget(self._zoom_out_button)
-        self._statusbar.addPermanentWidget(self._zoom_in_button)
-        self._statusbar.addPermanentWidget(self._zoom_reset_button)
-        self._statusbar.addPermanentWidget(self._relock_button)
-        self._statusbar.addPermanentWidget(self._pin_button)
-        self._statusbar.addPermanentWidget(self._freeze_button)
+        self._cursor_label = QLabel("Cursors:")
+        self._cursor_label.setStyleSheet("font-size: 11px; color: #8a8a8a;")
+        self._cursor_a_select_button = QPushButton("A")
+        self._cursor_a_select_button.setCheckable(True)
+        self._cursor_a_select_button.setFixedWidth(28)
+        self._cursor_a_select_button.setToolTip(
+            "Select cursor A for keyboard nudge.\nShortcut: press A."
+        )
+        self._cursor_a_select_button.toggled.connect(lambda checked: self._select_active_cursor("A", checked))
+        self._cursor_b_select_button = QPushButton("B")
+        self._cursor_b_select_button.setCheckable(True)
+        self._cursor_b_select_button.setFixedWidth(28)
+        self._cursor_b_select_button.setToolTip(
+            "Select cursor B for keyboard nudge.\nShortcut: press B."
+        )
+        self._cursor_b_select_button.toggled.connect(lambda checked: self._select_active_cursor("B", checked))
+        self._cursor_capture_button = QPushButton("Capture")
+        self._cursor_capture_button.setFixedWidth(62)
+        self._cursor_capture_button.setToolTip("Capture cursor interval as session annotation.")
+        self._cursor_capture_button.clicked.connect(self._capture_cursor_measurement)
+        controls_row.addWidget(zoom_label)
+        controls_row.addWidget(self._zoom_out_button)
+        controls_row.addWidget(self._zoom_in_button)
+        controls_row.addWidget(self._zoom_reset_button)
+        controls_row.addStretch(1)
+        controls_row.addWidget(self._cursor_label)
+        controls_row.addWidget(self._cursor_a_select_button)
+        controls_row.addWidget(self._cursor_b_select_button)
+        controls_row.addWidget(self._cursor_capture_button)
+        controls_row.addStretch(1)
+        controls_row.addWidget(self._relock_button)
+        controls_row.addWidget(self._freeze_button)
+        controls_row.addWidget(self._pin_button)
+
+        self._statusbar = QStatusBar()
         self.setStatusBar(self._statusbar)
         self._statusbar.showMessage("Waiting for ECG data...")
+        self._set_active_cursor_visuals()
+        self._set_cursor_controls_enabled(False)
 
-        self.setCentralWidget(self._plot_widget)
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._plot_widget, 1)
+        central_layout.addWidget(self._controls_bar)
+        self.setCentralWidget(central)
         view_box = self._plot_widget.getViewBox()
         if hasattr(view_box, "sigRangeChangedManually"):
             view_box.sigRangeChangedManually.connect(self._on_manual_range_changed)
@@ -1116,6 +1220,7 @@ class EcgWindow(QMainWindow):
         self._view_sec = min(self._max_view_sec, float(self._default_view_sec))
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
+        self._refresh_relock_tooltip()
         self._apply_interaction_mode()
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
@@ -1157,8 +1262,10 @@ class EcgWindow(QMainWindow):
         self._synced_xrange = None
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
+        self._refresh_relock_tooltip()
         self._got_first_data = False
         self._frozen = False
+        self._disable_cursors_for_streaming_view()
         self._freeze_button.setText("Freeze")
         self._apply_interaction_mode()
         self._last_x_range = None
@@ -1169,6 +1276,7 @@ class EcgWindow(QMainWindow):
     def stop(self):
         self._refresh_timer.stop()
         self._frozen = False
+        self._disable_cursors_for_streaming_view()
         self._freeze_button.setText("Freeze")
         self._apply_interaction_mode()
         self._statusbar.showMessage("ECG stopped.")
@@ -1180,12 +1288,12 @@ class EcgWindow(QMainWindow):
         self._pin_button.setChecked(self._pinned)
         if self._pinned:
             self._pin_button.setStyleSheet(
-                "font-size: 14px; border: 1px solid #1b6ec2; border-radius: 3px; "
+                "font-size: 13px; border: 1px solid #1b6ec2; border-radius: 3px; "
                 "padding: 0 2px; background: #e8f2ff;"
             )
         else:
             self._pin_button.setStyleSheet(
-                "font-size: 14px; border: 1px solid transparent; border-radius: 3px; "
+                "font-size: 13px; border: 1px solid transparent; border-radius: 3px; "
                 "padding: 0 2px; background: transparent;"
             )
 
@@ -1207,17 +1315,37 @@ class EcgWindow(QMainWindow):
                 self.activateWindow()
 
     def set_stream_frozen(self, frozen: bool):
+        was_frozen = self._frozen
         self._frozen = bool(frozen)
         if self._frozen:
+            if not was_frozen:
+                self._pre_freeze_view_sec = float(self._view_sec)
+                self._pre_freeze_follow_main = bool(self._follow_main_xrange)
             if self._follow_main_xrange:
                 self._follow_main_xrange = False
                 self._relock_button.setEnabled(True)
             self._freeze_button.setText("Resume")
+            self._freeze_button.setToolTip("Resume ECG streaming and hide cursor tools.")
             self._apply_interaction_mode()
+            self._auto_zoom_for_frozen_view()
+            self._enable_cursors_for_frozen_view()
+            self._refresh_relock_tooltip()
             self._statusbar.showMessage("ECG frozen \u2014 drag to pan, scroll wheel or +/\u2212 to zoom.")
         else:
+            if was_frozen and self._pre_freeze_view_sec is not None:
+                self._view_sec = float(self._pre_freeze_view_sec)
+            # Resume should return to the live, relocked timeline behavior while
+            # preserving the pre-freeze zoom span.
+            self._follow_main_xrange = True
+            self._relock_button.setEnabled(False)
             self._freeze_button.setText("Freeze")
+            self._freeze_button.setToolTip("Freeze ECG stream (enables cursor measurement tools).")
             self._apply_interaction_mode()
+            self._disable_cursors_for_streaming_view()
+            if self._synced_xrange is not None:
+                x_lo, x_hi = self._synced_xrange
+                self._set_follow_main_xrange(float(x_lo), float(x_hi))
+            self._refresh_relock_tooltip()
             self._statusbar.showMessage(
                 "ECG streaming..." if self._got_first_data else "Waiting for ECG data..."
             )
@@ -1226,6 +1354,304 @@ class EcgWindow(QMainWindow):
         # Manual mode mirrors Poincare-style drag+wheel on X.
         manual_mode = not self._follow_main_xrange
         self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
+
+    def _set_cursor_controls_enabled(self, enabled: bool):
+        enabled = bool(enabled)
+        self._cursor_label.setEnabled(enabled)
+        self._cursor_label.setStyleSheet(
+            "font-size: 11px; color: #2e2e2e;" if enabled else "font-size: 11px; color: #8a8a8a;"
+        )
+        self._cursor_a_select_button.setEnabled(enabled)
+        self._cursor_b_select_button.setEnabled(enabled)
+        self._cursor_capture_button.setEnabled(enabled)
+        self._set_active_cursor_visuals()
+
+    def _refresh_relock_tooltip(self):
+        if self._frozen:
+            self._relock_button.setToolTip(
+                "Resume streaming and relock this chart to the main plot time range."
+            )
+        elif self._follow_main_xrange:
+            self._relock_button.setToolTip("Chart is already locked to the main plot time range.")
+        else:
+            self._relock_button.setToolTip("Relock this chart to the main plot time range.")
+
+    def _estimate_rr_seconds_from_trace(self) -> float | None:
+        if len(self._times) < 12 or len(self._values) < 12:
+            return None
+        t_arr = np.asarray(self._times, dtype=float)
+        y_arr = np.asarray(self._values, dtype=float)
+        t_max = float(t_arr[-1])
+        mask = t_arr >= (t_max - 12.0)
+        idxs = np.where(mask)[0]
+        if idxs.size < 12:
+            return None
+        dt = float(np.median(np.diff(t_arr[idxs]))) if idxs.size > 1 else (1.0 / ECG_SAMPLE_RATE)
+        dt = max(dt, 1.0 / (3.0 * ECG_SAMPLE_RATE))
+        baseline = float(np.median(y_arr[idxs]))
+        z = np.abs(y_arr - baseline)
+        thresh = float(np.percentile(z[idxs], 75))
+        refractory = max(2, int(0.30 / dt))
+        peaks: list[int] = []
+        start = max(1, int(idxs[0]) + 1)
+        end = min(len(z) - 2, int(idxs[-1]) - 1)
+        for i in range(start, end + 1):
+            if not (z[i] >= z[i - 1] and z[i] >= z[i + 1]):
+                continue
+            if z[i] < thresh:
+                continue
+            if peaks and (i - peaks[-1]) <= refractory:
+                if z[i] > z[peaks[-1]]:
+                    peaks[-1] = i
+                continue
+            peaks.append(i)
+        if len(peaks) < 3:
+            return None
+        rr = np.diff(t_arr[peaks])
+        rr = rr[(rr >= 0.35) & (rr <= 2.0)]
+        if rr.size == 0:
+            return None
+        return float(np.median(rr))
+
+    def _auto_zoom_for_frozen_view(self):
+        bounds = self._cursor_time_bounds()
+        if bounds is None:
+            return
+        rr_sec = self._estimate_rr_seconds_from_trace()
+        target = 2.0 * rr_sec if rr_sec is not None else 2.4
+        self._view_sec = max(0.8, min(self._max_view_sec, float(target)))
+        t_hi = bounds[1]
+        t_lo = max(bounds[0], t_hi - self._view_sec)
+        self._set_xrange_if_needed(t_lo, t_hi)
+
+    def _find_positive_peak_indices(
+        self,
+        x_lo: float,
+        x_hi: float,
+    ) -> list[tuple[int, float, float, float, float]]:
+        if len(self._times) < 5 or len(self._values) < 5:
+            return []
+        t_arr = np.asarray(self._times, dtype=float)
+        y_arr = np.asarray(self._values, dtype=float)
+        mask = (t_arr >= x_lo) & (t_arr <= x_hi)
+        idxs = np.where(mask)[0]
+        if idxs.size < 5:
+            return []
+        i0 = max(1, int(idxs[0]) + 1)
+        i1 = min(len(y_arr) - 2, int(idxs[-1]) - 1)
+        if i1 <= i0:
+            return []
+        baseline = float(np.median(y_arr[idxs]))
+        amp = y_arr - baseline
+        min_amp = float(np.percentile(amp[idxs], 60))
+        local_noise = float(np.std(y_arr[idxs])) + 1e-6
+        out: list[tuple[int, float, float, float, float]] = []
+        for i in range(i0, i1 + 1):
+            if not (y_arr[i] >= y_arr[i - 1] and y_arr[i] >= y_arr[i + 1]):
+                continue
+            if amp[i] < min_amp:
+                continue
+            left_slope = float(y_arr[i] - y_arr[i - 1])
+            right_slope = float(y_arr[i] - y_arr[i + 1])
+            slope = max(left_slope, right_slope, 0.0)
+            half = baseline + 0.5 * float(amp[i])
+            width = 1
+            j = i - 1
+            while j >= i0 and y_arr[j] >= half:
+                width += 1
+                j -= 1
+            j = i + 1
+            while j <= i1 and y_arr[j] >= half:
+                width += 1
+                j += 1
+            amp_z = float(amp[i]) / local_noise
+            slope_z = slope / local_noise
+            # Favor sharp/narrow positive peaks (R-like) over broad domes.
+            score = (0.60 * amp_z) + (2.40 * slope_z) - (float(width) / 3.8)
+            out.append((i, float(score), float(width), float(slope_z), float(amp_z)))
+        return out
+
+    def _suggest_cycle_cursor_positions(
+        self,
+        x_lo: float,
+        x_hi: float,
+        rr_sec: float | None,
+    ) -> tuple[float, float] | None:
+        peaks = self._find_positive_peak_indices(x_lo, x_hi)
+        if len(peaks) < 2:
+            return None
+        t_arr = np.asarray(self._times, dtype=float)
+        pairs: list[tuple[float, float, float]] = []
+        for i in range(len(peaks) - 1):
+            a_i, a_score, a_w, a_slope, _a_amp = peaks[i]
+            b_i, b_score, b_w, b_slope, _b_amp = peaks[i + 1]
+            dt = float(t_arr[b_i] - t_arr[a_i])
+            if dt <= 0.0:
+                continue
+            if rr_sec is not None and not (0.55 * rr_sec <= dt <= 1.70 * rr_sec):
+                continue
+            pair_score = float(a_score + b_score)
+            # Prefer pairs with similar morphology (corresponding peaks).
+            pair_score -= 0.55 * abs(a_w - b_w)
+            pair_score -= 0.25 * abs(a_slope - b_slope)
+            if rr_sec is not None and rr_sec > 1e-6:
+                pair_score -= 0.8 * abs(dt - rr_sec) / rr_sec
+            # Prefer more recent pair while keeping morphology score dominant.
+            pair_score += 0.04 * float(t_arr[b_i])
+            pairs.append((pair_score, float(t_arr[a_i]), float(t_arr[b_i])))
+        if not pairs:
+            # Fallback: best-scored separated pair (no RR gating).
+            min_sep = 0.25
+            all_pairs: list[tuple[float, float, float]] = []
+            for i in range(len(peaks) - 1):
+                for j in range(i + 1, len(peaks)):
+                    a_i, a_score, a_w, a_slope, _a_amp = peaks[i]
+                    b_i, b_score, b_w, b_slope, _b_amp = peaks[j]
+                    dt = float(t_arr[b_i] - t_arr[a_i])
+                    if dt < min_sep:
+                        continue
+                    score = float(a_score + b_score)
+                    score -= 0.55 * abs(a_w - b_w)
+                    score -= 0.25 * abs(a_slope - b_slope)
+                    score += 0.02 * float(t_arr[b_i])
+                    all_pairs.append((score, float(t_arr[a_i]), float(t_arr[b_i])))
+            if not all_pairs:
+                return None
+            _score, a_t, b_t = max(all_pairs, key=lambda x: x[0])
+            return a_t, b_t
+        _score, a_t, b_t = max(pairs, key=lambda x: x[0])
+        return a_t, b_t
+
+    def _enable_cursors_for_frozen_view(self):
+        if len(self._times) < 2:
+            self._set_cursor_controls_enabled(False)
+            self._cursor_a_line.setVisible(False)
+            self._cursor_b_line.setVisible(False)
+            return
+        self._set_cursor_controls_enabled(True)
+        x_rng = self._plot_widget.viewRange()[0]
+        x_lo, x_hi = float(x_rng[0]), float(x_rng[1])
+        rr_sec = self._estimate_rr_seconds_from_trace()
+        suggested = self._suggest_cycle_cursor_positions(x_lo, x_hi, rr_sec=rr_sec)
+        if suggested is None:
+            span = max(0.2, x_hi - x_lo)
+            a_pos = x_lo + 0.33 * span
+            b_pos = x_lo + 0.66 * span
+        else:
+            a_pos, b_pos = suggested
+        self._cursor_suppress_events = True
+        self._cursor_a_line.setPos(a_pos)
+        self._cursor_b_line.setPos(b_pos)
+        self._cursor_suppress_events = False
+        self._cursor_a_line.setVisible(True)
+        self._cursor_b_line.setVisible(True)
+        self._cursor_active = "A"
+        self._set_active_cursor_visuals()
+        self._update_cursor_readout()
+
+    def _disable_cursors_for_streaming_view(self):
+        self._set_cursor_controls_enabled(False)
+        self._cursor_a_line.setVisible(False)
+        self._cursor_b_line.setVisible(False)
+        self._cursor_delta_line.setVisible(False)
+        self._cursor_arrow_a.setVisible(False)
+        self._cursor_arrow_b.setVisible(False)
+        self._cursor_delta_text.setVisible(False)
+
+    def _cursor_time_bounds(self) -> tuple[float, float] | None:
+        if len(self._times) < 2:
+            return None
+        return float(self._times[0]), float(self._times[-1])
+
+    def _on_cursor_line_changed(self, cursor_id: str):
+        if self._cursor_suppress_events:
+            return
+        self._cursor_active = cursor_id
+        self._set_active_cursor_visuals()
+        self._update_cursor_readout()
+
+    def _on_cursor_line_change_finished(self, cursor_id: str):
+        if self._cursor_suppress_events:
+            return
+        self._cursor_active = cursor_id
+        self._set_active_cursor_visuals()
+        self._update_cursor_readout()
+
+    def _update_cursor_readout(self):
+        if not (self._frozen and self._cursor_a_line.isVisible() and self._cursor_b_line.isVisible()):
+            self._cursor_delta_line.setVisible(False)
+            self._cursor_arrow_a.setVisible(False)
+            self._cursor_arrow_b.setVisible(False)
+            self._cursor_delta_text.setVisible(False)
+            return
+        a_t = float(self._cursor_a_line.value())
+        b_t = float(self._cursor_b_line.value())
+        dt_ms = abs(b_t - a_t) * 1000.0
+        y_rng = self._plot_widget.viewRange()[1]
+        y_lo, y_hi = float(y_rng[0]), float(y_rng[1])
+        y_span = max(0.1, y_hi - y_lo)
+        y_line = y_lo + 0.10 * y_span
+        x0 = min(a_t, b_t)
+        x1 = max(a_t, b_t)
+        self._cursor_delta_line.setData([x0, x1], [y_line, y_line])
+        self._cursor_delta_line.setVisible(True)
+        self._cursor_arrow_a.setStyle(angle=0)
+        self._cursor_arrow_b.setStyle(angle=180)
+        self._cursor_arrow_a.setPos(x0, y_line)
+        self._cursor_arrow_b.setPos(x1, y_line)
+        self._cursor_arrow_a.setVisible(True)
+        self._cursor_arrow_b.setVisible(True)
+        x_mid = (x0 + x1) * 0.5
+        view_box = self._plot_widget.getViewBox()
+        _px_x, px_y = view_box.viewPixelSize()
+        # Keep label consistently just above the arrowed line, with a tight,
+        # pixel-aware gap so it does not overlap or drift too far.
+        gap = max(0.022 * y_span, 3.0 * float(px_y))
+        y_text = min(y_hi - 0.02 * y_span, y_line + gap)
+        self._cursor_delta_text.setHtml(
+            f'<span style="color:#4169e1; font-size:10pt;"><b>Δt {dt_ms:.1f} ms</b></span>'
+        )
+        self._cursor_delta_text.setPos(x_mid, y_text)
+        self._cursor_delta_text.setVisible(True)
+
+    def _capture_cursor_measurement(self):
+        if not (self._frozen and self._cursor_a_line.isVisible() and self._cursor_b_line.isVisible()):
+            return
+        a_t = float(self._cursor_a_line.value())
+        b_t = float(self._cursor_b_line.value())
+        dt_ms = abs(b_t - a_t) * 1000.0
+        payload = {
+            "a_t_sec": a_t,
+            "b_t_sec": b_t,
+            "dt_ms": dt_ms,
+        }
+        self.cursor_measurement_captured.emit(payload)
+        self._statusbar.showMessage(f"Captured ECG cursor interval: Δt={dt_ms:.1f} ms")
+
+    def _set_active_cursor_visuals(self):
+        self._cursor_suppress_events = True
+        self._cursor_a_select_button.setChecked(self._cursor_active == "A")
+        self._cursor_b_select_button.setChecked(self._cursor_active == "B")
+        self._cursor_suppress_events = False
+        if not self._cursor_a_select_button.isEnabled():
+            disabled_style = "font-weight: normal; color: #8a8a8a;"
+            self._cursor_a_select_button.setStyleSheet(disabled_style)
+            self._cursor_b_select_button.setStyleSheet(disabled_style)
+            return
+        active_style = "font-weight: bold; border: 1px solid #1b6ec2; background: #e8f2ff;"
+        idle_style = "font-weight: normal;"
+        self._cursor_a_select_button.setStyleSheet(active_style if self._cursor_active == "A" else idle_style)
+        self._cursor_b_select_button.setStyleSheet(active_style if self._cursor_active == "B" else idle_style)
+
+    def _select_active_cursor(self, cursor_id: str, checked: bool):
+        if self._cursor_suppress_events:
+            return
+        if not checked:
+            # Keep one cursor selected at all times.
+            self._set_active_cursor_visuals()
+            return
+        self._cursor_active = cursor_id
+        self._set_active_cursor_visuals()
 
     def _zoom_in(self):
         if self._follow_main_xrange:
@@ -1237,6 +1663,7 @@ class EcgWindow(QMainWindow):
                 self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         self._view_sec = max(0.5, self._view_sec / 1.4)
         self._refresh_frozen_view()
@@ -1249,6 +1676,7 @@ class EcgWindow(QMainWindow):
                 self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
         self._refresh_frozen_view()
@@ -1261,8 +1689,12 @@ class EcgWindow(QMainWindow):
             self._refresh_frozen_view()
 
     def _relock_to_main_xrange(self):
+        if self._frozen:
+            # Relock doubles as Resume for faster workflow.
+            self.set_stream_frozen(False)
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
+        self._refresh_relock_tooltip()
         self._apply_interaction_mode()
         if self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
@@ -1285,6 +1717,7 @@ class EcgWindow(QMainWindow):
         self._plot_widget.setXRange(target[0], target[1], padding=0)
         self._suppress_manual_range_signal = False
         self._last_x_range = target
+        self._update_cursor_readout()
 
     def _set_yrange_if_needed(self, y_lo: float, y_hi: float):
         target = (float(y_lo), float(y_hi))
@@ -1294,6 +1727,7 @@ class EcgWindow(QMainWindow):
                 return
         self._plot_widget.setYRange(target[0], target[1], padding=0)
         self._last_y_range = target
+        self._update_cursor_readout()
 
     def _refresh_frozen_view(self):
         if len(self._times) < 2:
@@ -1315,6 +1749,30 @@ class EcgWindow(QMainWindow):
         max_pending = ECG_SAMPLE_RATE * 10
         while len(self._pending) > max_pending:
             self._pending.popleft()
+
+    def keyPressEvent(self, event):
+        if self._frozen and event.key() in (Qt.Key_A, Qt.Key_B):
+            self._cursor_active = "A" if event.key() == Qt.Key_A else "B"
+            self._set_active_cursor_visuals()
+            event.accept()
+            return
+        if self._frozen and event.key() in (Qt.Key_Left, Qt.Key_Right):
+            bounds = self._cursor_time_bounds()
+            if bounds is not None and self._cursor_a_line.isVisible() and self._cursor_b_line.isVisible():
+                step = 1.0 / float(ECG_SAMPLE_RATE)
+                if event.modifiers() & Qt.ShiftModifier:
+                    step *= 5.0
+                delta = -step if event.key() == Qt.Key_Left else step
+                line = self._cursor_a_line if self._cursor_active == "A" else self._cursor_b_line
+                x_new = float(line.value()) + delta
+                x_new = max(bounds[0], min(bounds[1], x_new))
+                self._cursor_suppress_events = True
+                line.setPos(x_new)
+                self._cursor_suppress_events = False
+                self._update_cursor_readout()
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def sync_timeline_to_main(self, main_plot_delay_sec: float):
         inv_rate = 1.0 / ECG_SAMPLE_RATE
@@ -1349,6 +1807,7 @@ class EcgWindow(QMainWindow):
             return
         x_rng = self._plot_widget.viewRange()[0]
         self._view_sec = max(0.5, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
+        self._refresh_relock_tooltip()
 
     def _redraw(self):
         if self._frozen:
@@ -2192,6 +2651,8 @@ class View(QMainWindow):
         self._hr_ewma = None
         self._signal_popup_shown = False
         self._signal_degrade_count = 0
+        self._signal_popup_widget: QMessageBox | None = None
+        self._pending_signal_popup_reason: str | None = None
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
         self._hrv_axis_ceiling = None
@@ -2227,6 +2688,9 @@ class View(QMainWindow):
 
         self.setWindowTitle(f"Hertz & Hearts ({version})")
         self.setWindowIcon(QIcon(":/logo.png"))
+        app = QApplication.instance()
+        if app is not None:
+            app.applicationStateChanged.connect(self._on_application_state_changed)
 
         # 2. DATA CONNECTIONS
         self.model.ibis_buffer_update.connect(self.plot_ibis)
@@ -2268,6 +2732,7 @@ class View(QMainWindow):
         self.qtc_window = QtcWindow()
         self.model.qtc_update.connect(lambda data: self.qtc_window.append_payload(data.value))
         self.sensor.ecg_update.connect(self.ecg_window.append_samples)
+        self.ecg_window.cursor_measurement_captured.connect(self._on_ecg_cursor_measurement)
         self.sensor.ecg_ready.connect(self._on_ecg_ready)
         self.ecg_window.closed.connect(self._on_ecg_window_closed)
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
@@ -3598,6 +4063,23 @@ class View(QMainWindow):
         self._refresh_annotation_list()
         self.annotation.setCurrentText("")
 
+    @Slot(object)
+    def _on_ecg_cursor_measurement(self, payload: object):
+        if not isinstance(payload, dict):
+            return
+        try:
+            dt_ms = float(payload.get("dt_ms"))
+            a_t = float(payload.get("a_t_sec"))
+            b_t = float(payload.get("b_t_sec"))
+        except (TypeError, ValueError):
+            return
+        text = f"ECG cursor Δt={dt_ms:.1f} ms (A={a_t:.3f}s, B={b_t:.3f}s)"
+        if self._session_state == "recording":
+            ts = datetime.now().strftime("%H:%M:%S")
+            self._session_annotations.append((ts, text))
+            self.signals.annotation.emit(NamedSignal("Annotation", text))
+        self.show_status(text)
+
     def _refresh_annotation_list(self):
         self.annotation.clear()
         for item in self.settings.get_all_annotations():
@@ -4163,9 +4645,40 @@ class View(QMainWindow):
         if self._signal_popup_shown:
             return
         self._signal_popup_shown = True
+        if not self._is_application_active():
+            self._pending_signal_popup_reason = reason
+            self.statusbar.showMessage(f"Signal quality issue detected: {reason}", 8000)
+            QApplication.alert(self, 3000)
+            return
         self._fire_signal_popup(reason)
 
+    def _is_application_active(self) -> bool:
+        app = QApplication.instance()
+        if app is None:
+            return True
+        return app.applicationState() == Qt.ApplicationState.ApplicationActive
+
+    def _on_application_state_changed(self, state):
+        if state != Qt.ApplicationState.ApplicationActive:
+            return
+        if self._suppress_comm_error_popups:
+            self._pending_signal_popup_reason = None
+            return
+        if self._signal_popup_shown and self._pending_signal_popup_reason:
+            reason = self._pending_signal_popup_reason
+            self._pending_signal_popup_reason = None
+            self._fire_signal_popup(reason)
+
+    def _on_signal_popup_closed(self, _result: int):
+        self._signal_popup_widget = None
+
     def _fire_signal_popup(self, reason: str):
+        if self._signal_popup_widget is not None:
+            try:
+                self._signal_popup_widget.close()
+            except Exception:
+                pass
+            self._signal_popup_widget = None
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Warning)
         msg.setWindowTitle("Polar H10 Signal Degraded")
@@ -4179,12 +4692,15 @@ class View(QMainWindow):
             "snug against the skin."
         )
         msg.setStandardButtons(QMessageBox.Ok)
-        # Keep warning reachable even when auxiliary popup windows are pinned.
-        msg.setWindowModality(Qt.ApplicationModal)
+        # Keep warning reachable when plot windows are pinned, but never steal focus.
+        msg.setWindowModality(Qt.NonModal)
         msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        msg.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
+        msg.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        msg.finished.connect(self._on_signal_popup_closed)
+        self._signal_popup_widget = msg
         msg.open()
         msg.raise_()
-        msg.activateWindow()
 
     def _on_rmssd_degraded(self):
         self._signal_degrade_count += 1
@@ -4195,6 +4711,13 @@ class View(QMainWindow):
     def _reset_signal_popup(self):
         self._signal_popup_shown = False
         self._signal_degrade_count = 0
+        self._pending_signal_popup_reason = None
+        if self._signal_popup_widget is not None:
+            try:
+                self._signal_popup_widget.close()
+            except Exception:
+                pass
+            self._signal_popup_widget = None
 
     def _handle_stream_reset(self):
         self.model.clear_buffers()

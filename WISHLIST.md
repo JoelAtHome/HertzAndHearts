@@ -28,6 +28,14 @@ Copy this block when adding a new item:
 
 Raw ideas go here first.
 
+### Fix Profile Editor button not responding
+- Problem: The Profile Editor button has stopped working, preventing users from opening/editing profile details.
+- Proposed approach: Reproduce the click path, confirm signal/handler wiring and any state guard conditions, then restore expected open/edit behavior with a focused regression test.
+- Effort: S
+- Impact: High
+- Status: idea
+- Notes: Reported as urgent usability regression; keep scope to button/functionality restore first.
+
 ### Contextual F1 help consistency across UI
 - Problem: Contextual help is currently uneven across windows, which makes discoverability and UX consistency weaker.
 - Proposed approach: Define and implement a global F1 help standard so each major window and workflow surface provides contextual guidance (matching style, tone, and depth).
@@ -35,6 +43,30 @@ Raw ideas go here first.
 - Impact: High
 - Status: idea
 - Notes: Start with QTc, ECG, Poincare, main dashboard, Settings, and History. Include keyboard shortcut behavior, help content template, and acceptance checks for consistency. Complexity guardrail: do not turn help into feature sprawl; use it to simplify defaults and improve discoverability.
+
+### ECG info-page quick link (waveform primer)
+- Problem: Users reviewing ECG traces need a fast, in-app path to a reference that explains typical P/QRS/T morphology and interval landmarks.
+- Proposed approach: Add an explicit link/button in ECG window (and/or F1 help) that opens a curated info page on normal waveform components and common variants.
+- Effort: S
+- Impact: Med
+- Status: idea
+- Notes: Keep wording non-diagnostic and include a disclaimer that morphology interpretation requires clinician judgment.
+
+### Dynamic Relock tooltip for QTc trend window
+- Problem: The QTc trend `Relock` button tooltip is static, so users may miss that behavior changes by state (locked vs manual vs frozen/resume path).
+- Proposed approach: Mirror ECG tooltip behavior in QTc window with dynamic text updates tied to freeze/manual/relock transitions.
+- Effort: S
+- Impact: Med
+- Status: idea
+- Notes: Include explicit wording that relock also resumes streaming when frozen, matching actual button behavior.
+
+### ECG capture snapshots in report
+- Problem: Cursor capture annotations are text-only, so measured intervals lose visual context in exported reports.
+- Proposed approach: Save a small ECG image snippet at each cursor capture and include it in a dedicated report section with timestamp and Δt metadata.
+- Effort: M
+- Impact: High
+- Status: idea
+- Notes: Cap included snapshots per report (e.g., 3-5) to control document size and keep layout readable.
 
 Help content template (per screen):
 - Title: `<Screen Name> — Quick Guide`
