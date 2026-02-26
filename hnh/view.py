@@ -3351,6 +3351,9 @@ class View(QMainWindow):
         if not connected:
             self.qtc_button.setEnabled(False)
             if not connecting:
+                # Connectivity state must override any prior phase banner state.
+                self.is_phase_active = False
+                self.recording_statusbar.set_disconnected()
                 self.ecg_button.setText("ECG (no sensor)")
                 self.qtc_button.setText("QTc (no sensor)")
                 self.poincare_button.setText("Poincare (no sensor)")
@@ -4726,6 +4729,12 @@ class View(QMainWindow):
         self.qtc_window.clear()
         if self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
             self.qtc_button.setText("QTc (warming up...)")
+        # Stream resets should clear locked/baseline phase banners immediately.
+        self.is_phase_active = False
+        if self._is_sensor_connected():
+            self.recording_statusbar.set_idle("Waiting for ECG data...")
+        else:
+            self.recording_statusbar.set_disconnected()
 
     def _arm_main_plot_warmup(self, clear_series: bool) -> None:
         self._main_plot_warmup_until = time.time() + float(self._plot_start_delay_seconds)

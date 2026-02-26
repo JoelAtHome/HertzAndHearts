@@ -447,6 +447,11 @@ Completed items. Include completion date and optional version reference.
 - Outcome: `ibi_update -> update_ibis_buffer` is now wired through a single authoritative connection.
 - Notes: Follow-up validation remains: explicitly confirm 1:1 beat/update behavior under live streaming and complete regression smoke checks for connect/reconnect/reset paths.
 
+### Status banner precedence fix (locked vs no-data/no-sensor)
+- Completed: 2026-02-25
+- Outcome: Recording banner now prioritizes live connectivity/stream state over stale phase state, preventing contradictory combinations like `BASELINES LOCKED` alongside `ECG (waiting for data...)`/`QTc (no sensor)`.
+- Notes: Stream reset and disconnected paths now explicitly clear phase-active state and refresh banner text immediately.
+
 ## Triage Workflow
 
 1. Add new suggestions to `Intake` using the template.
