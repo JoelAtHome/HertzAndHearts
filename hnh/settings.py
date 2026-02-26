@@ -46,6 +46,15 @@ REGISTRY = OrderedDict([
         "type": int, "min": 10, "max": 180, "unit": "seconds",
         "section": "Session Timing",
     }),
+    ("EXPORT_EDF_PLUS_D", {
+        "display": "Export EDF+ on Finalize",
+        "tooltip": (
+            "When enabled, saving/finalizing a session also writes a compact "
+            "EDF+ file containing derived HR and RMSSD trend channels."
+        ),
+        "type": bool,
+        "section": "Session Timing",
+    }),
 
     # --- HRV Calculation ---
     ("RMSSD_WINDOW", {

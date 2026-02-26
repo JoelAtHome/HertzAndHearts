@@ -3,6 +3,7 @@ import hashlib
 import json
 import math
 import random
+import shutil
 import statistics
 import time
 from pathlib import Path
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
     QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
-    QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog,
+    QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     )
 from collections import deque
@@ -40,13 +41,14 @@ from hnh.config import (
     ECG_SAMPLE_RATE,
 )
 from hnh.settings import Settings, SettingsDialog, REGISTRY
-from hnh.report import generate_session_report
+from hnh.report import generate_session_report, generate_session_share_pdf
 from hnh.session_artifacts import (
     SessionBundle,
     create_session_bundle,
     default_qtc_payload,
     write_manifest,
 )
+from hnh.edf_export import export_session_edf_plus
 from hnh.profile_store import ProfileStore
 from hnh import __version__ as version, resources  # noqa
 import warnings
@@ -81,6 +83,12 @@ def _load_card0_disclaimer_text() -> str:
 
 
 _CARD0_DISCLAIMER_TEXT = _load_card0_disclaimer_text()
+
+
+def _one_page_share_path(bundle: SessionBundle, report_stage: str) -> Path:
+    if report_stage.strip().lower() == "draft":
+        return bundle.session_dir / "session_share_draft.pdf"
+    return bundle.session_dir / "session_share.pdf"
 
 def _save_last_sensor(name, address):
     try:
@@ -2673,7 +2681,9 @@ class View(QMainWindow):
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
+        self._session_hr_times: list[float] = []
         self._session_rmssd_values: list[float] = []
+        self._session_rmssd_times: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
@@ -2952,8 +2962,12 @@ class View(QMainWindow):
         self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
         self.poincare_button.setToolTip("Open the live Poincare RR scatter window.")
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
-        self.save_recording_button.setToolTip("Finalize the active session and save artifacts.")
-        self.export_report_button.setToolTip("Export a draft/final DOCX report for this session.")
+        self.save_recording_button.setToolTip(
+            "Finalize the active session and choose where to save session files."
+        )
+        self.export_report_button.setToolTip(
+            "Export report files and choose an output folder (defaults to last used path)."
+        )
         self.history_button.setToolTip("Show recent session history for the active user profile.")
         self.profile_manager_button.setToolTip("Manage user profiles (create, rename, archive, delete).")
         self.annotation.setToolTip("Choose or type a session annotation.")
@@ -3368,6 +3382,67 @@ class View(QMainWindow):
             return "--"
         return text
 
+    def _default_user_save_dir(self, pref_key: str) -> Path:
+        raw = self._profile_store.get_profile_pref(
+            self._session_profile_id,
+            pref_key,
+            default=str(self._session_root),
+        ).strip()
+        if not raw:
+            raw = self._profile_store.get_profile_pref(
+                self._session_profile_id,
+                "last_save_dir",
+                default=str(self._session_root),
+            ).strip()
+        candidate = Path(raw) if raw else self._session_root
+        if not candidate.exists():
+            return self._session_root
+        return candidate
+
+    def _prompt_user_save_dir(self, title: str, pref_key: str) -> Path | None:
+        start_dir = self._default_user_save_dir(pref_key)
+        chosen = QFileDialog.getExistingDirectory(self, title, str(start_dir))
+        if not chosen:
+            return None
+        target = Path(chosen)
+        self._profile_store.set_profile_pref(
+            self._session_profile_id,
+            pref_key,
+            str(target),
+        )
+        return target
+
+    def _copy_session_folder_to(self, destination_root: Path) -> Path | None:
+        if self._session_bundle is None:
+            return None
+        source = self._session_bundle.session_dir
+        if not source.exists():
+            return None
+        target = destination_root / source.name
+        if target.resolve() == source.resolve():
+            return target
+        if target.exists():
+            for idx in range(1, 1000):
+                candidate = destination_root / f"{source.name}_{idx:02d}"
+                if not candidate.exists():
+                    target = candidate
+                    break
+        shutil.copytree(source, target)
+        return target
+
+    def _copy_selected_artifacts_to(self, destination_root: Path, paths: list[Path]) -> Path | None:
+        if self._session_bundle is None:
+            return None
+        out_dir = destination_root / self._session_bundle.session_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        copied_any = False
+        for path in paths:
+            if not path.exists():
+                continue
+            shutil.copy2(path, out_dir / path.name)
+            copied_any = True
+        return out_dir if copied_any else None
+
     def _build_report_data(self, report_stage: str) -> dict:
         session_start = (
             datetime.fromtimestamp(self.start_time)
@@ -3377,6 +3452,10 @@ class View(QMainWindow):
         session_end = datetime.now()
         last_rmssd = self._session_rmssd_values[-1] if self._session_rmssd_values else None
         last_hr = self._session_hr_values[-1] if self._session_hr_values else None
+        ecg_samples = list(getattr(self.model, "_ecg_buffer", []))
+        max_samples = int(ECG_SAMPLE_RATE * 8)
+        if len(ecg_samples) > max_samples:
+            ecg_samples = ecg_samples[-max_samples:]
         qtc_payload = self._session_qtc_payload or self.model.latest_qtc_payload or default_qtc_payload()
         csv_path = str(self._session_bundle.csv_path) if self._session_bundle else ""
         return {
@@ -3391,13 +3470,29 @@ class View(QMainWindow):
             "last_rmssd": last_rmssd,
             "annotations": list(self._session_annotations),
             "hr_values": list(self._session_hr_values),
+            "hr_time_seconds": list(self._session_hr_times),
             "rmssd_values": list(self._session_rmssd_values),
+            "rmssd_time_seconds": list(self._session_rmssd_times),
+            "ecg_samples": ecg_samples,
+            "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
+            "ecg_is_simulated": False,
             "notes": "",
             "csv_path": csv_path,
             "report_stage": report_stage,
             "qtc": qtc_payload,
             "disclaimer": self._current_disclaimer_payload(),
         }
+
+    def _export_optional_edf_plus(self, report_data: dict):
+        if self._session_bundle is None:
+            return
+        if not bool(getattr(self.settings, "EXPORT_EDF_PLUS_D", False)):
+            return
+        ok, result = export_session_edf_plus(str(self._session_bundle.edf_path), report_data)
+        if ok:
+            self.show_status(f"Saved EDF+ file: {result}")
+            return
+        self.show_status(f"EDF+ export skipped: {result}")
 
     def _current_disclaimer_payload(self) -> dict:
         text = _CARD0_DISCLAIMER_TEXT.strip() or _CARD0_DISCLAIMER_FALLBACK
@@ -3455,7 +3550,23 @@ class View(QMainWindow):
                     "path": str(bundle.report_draft_path),
                     "exists": bundle.report_draft_path.exists(),
                 },
-                "edf": {"path": str(bundle.edf_path), "status": "planned"},
+                "share_pdf_final": {
+                    "path": str(_one_page_share_path(bundle, "final")),
+                    "exists": _one_page_share_path(bundle, "final").exists(),
+                },
+                "share_pdf_draft": {
+                    "path": str(_one_page_share_path(bundle, "draft")),
+                    "exists": _one_page_share_path(bundle, "draft").exists(),
+                },
+                "edf": {
+                    "path": str(bundle.edf_path),
+                    "exists": bundle.edf_path.exists(),
+                    "status": (
+                        "saved"
+                        if bundle.edf_path.exists()
+                        else ("disabled" if not bool(getattr(self.settings, "EXPORT_EDF_PLUS_D", False)) else "pending")
+                    ),
+                },
             },
             "settings_snapshot": settings_snapshot,
         }
@@ -3488,7 +3599,9 @@ class View(QMainWindow):
             return
         self._session_annotations = []
         self._session_hr_values = []
+        self._session_hr_times = []
         self._session_rmssd_values = []
+        self._session_rmssd_times = []
         self._session_qtc_payload = default_qtc_payload()
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
@@ -3529,11 +3642,23 @@ class View(QMainWindow):
             if show_message:
                 self.show_status("No active session to save.")
             return
+        destination_root: Path | None = None
+        if show_message:
+            destination_root = self._prompt_user_save_dir(
+                "Select folder to save this session",
+                pref_key="last_session_save_dir",
+            )
+            if destination_root is None:
+                self.show_status("Save canceled.")
+                return
         self.signals.save_recording.emit()
         if build_final_report and self._session_bundle is not None:
             try:
                 final_data = self._build_report_data(report_stage="final")
                 generate_session_report(str(self._session_bundle.report_final_path), final_data)
+                share_path = _one_page_share_path(self._session_bundle, "final")
+                generate_session_share_pdf(str(share_path), final_data)
+                self._export_optional_edf_plus(final_data)
             except Exception as exc:
                 if show_message:
                     self.show_status(f"Final report generation failed: {exc}")
@@ -3544,6 +3669,13 @@ class View(QMainWindow):
             )
         self._set_session_state("finalized")
         self._persist_manifest(state="finalized", report_stage="final")
+        if destination_root is not None:
+            try:
+                copied_dir = self._copy_session_folder_to(destination_root)
+                if copied_dir is not None:
+                    self.show_status(f"Saved session copy to: {copied_dir}")
+            except Exception as exc:
+                self.show_status(f"Session copy failed: {exc}")
         if show_message and self._session_bundle is not None:
             self.show_status(f"Session finalized: {self._session_bundle.session_dir}")
 
@@ -3588,7 +3720,9 @@ class View(QMainWindow):
         self._sdnn_smooth_buf = []
         self._session_annotations = []
         self._session_hr_values = []
+        self._session_hr_times = []
         self._session_rmssd_values = []
+        self._session_rmssd_times = []
         self._session_qtc_payload = default_qtc_payload()
         self._session_bundle = None
         self.ecg_window.clear()
@@ -4034,9 +4168,16 @@ class View(QMainWindow):
         self.start_session(auto=False)
 
     def export_report(self):
-        """Create a draft/final DOCX report into the current session folder."""
+        """Create draft/final DOCX + one-page PDF share in session folder."""
         if self._session_bundle is None:
             self.show_status("No session bundle available for report export.")
+            return
+        destination_root = self._prompt_user_save_dir(
+            "Select folder for report export",
+            pref_key="last_report_export_dir",
+        )
+        if destination_root is None:
+            self.show_status("Report export canceled.")
             return
         report_stage = "draft" if self._session_state == "recording" else "final"
         report_path = (
@@ -4044,11 +4185,22 @@ class View(QMainWindow):
             if report_stage == "draft"
             else self._session_bundle.report_final_path
         )
+        share_path = _one_page_share_path(self._session_bundle, report_stage)
         report_data = self._build_report_data(report_stage=report_stage)
         try:
             generate_session_report(str(report_path), report_data)
+            generate_session_share_pdf(str(share_path), report_data)
+            if report_stage == "final":
+                self._export_optional_edf_plus(report_data)
             self._persist_manifest(state=self._session_state, report_stage=report_stage)
             self.show_status(f"Saved report file: {report_path}")
+            self.show_status(f"Saved one-page share file: {share_path}")
+            export_paths = [report_path, share_path]
+            if report_stage == "final" and self._session_bundle.edf_path.exists():
+                export_paths.append(self._session_bundle.edf_path)
+            copied_to = self._copy_selected_artifacts_to(destination_root, export_paths)
+            if copied_to is not None:
+                self.show_status(f"Copied exported files to: {copied_to}")
         except Exception as e:
             self.show_status(f"Report export failed: {e}")
 
@@ -4421,6 +4573,7 @@ class View(QMainWindow):
 
             if plot_gate_open:
                 self._session_rmssd_values.append(smoothed_rmssd)
+                self._session_rmssd_times.append(x)
                 if not self._main_plots_frozen:
                     self.hrv_widget.time_series.append(x, smoothed_rmssd)
                 if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
@@ -4915,6 +5068,7 @@ class View(QMainWindow):
                 return
 
             self._session_hr_values.append(self._hr_ewma)
+            self._session_hr_times.append(plot_elapsed)
             if not self._main_plots_frozen:
                 self.hr_trend_series.append(plot_elapsed, self._hr_ewma)
                 if self.hr_trend_series.count() % self._series_prune_stride == 0:

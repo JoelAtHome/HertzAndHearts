@@ -51,9 +51,8 @@ class ReportDisclaimerTests(unittest.TestCase):
                 "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT.",
                 all_text,
             )
-            self.assertIn("Disclaimer Text Snapshot", all_text)
+            self.assertIn("Saved Disclaimer Text", all_text)
             self.assertIn("Sample disclaimer body.", all_text)
-
 
 if __name__ == "__main__":
     unittest.main()
