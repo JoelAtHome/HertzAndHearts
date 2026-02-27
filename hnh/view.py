@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 import hashlib
 import json
 import math
@@ -17,7 +17,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import (
     Qt, QThread, Signal, Slot, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
     QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
-    QEventLoop, QUrl,
+    QEventLoop, QUrl, QDate,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
 from PySide6.QtWidgets import (
@@ -25,8 +25,8 @@ from PySide6.QtWidgets import (
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
     QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    )
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit,
+)
 from collections import deque
 from typing import Iterable
 from hnh.utils import get_sensor_address, NamedSignal
@@ -39,9 +39,16 @@ from hnh.config import (
     MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
     MIN_PLOT_IBI, MAX_PLOT_IBI,
     ECG_SAMPLE_RATE,
+    ECG_QRS_UNCERTAINTY_PCT, ECG_QTc_UNCERTAINTY_PCT,
+    RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
 )
 from hnh.settings import Settings, SettingsDialog, REGISTRY
-from hnh.report import generate_session_report, generate_session_share_pdf
+from hnh.report import (
+    format_datetime_for_display,
+    generate_session_report,
+    generate_session_share_pdf,
+    get_date_display_format_for_qt,
+)
 from hnh.session_artifacts import (
     SessionBundle,
     create_session_bundle,
@@ -623,6 +630,7 @@ class ProfileManagerDialog(QDialog):
         self._store = store
         self._active_profile = active_profile
         self.setModal(True)
+        self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setWindowTitle("Profile Manager")
         self.resize(780, 460)
 
@@ -663,13 +671,20 @@ class ProfileManagerDialog(QDialog):
         demographics_lay.setContentsMargins(0, 0, 0, 0)
         demographics_lay.setSpacing(8)
 
-        age_label = QLabel("Age")
-        self._age_input = QLineEdit()
-        self._age_input.setPlaceholderText("1-130")
-        self._age_input.setMaximumWidth(80)
-        self._age_input.setAlignment(Qt.AlignRight)
-        demographics_lay.addWidget(age_label)
-        demographics_lay.addWidget(self._age_input)
+        dob_label = QLabel("Date of Birth")
+        self._dob_input = QDateEdit()
+        self._dob_input.setCalendarPopup(True)
+        self._dob_input.setDisplayFormat(get_date_display_format_for_qt())
+        self._dob_input.setMaximumWidth(120)
+        self._dob_input.setMinimumDate(QDate(1900, 1, 1))
+        self._dob_input.setMaximumDate(QDate.currentDate())
+        self._dob_input.setSpecialValueText("—")
+        self._dob_input.setDate(QDate(1900, 1, 1))
+        self._age_label = QLabel("Age: —")
+        self._dob_input.dateChanged.connect(self._update_age_from_dob)
+        demographics_lay.addWidget(dob_label)
+        demographics_lay.addWidget(self._dob_input)
+        demographics_lay.addWidget(self._age_label)
 
         gender_label = QLabel("Gender")
         self._gender_input = QComboBox()
@@ -723,9 +738,24 @@ class ProfileManagerDialog(QDialog):
         actions.addWidget(cancel_btn)
         root.addLayout(actions)
 
-        self._table.itemSelectionChanged.connect(self._update_action_states)
-        self._table.itemSelectionChanged.connect(self._load_selected_details)
+        self._table.itemSelectionChanged.connect(self._on_selection_changed)
+        self._last_selected_profile: str | None = None
         self._refresh()
+
+    def _update_age_from_dob(self):
+        qd = self._dob_input.date()
+        if qd == QDate(1900, 1, 1):
+            self._age_label.setText("Age: —")
+            return
+        try:
+            birth = date(qd.year(), qd.month(), qd.day())
+            today = date.today()
+            age = today.year - birth.year
+            if (today.month, today.day) < (birth.month, birth.day):
+                age -= 1
+            self._age_label.setText(f"Age: {age}" if 1 <= age <= 130 else "Age: —")
+        except (ValueError, TypeError):
+            self._age_label.setText("Age: —")
 
     def _selected_profile_name(self) -> str | None:
         row = self._table.currentRow()
@@ -741,11 +771,7 @@ class ProfileManagerDialog(QDialog):
     def _fmt_time(raw: str | None) -> str:
         if not raw:
             return "--"
-        try:
-            dt = datetime.fromisoformat(raw)
-            return dt.strftime("%Y-%m-%d %H:%M")
-        except ValueError:
-            return str(raw)
+        return format_datetime_for_display(raw)
 
     def _refresh(self):
         previous = self._selected_profile_name() or self._active_profile
@@ -812,10 +838,22 @@ class ProfileManagerDialog(QDialog):
         self._restore_btn.setEnabled(has_selection and archived)
         self._delete_btn.setEnabled(has_selection and not is_current)
 
+    def _on_selection_changed(self):
+        new_name = self._selected_profile_name()
+        if self._last_selected_profile and self._last_selected_profile != new_name:
+            if not self._save_details(self._last_selected_profile):
+                self._select_row_by_profile(self._last_selected_profile)
+                return
+        self._last_selected_profile = new_name
+        self._update_action_states()
+        self._load_selected_details()
+
     def _load_selected_details(self):
         name = self._selected_profile_name()
+        self._last_selected_profile = name
         if not name:
-            self._age_input.clear()
+            self._dob_input.setDate(QDate(1900, 1, 1))
+            self._age_label.setText("Age: —")
             self._gender_input.setCurrentIndex(2)
             self._notes_input.clear()
             return
@@ -823,34 +861,52 @@ class ProfileManagerDialog(QDialog):
             details = self._store.get_profile_details(name)
         except ValueError:
             return
-        age_raw = details.get("age")
-        age_val = int(age_raw) if isinstance(age_raw, int) else 0
-        self._age_input.setText(str(age_val) if 1 <= age_val <= 130 else "")
+        dob_raw = details.get("dob")
+        if dob_raw:
+            try:
+                dt = datetime.strptime(str(dob_raw).strip()[:10], "%Y-%m-%d")
+                self._dob_input.setDate(QDate(dt.year, dt.month, dt.day))
+            except ValueError:
+                self._dob_input.setDate(QDate(1900, 1, 1))
+        else:
+            self._dob_input.setDate(QDate(1900, 1, 1))
+        if dob_raw:
+            self._update_age_from_dob()
+        else:
+            age = details.get("age")
+            self._age_label.setText(
+                f"Age: {int(age)}" if age is not None and 1 <= int(age) <= 130 else "Age: —"
+            )
         gender_raw = str(details.get("gender") or "").strip()
         idx = self._gender_input.findText(gender_raw, Qt.MatchFixedString)
         self._gender_input.setCurrentIndex(idx if idx >= 0 else 2)
         self._notes_input.setPlainText(str(details.get("notes") or ""))
 
-    def _save_details(self) -> bool:
-        name = self._selected_profile_name()
+    def _save_details(self, target_name: str | None = None) -> bool:
+        name = target_name or self._selected_profile_name()
         if not name:
             return True
-        age_text = self._age_input.text().strip()
-        age: int | None = None
-        if age_text:
-            if not age_text.isdigit():
-                QMessageBox.warning(self, "Invalid Age", "Age must be a number between 1 and 130.")
+        qd = self._dob_input.date()
+        dob: str | None = None
+        if qd != QDate(1900, 1, 1):
+            birth = date(qd.year(), qd.month(), qd.day())
+            today = date.today()
+            if birth > today:
+                QMessageBox.warning(self, "Invalid DOB", "Date of birth cannot be in the future.")
                 return False
-            age = int(age_text)
+            age = today.year - birth.year
+            if (today.month, today.day) < (birth.month, birth.day):
+                age -= 1
             if age < 1 or age > 130:
-                QMessageBox.warning(self, "Invalid Age", "Age must be a number between 1 and 130.")
+                QMessageBox.warning(self, "Invalid DOB", "Computed age must be between 1 and 130.")
                 return False
+            dob = f"{birth.year:04d}-{birth.month:02d}-{birth.day:02d}"
         gender = self._gender_input.currentText().strip()
         notes = self._notes_input.toPlainText().strip()
         try:
             self._store.update_profile_details(
                 name,
-                age=age,
+                dob=dob,
                 gender=gender,
                 notes=notes or None,
             )
@@ -858,7 +914,8 @@ class ProfileManagerDialog(QDialog):
             QMessageBox.warning(self, "Save Failed", str(exc))
             return False
         self._refresh()
-        self._select_row_by_profile(name)
+        if not target_name or target_name == self._selected_profile_name():
+            self._select_row_by_profile(name)
         return True
 
     def _save_and_close(self):
@@ -2051,7 +2108,8 @@ class QtcWindow(QMainWindow):
             "• <b>Rolling median QTc</b>: smoothed central QTc estimate.<br>"
             "• <b>Uncertainty band (IQR)</b>: wider band means less confidence.<br>"
             "• <b>Dashed segments</b>: lower signal quality periods.<br>"
-            "• <b>Shaded area above 470 ms</b>: elevated reference zone."
+            "• <b>Shaded area above 470 ms</b>: elevated reference zone.<br><br>"
+            f"<b>Measurement uncertainty</b>: QTc from single-lead ECG may vary by approximately ±{ECG_QTc_UNCERTAINTY_PCT}% from reference."
         )
         msg.setInformativeText("Trend context only; requires clinical review.")
         msg.setStandardButtons(QMessageBox.Ok)
@@ -2684,6 +2742,8 @@ class View(QMainWindow):
         self._session_hr_times: list[float] = []
         self._session_rmssd_values: list[float] = []
         self._session_rmssd_times: list[float] = []
+        self._session_hrv_values: list[float] = []
+        self._session_hrv_times: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
@@ -2858,6 +2918,17 @@ class View(QMainWindow):
         self.pacer_rate.setTickInterval(1)
         self.pacer_rate.setSingleStep(1)
         self.pacer_rate.valueChanged.connect(self._update_breathing_rate)
+        saved_rate = self._profile_store.get_profile_pref(
+            self._session_profile_id, "breathing_rate", "7"
+        )
+        try:
+            rate = int(saved_rate)
+            if 3 <= rate <= 15:
+                self.pacer_rate.setValue(rate)
+                self.model.breathing_rate = float(rate)
+                self.pacer_label.setText(f"Rate: {rate}")
+        except (ValueError, TypeError):
+            pass
         self.pacer_toggle = QCheckBox("Show Pacer")
         self.pacer_toggle.setChecked(True)
         self.pacer_toggle.stateChanged.connect(self.toggle_pacer)
@@ -2918,6 +2989,9 @@ class View(QMainWindow):
         self.history_button.clicked.connect(self._open_history)
         self.profile_manager_button = QPushButton("Profiles")
         self.profile_manager_button.clicked.connect(self._open_profile_manager)
+        self.logout_button = QPushButton("Switch User")
+        self.logout_button.setToolTip("Switch user profile (same popup as startup).")
+        self.logout_button.clicked.connect(self._on_logout_clicked)
 
         self._annotation_enabled_placeholder = "Choose from list or enter new text"
         self._annotation_disabled_placeholder = "Recording only"
@@ -2978,7 +3052,9 @@ class View(QMainWindow):
         self.rmssd_label.setToolTip("Current RMSSD heart rate variability metric.")
         self.sdnn_label.setToolTip("Current SDNN heart rate variability metric.")
         self.stress_ratio_label.setToolTip("Current LF/HF ratio estimate.")
-        self.qrs_label.setToolTip("Current median QRS duration estimate.")
+        self.qrs_label.setToolTip(
+            f"Current median QRS duration estimate (±{ECG_QRS_UNCERTAINTY_PCT}% measurement uncertainty from single-lead ECG)."
+        )
         self.health_label.setToolTip("Current signal quality status.")
         self.recording_statusbar.setToolTip("Session progress and recording state.")
 
@@ -3015,6 +3091,8 @@ class View(QMainWindow):
         profile_zone_layout.setSpacing(8)
         profile_zone_layout.addStretch()
         profile_zone_layout.addWidget(self.profile_header_label, alignment=Qt.AlignCenter)
+        self.logout_button.setStyleSheet("font-size: 11px; padding: 2px 8px;")
+        profile_zone_layout.addWidget(self.logout_button, alignment=Qt.AlignVCenter)
         profile_zone_layout.addWidget(self._debug_mode_badge, alignment=Qt.AlignVCenter)
         profile_zone_layout.addStretch()
         controls_zone = QWidget()
@@ -3037,7 +3115,6 @@ class View(QMainWindow):
             self.profile_header_label,
             self._disclaimer_link,
             self._debug_mode_badge,
-            self.profile_manager_button,
             self._settings_button,
         ):
             _w.installEventFilter(self)
@@ -3117,6 +3194,7 @@ class View(QMainWindow):
         self.export_report_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.history_button.setMaximumWidth(80)
         self.history_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.profile_manager_button.setMinimumWidth(70)
         self.profile_manager_button.setMaximumWidth(80)
         self.profile_manager_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._disclaimer_link.setStyleSheet(
@@ -3163,8 +3241,6 @@ class View(QMainWindow):
             lbl.setStyleSheet(_stat_style)
             self.pacer_config.addRow(lbl)
 
-        toolbar.addSpacing(12)
-
         _sep2 = QFrame()
         _sep2.setFixedSize(1, 18)
         _sep2.setStyleSheet("background: #bdc3c7;")
@@ -3209,6 +3285,11 @@ class View(QMainWindow):
         self.hrv_widget.x_axis.setTitleText("Seconds")
         self.hrv_widget.y_axis.setTitleText("RMSSD (ms)")
 
+    def _on_logout_clicked(self):
+        selected = self._prompt_for_session_profile()
+        if selected is not None and selected.casefold() != self._session_profile_id.casefold():
+            self._set_active_profile(selected, announce=True)
+
     def _prompt_for_session_profile(self) -> str | None:
         profiles = self._profile_store.list_profiles()
         last_profile = self._profile_store.get_last_active_profile()
@@ -3222,6 +3303,17 @@ class View(QMainWindow):
     def _set_active_profile(self, profile_id: str, announce: bool = False):
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
         self.profile_header_label.setText(f"User: {self._session_profile_id}")
+        saved_rate = self._profile_store.get_profile_pref(
+            self._session_profile_id, "breathing_rate", "7"
+        )
+        try:
+            rate = int(saved_rate)
+            if 3 <= rate <= 15:
+                self.pacer_rate.setValue(rate)
+                self.model.breathing_rate = float(rate)
+                self.pacer_label.setText(f"Rate: {rate}")
+        except (ValueError, TypeError):
+            pass
         debug_pref = self._profile_store.get_profile_pref(
             self._session_profile_id,
             "debug_mode",
@@ -3360,7 +3452,7 @@ class View(QMainWindow):
         if not annotation_available:
             self.annotation.setCurrentText("")
         self.export_report_button.setEnabled(self._session_bundle is not None)
-        self.export_report_button.setText("Report (Draft)" if is_recording else "Report")
+        self.export_report_button.setText("Report to Now" if is_recording else "Report")
         self.poincare_button.setEnabled(connected)
         if not connected:
             self.qtc_button.setEnabled(False)
@@ -3473,6 +3565,8 @@ class View(QMainWindow):
             "hr_time_seconds": list(self._session_hr_times),
             "rmssd_values": list(self._session_rmssd_values),
             "rmssd_time_seconds": list(self._session_rmssd_times),
+            "hrv_values": list(self._session_hrv_values),
+            "hrv_time_seconds": list(self._session_hrv_times),
             "ecg_samples": ecg_samples,
             "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
             "ecg_is_simulated": False,
@@ -3602,6 +3696,8 @@ class View(QMainWindow):
         self._session_hr_times = []
         self._session_rmssd_values = []
         self._session_rmssd_times = []
+        self._session_hrv_values = []
+        self._session_hrv_times = []
         self._session_qtc_payload = default_qtc_payload()
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
@@ -3723,6 +3819,8 @@ class View(QMainWindow):
         self._session_hr_times = []
         self._session_rmssd_values = []
         self._session_rmssd_times = []
+        self._session_hrv_values = []
+        self._session_hrv_times = []
         self._session_qtc_payload = default_qtc_payload()
         self._session_bundle = None
         self.ecg_window.clear()
@@ -3975,7 +4073,6 @@ class View(QMainWindow):
                 getattr(self, "profile_header_label", None),
                 getattr(self, "_disclaimer_link", None),
                 getattr(self, "_debug_mode_badge", None),
-                getattr(self, "profile_manager_button", None),
                 getattr(self, "_settings_button", None),
             }
             and event.type() == QEvent.Type.MouseButtonPress
@@ -4128,15 +4225,30 @@ class View(QMainWindow):
         if self._session_state == "recording":
             self.show_status("Profile changes are disabled during an active recording.")
             return
-        dlg = ProfileManagerDialog(
-            store=self._profile_store,
-            active_profile=self._session_profile_id,
-            parent=self,
-        )
-        dlg.exec()
-        latest_active = self._profile_store.get_last_active_profile()
-        if latest_active and latest_active.casefold() != self._session_profile_id.casefold():
-            self._set_active_profile(latest_active, announce=True)
+        try:
+            dlg = ProfileManagerDialog(
+                store=self._profile_store,
+                active_profile=self._session_profile_id,
+                parent=None,
+            )
+            dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+            dlg.exec()
+            dlg.deleteLater()
+            latest_active = self._profile_store.get_last_active_profile()
+            if latest_active and latest_active.casefold() != self._session_profile_id.casefold():
+                self._set_active_profile(latest_active, announce=True)
+            QTimer.singleShot(150, self._refocus_after_profile_dialog)
+        except Exception as exc:
+            self.show_status(f"Profile Manager error: {exc}")
+            if self.settings.DEBUG:
+                import traceback
+                traceback.print_exc()
+
+    def _refocus_after_profile_dialog(self):
+        self.setEnabled(True)
+        self.activateWindow()
+        self.raise_()
+        self.setFocus()
 
     def _apply_disclaimer_prompt_reset(self, scope: str):
         if scope == "all":
@@ -4540,6 +4652,9 @@ class View(QMainWindow):
         try:
             if not hrv_data.value or len(hrv_data.value[1]) == 0:
                 return
+            # During fault, do not append new points — preserves chart with break until recovery.
+            if self._fault_active:
+                return
             
             raw_y = float(hrv_data.value[1][-1])
             y = max(0, min(raw_y, 250)) 
@@ -4578,6 +4693,8 @@ class View(QMainWindow):
                     self.hrv_widget.time_series.append(x, smoothed_rmssd)
                 if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
                     smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
+                    self._session_hrv_values.append(smoothed_sdnn)
+                    self._session_hrv_times.append(x)
                     self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
                     if not self._main_plots_frozen:
                         self.sdnn_series.append(x, smoothed_sdnn)
@@ -4724,6 +4841,9 @@ class View(QMainWindow):
     def _update_breathing_rate(self, value):
         self.model.breathing_rate = float(value)
         self.pacer_label.setText(f"Rate: {value}")
+        self._profile_store.set_profile_pref(
+            self._session_profile_id, "breathing_rate", str(int(value))
+        )
 
     def show_recording_status(self, status: int):
         self.recording_statusbar.setRange(0, max(status, 1))
@@ -4848,19 +4968,19 @@ class View(QMainWindow):
             "snug against the skin."
         )
         msg.setStandardButtons(QMessageBox.Ok)
-        # Keep warning reachable when plot windows are pinned, but never steal focus.
+        msg.setDefaultButton(QMessageBox.Ok)
+        # Keep warning reachable when plot windows are pinned.
         msg.setWindowModality(Qt.NonModal)
         msg.setWindowFlag(Qt.WindowStaysOnTopHint, True)
-        msg.setWindowFlag(Qt.WindowDoesNotAcceptFocus, True)
-        msg.setAttribute(Qt.WA_ShowWithoutActivating, True)
         msg.finished.connect(self._on_signal_popup_closed)
         self._signal_popup_widget = msg
         msg.open()
         msg.raise_()
+        msg.activateWindow()
 
     def _on_rmssd_degraded(self):
         self._signal_degrade_count += 1
-        if not self._signal_popup_shown and self._signal_degrade_count >= 8:
+        if not self._signal_popup_shown and self._signal_degrade_count >= SIGNAL_DEGRADE_POPUP_COUNT:
             self._signal_popup_shown = True
             self._fire_signal_popup("Poor signal \u2014 electrodes may be dry")
 
@@ -4875,10 +4995,10 @@ class View(QMainWindow):
                 pass
             self._signal_popup_widget = None
 
-    def _handle_stream_reset(self):
+    def _handle_stream_reset(self, clear_series: bool = True):
         self.model.clear_buffers()
         self._session_qtc_payload = default_qtc_payload()
-        self._arm_main_plot_warmup(clear_series=True)
+        self._arm_main_plot_warmup(clear_series=clear_series)
         self.qtc_window.clear()
         if self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
             self.qtc_button.setText("QTc (warming up...)")
@@ -4908,7 +5028,7 @@ class View(QMainWindow):
             self._consecutive_good = 0
             self._set_signal_indicator("LOST (No data)", "red")
             self._show_signal_degraded_popup("No data received")
-            self._handle_stream_reset()
+            self._handle_stream_reset(clear_series=False)
 
     def _in_settling(self):
         return (self.start_time is not None
@@ -4946,9 +5066,9 @@ class View(QMainWindow):
                 if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
-                    self._set_signal_indicator("FAULT: Clearing Buffer...", "red")
+                    self._set_signal_indicator("FAULT: Bad comm", "red")
                     self._show_signal_degraded_popup("Total signal dropout")
-                    self.signals.request_buffer_reset.emit()
+                    self._handle_stream_reset(clear_series=False)
                     return
 
                 # LEVEL 2 FAULT: Hard IBI limits
@@ -4978,7 +5098,7 @@ class View(QMainWindow):
                     if self._consecutive_good >= self.settings.RECOVERY_BEATS:
                         self._fault_active = False
                         self._reset_signal_popup()
-                        self._handle_stream_reset()
+                        self._handle_stream_reset(clear_series=False)
                         self._set_signal_indicator("GOOD", "#00FF00")
         
         # 2. FREQUENCY DATA (Stress Ratio)
@@ -5009,10 +5129,10 @@ class View(QMainWindow):
             if self._fault_active or self._in_settling():
                 return
 
-            if rmssd_val > 200:
+            if rmssd_val > RMSSD_POOR_MS:
                 self._set_signal_indicator("POOR (Dry?)", "red")
                 self._on_rmssd_degraded()
-            elif rmssd_val > 150:
+            elif rmssd_val > RMSSD_NOISY_MS:
                 self._set_signal_indicator("NOISY", "orange")
                 self._on_rmssd_degraded()
             else:
@@ -5030,7 +5150,17 @@ class View(QMainWindow):
             if last_ibi_ms <= 0:
                 return
 
+            # Skip plotting fault-inducing beats (dropout/noise) to avoid bad points on chart.
+            if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
+                return
+            if last_ibi_ms > self.settings.NOISE_IBI_HIGH_MS or last_ibi_ms < self.settings.NOISE_IBI_LOW_MS:
+                return
+
             hr = 60000.0 / last_ibi_ms
+
+            # During fault, do not append new points — preserves chart with break until recovery.
+            if self._fault_active:
+                return
 
             if self.start_time is None:
                 self.start_time = time.time()

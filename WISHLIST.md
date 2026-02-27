@@ -33,8 +33,8 @@ Raw ideas go here first.
 - Proposed approach: Reproduce the click path, confirm signal/handler wiring and any state guard conditions, then restore expected open/edit behavior with a focused regression test.
 - Effort: S
 - Impact: High
-- Status: idea
-- Notes: Reported as urgent usability regression; keep scope to button/functionality restore first.
+- Status: done
+- Notes: Fixed by keeping Profiles button in header only, using parent=None and exec() for dialog, explicit refocus with setEnabled(True)/setFocus(), and removing _select_row_by_profile override on auto-save.
 
 ### Contextual F1 help consistency across UI
 - Problem: Contextual help is currently uneven across windows, which makes discoverability and UX consistency weaker.
@@ -379,7 +379,7 @@ Implementation checklist:
 - [x] Define session lifecycle states (`no_user_selected`, `user_selected`, `guest_mode` if used).
 - [x] Add active-user state to app session context.
 - [x] Ensure new session start requires a selected user (or explicit guest fallback).
-- [x] Define behavior when switching users mid-app (currently startup selection only; switch action deferred).
+- [x] Define behavior when switching users mid-app (Switch User button; same popup as startup).
 - [x] Add acceptance criteria for flow (startup, cancel, user choose, and reconnect baseline checks).
 
 ### B) Multiple user profiles and per-user history (from prioritized item 2)
@@ -420,7 +420,11 @@ Completed items. Include completion date and optional version reference.
 ### Session user selection flow
 - Completed: 2026-02-24
 - Outcome: Startup profile chooser implemented (select/create/guest), active profile shown at top of monitoring card, startup flow gates session context.
-- Notes: Mid-session quick-switch UI is intentionally deferred; current behavior is select at startup.
+- Notes: Mid-session switch added 2026-02-27 via Switch User button next to user name.
+
+### Mid-session user switch
+- Completed: 2026-02-27
+- Outcome: Switch User button added to right of user name in header; opens same profile selection popup as startup. Available anytime including during recording; same user or Cancel leaves plotting uninterrupted.
 
 ### Per-user welcome/disclaimer visibility preference
 - Completed: 2026-02-24
@@ -430,11 +434,11 @@ Completed items. Include completion date and optional version reference.
 ### Multiple user profiles and per-user history
 - Completed: 2026-02-24
 - Outcome: Profile CRUD (create/rename/archive/restore/delete), one-time legacy migration indexing, profile-scoped history query APIs, and read-only in-app history viewer.
-- Notes: Active-profile safeguards are enforced; profile changes are blocked during active recording.
+- Notes: Profile Manager blocked during recording; Switch User allowed anytime. Profile details auto-save when switching profiles in Profile Manager.
 
 ### Profile demographics metadata (age, gender, notes)
 - Completed: 2026-02-24
-- Outcome: Profile records now persist age, gender, and notes; Profile Manager includes editable fields with save action.
+- Outcome: Profile records now persist age, gender, and notes; Profile Manager includes editable fields with save action. DOB replaces age; date format matches reports; auto-save on profile switch.
 - Notes: Demographics are currently profile metadata only (not yet surfaced in report documents).
 
 ### Decide QTc presentation format
@@ -471,6 +475,11 @@ Completed items. Include completion date and optional version reference.
 - Completed: 2026-02-26
 - Outcome: Save and Report actions now prompt for destination folders and remember separate per-profile last-used paths.
 - Notes: Includes backward-compatible fallback to legacy shared save-path preference.
+
+### Report and profile UX polish (2026-02-27)
+- Completed: 2026-02-27
+- Outcome: Report button "Report to Now" during recording; report stage labels "Data collected so far"/"Final" with snapshot disclaimer; QRS session average in reports; QTc/QRS ±15% measurement uncertainty in reports and UI; ECG strip duplicate title removed; trend plot lines thinner; Profile Manager date format matches reports; age label no longer grayed out.
+- Notes: ECG_QTc_UNCERTAINTY_PCT and ECG_QRS_UNCERTAINTY_PCT in config; format_datetime_for_display shared for reports and profiles.
 
 ## Triage Workflow
 

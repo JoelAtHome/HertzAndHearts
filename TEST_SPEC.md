@@ -145,8 +145,8 @@
 | #   | Test | Expected Result | Status |
 |-----|------|-----------------|--------|
 | 10.1 | **Good signal:** Wear strap snugly and wet | Status bar: green dot, "Signal: GOOD". | |
-| 10.2 | **Noisy signal:** RMSSD > 150ms | Status bar: orange dot, "Signal: NOISY". | |
-| 10.3 | **Poor signal:** RMSSD > 200ms (dry strap) | Status bar: red dot, "Signal: POOR (Dry?)". | |
+| 10.2 | **Noisy signal:** RMSSD > 200ms | Status bar: orange dot, "Signal: NOISY". | |
+| 10.3 | **Poor signal:** RMSSD > 240ms (dry strap) | Status bar: red dot, "Signal: POOR (Dry?)". | |
 | 10.4 | **Level 1 fault (dropout):** Remove strap briefly (IBI > 3000ms) | Status bar: red dot, "FAULT: Clearing Buffer...". All buffers are cleared. | |
 | 10.5 | **Level 2 fault (noise):** Cause extreme artifact (IBI < 300ms or > 2000ms) | Status bar: red dot, "Signal: DROP/NOISE". | |
 | 10.6 | **Level 3 fault (erratic):** Cause >30% deviation from rolling average | Status bar: red dot, "Signal: ERRATIC (avg X)". | |

@@ -4,7 +4,7 @@ import json
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
 
 from hnh.session_artifacts import SessionBundle
@@ -72,6 +72,8 @@ class ProfileStore:
                 conn.execute("ALTER TABLE profiles ADD COLUMN gender TEXT")
             if "notes" not in columns:
                 conn.execute("ALTER TABLE profiles ADD COLUMN notes TEXT")
+            if "dob" not in columns:
+                conn.execute("ALTER TABLE profiles ADD COLUMN dob TEXT")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS profile_preferences (
@@ -269,12 +271,26 @@ class ProfileStore:
             )
         return info
 
+    @staticmethod
+    def _age_from_dob(dob_str: str | None) -> int | None:
+        if not dob_str or not isinstance(dob_str, str):
+            return None
+        try:
+            birth = datetime.strptime(dob_str.strip()[:10], "%Y-%m-%d").date()
+            today = date.today()
+            age = today.year - birth.year
+            if (today.month, today.day) < (birth.month, birth.day):
+                age -= 1
+            return age if 1 <= age <= 130 else None
+        except (ValueError, TypeError):
+            return None
+
     def get_profile_details(self, name: str) -> dict[str, str | int | None]:
         profile_name = self._normalize_profile(name)
         with self._db() as conn:
             row = conn.execute(
                 """
-                SELECT name, age, gender, notes
+                SELECT name, age, dob, gender, notes
                 FROM profiles
                 WHERE name = ? COLLATE NOCASE
                 """,
@@ -282,9 +298,15 @@ class ProfileStore:
             ).fetchone()
         if row is None:
             raise ValueError(f"Profile not found: {profile_name}")
+        dob_raw = row["dob"] if hasattr(row, "keys") and "dob" in row.keys() else None
+        dob = str(dob_raw).strip() if dob_raw else None
+        age = self._age_from_dob(dob)
+        if age is None and row["age"] is not None:
+            age = int(row["age"]) if 1 <= int(row["age"]) <= 130 else None
         return {
             "name": str(row["name"]),
-            "age": int(row["age"]) if row["age"] is not None else None,
+            "dob": dob or None,
+            "age": age,
             "gender": str(row["gender"]) if row["gender"] else None,
             "notes": str(row["notes"]) if row["notes"] else None,
         }
@@ -293,16 +315,21 @@ class ProfileStore:
         self,
         name: str,
         *,
-        age: int | None = None,
+        dob: str | None = None,
         gender: str | None = None,
         notes: str | None = None,
     ) -> None:
         profile_name = self._normalize_profile(name)
-        normalized_age: int | None = None
-        if age is not None:
-            age_int = int(age)
-            if 1 <= age_int <= 130:
-                normalized_age = age_int
+        normalized_dob: str | None = None
+        if dob is not None:
+            s = str(dob).strip()
+            if s:
+                try:
+                    datetime.strptime(s[:10], "%Y-%m-%d")
+                    normalized_dob = s[:10]
+                except ValueError:
+                    pass
+        age_computed = self._age_from_dob(normalized_dob) if normalized_dob else None
         normalized_gender = str(gender).strip() if gender is not None else ""
         normalized_notes = str(notes).strip() if notes is not None else ""
         with self._db() as conn:
@@ -315,11 +342,12 @@ class ProfileStore:
             conn.execute(
                 """
                 UPDATE profiles
-                SET age = ?, gender = ?, notes = ?
+                SET dob = ?, age = ?, gender = ?, notes = ?
                 WHERE name = ? COLLATE NOCASE
                 """,
                 (
-                    normalized_age,
+                    normalized_dob,
+                    age_computed,
                     normalized_gender or None,
                     normalized_notes or None,
                     profile_name,

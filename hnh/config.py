@@ -147,6 +147,13 @@ DROPOUT_IBI_MS: Final[int] = 3000
 NOISE_IBI_LOW_MS: Final[int] = 300    # < 300 ms ≈ HR > 200 bpm
 NOISE_IBI_HIGH_MS: Final[int] = 2000  # > 2000 ms ≈ HR < 30 bpm
 
+# RMSSD thresholds for signal-quality status (ms).
+# Above NOISY: status shows orange "NOISY"; above POOR: red "POOR (Dry?)".
+# Breathing-induced HRV can reach 150–200 ms; use higher values to avoid false alerts.
+RMSSD_NOISY_MS: Final[int] = 200   # was 150; raised for breathing-variation tolerance
+RMSSD_POOR_MS: Final[int] = 240    # was 200; dry strap typically much higher
+SIGNAL_DEGRADE_POPUP_COUNT: Final[int] = 12  # consecutive RMSSD breaches before popup (was 8)
+
 # Level 3 fault (adaptive): percentage deviation from the rolling
 # average that triggers an "ERRATIC" warning.  0.30 = 30%.
 DEVIATION_THRESHOLD: Final[float] = 0.30
@@ -185,6 +192,12 @@ QTC_MAX_RR_GAP_SECONDS: Final[float] = 2.5
 
 # Dedicated QTc trend is disabled by default for MVP.
 QTC_TREND_ENABLED: Final[bool] = False
+
+# Approximate measurement uncertainty for ECG-derived intervals from single-lead
+# automated delineation (NeuroKit2). Literature suggests ±10–20% vs reference;
+# 15% is a conservative estimate for "interpret with caution" reporting.
+ECG_QTc_UNCERTAINTY_PCT: Final[int] = 15
+ECG_QRS_UNCERTAINTY_PCT: Final[int] = 15
 
 # ──────────────────────────────────────────────────────────────────────
 #  ANNOTATION PRESETS

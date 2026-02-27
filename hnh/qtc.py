@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from statistics import median
+from statistics import mean, median
 from typing import Literal
 import warnings
 
@@ -290,6 +290,7 @@ def build_qtc_payload(candidates: list[dict], cfg: QtcConfig) -> dict:
         window_vals = [v for v, t in zip(qrs_window, qrs_times) if t >= min_qrs_t]
         if window_vals:
             payload["qrs_ms"] = float(median(window_vals))
+        payload["session_qrs_avg_ms"] = float(mean(qrs_window))
 
     valid = [c for c in candidates if c.get("is_valid")]
     if not valid:

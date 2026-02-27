@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from hnh.config import ECG_QRS_UNCERTAINTY_PCT, ECG_QTc_UNCERTAINTY_PCT
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -69,7 +71,7 @@ def _uses_24_hour_time() -> bool:
     return loc in verified_24h
 
 
-def _report_datetime(value: datetime | str | None) -> str:
+def format_datetime_for_display(value: datetime | str | None) -> str:
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
@@ -87,6 +89,25 @@ def _report_datetime(value: datetime | str | None) -> str:
     else:
         time_str = dt.strftime("%I:%M %p").lstrip("0")
     return f"{_date_for_region(dt)} @ {time_str}"
+
+
+def get_date_display_format_for_qt() -> str:
+    """Return QDateEdit display format string matching report date style (locale-aware)."""
+    try:
+        locale.setlocale(locale.LC_TIME, "")
+    except locale.Error:
+        pass
+    loc = ""
+    try:
+        loc = (locale.getlocale(locale.LC_TIME)[0] or "").lower()
+    except Exception:
+        loc = ""
+    day_first_locales = {
+        "en_gb", "en_ie", "en_au", "de_de", "fr_fr", "es_es", "it_it", "nl_nl",
+        "sv_se", "fi_fi", "no_no", "da_dk", "pl_pl", "cs_cz", "sk_sk",
+        "hu_hu", "ro_ro", "tr_tr", "pt_pt", "ru_ru", "uk_ua",
+    }
+    return "dd/MM/yyyy" if loc in day_first_locales else "MM/dd/yyyy"
 
 
 def _append_page_field(paragraph):
@@ -159,7 +180,14 @@ def _fmt_qtc_session_value(qtc_data: dict) -> str:
         if reason:
             return f"QTc unavailable ({reason})"
         return "QTc unavailable (signal quality too low)"
-    return _fmt(value, "ms", 0)
+    return f"{_fmt(value, 'ms', 0)} (±{ECG_QTc_UNCERTAINTY_PCT}%)"
+
+
+def _fmt_qrs_session_value(qtc_data: dict) -> str:
+    value = qtc_data.get("session_qrs_avg_ms")
+    if value is None:
+        return "QRS unavailable (no ECG delineation)"
+    return f"{_fmt(value, 'ms', 1)} (±{ECG_QRS_UNCERTAINTY_PCT}%)"
 
 
 def _to_float(value) -> float | None:
@@ -236,8 +264,10 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
     output_dir.mkdir(parents=True, exist_ok=True)
     hr_values = [float(v) for v in (data.get("hr_values") or []) if v is not None]
     rmssd_values = [float(v) for v in (data.get("rmssd_values") or []) if v is not None]
+    hrv_values = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
     hr_time_seconds = [float(v) for v in (data.get("hr_time_seconds") or []) if v is not None]
     rmssd_time_seconds = [float(v) for v in (data.get("rmssd_time_seconds") or []) if v is not None]
+    hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
     ecg_values = [float(v) for v in (data.get("ecg_samples") or []) if v is not None]
     ecg_rate = int(data.get("ecg_sample_rate_hz") or 130)
 
@@ -258,30 +288,39 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
             return [float(t) / 60.0 for t in np.linspace(0.0, session_duration_sec, num=values_len)]
         return [float(i) for i in range(1, values_len + 1)]
 
-    if hr_values or rmssd_values:
+    if hr_values or rmssd_values or hrv_values:
         trend_path = output_dir / "session_visual_trend.png"
-        fig = Figure(figsize=(7.2, 2.4), dpi=140)
+        fig = Figure(figsize=(7.2, 4.2), dpi=140)
         canvas = FigureCanvas(fig)
-        ax_hr = fig.add_subplot(211)
-        ax_rmssd = fig.add_subplot(212)
+        ax_hr = fig.add_subplot(311)
+        ax_rmssd = fig.add_subplot(312)
+        ax_hrv = fig.add_subplot(313)
         if hr_values:
             x_hr = _time_axis_minutes(len(hr_values), hr_time_seconds)
-            ax_hr.plot(x_hr, hr_values, color="#C2185B", linewidth=1.6)
+            ax_hr.plot(x_hr, hr_values, color="black", linewidth=1.0)
             ax_hr.set_ylabel("HR (bpm)", fontsize=8)
             ax_hr.grid(alpha=0.25)
         else:
             ax_hr.text(0.02, 0.5, "No HR trend data", transform=ax_hr.transAxes, fontsize=8)
         if rmssd_values:
             x_rmssd = _time_axis_minutes(len(rmssd_values), rmssd_time_seconds)
-            ax_rmssd.plot(x_rmssd, rmssd_values, color="#1565C0", linewidth=1.6)
+            ax_rmssd.plot(x_rmssd, rmssd_values, color="black", linewidth=1.0)
             ax_rmssd.set_ylabel("RMSSD (ms)", fontsize=8)
-            ax_rmssd.set_xlabel("Elapsed session time (min)", fontsize=8)
             ax_rmssd.grid(alpha=0.25)
         else:
             ax_rmssd.text(0.02, 0.5, "No RMSSD trend data", transform=ax_rmssd.transAxes, fontsize=8)
-        for axis in (ax_hr, ax_rmssd):
+        if hrv_values:
+            x_hrv = _time_axis_minutes(len(hrv_values), hrv_time_seconds)
+            ax_hrv.plot(x_hrv, hrv_values, color="black", linewidth=1.0)
+            ax_hrv.set_ylabel("HRV (SDNN) (ms)", fontsize=8)
+            ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
+            ax_hrv.grid(alpha=0.25)
+        else:
+            ax_hrv.text(0.02, 0.5, "No HRV trend data", transform=ax_hrv.transAxes, fontsize=8)
+            ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
+        for axis in (ax_hr, ax_rmssd, ax_hrv):
             axis.tick_params(axis="both", labelsize=7)
-        fig.tight_layout(h_pad=0.6)
+        fig.tight_layout(h_pad=0.5)
         canvas.print_png(str(trend_path))
         visuals["trend"] = trend_path
 
@@ -301,8 +340,7 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
         strip_span_sec = len(selected) / float(ecg_rate)
         strip_start_sec = max(0.0, total_sec - strip_span_sec)
         t = [strip_start_sec + (idx / float(ecg_rate)) for idx in range(len(selected))]
-        ax.plot(t, selected, color="#111111", linewidth=1.0)
-        ax.set_title("Selected ECG strip (latest)", fontsize=9)
+        ax.plot(t, selected, color="black", linewidth=1.0)
         ax.set_xlabel("Elapsed session time (s)", fontsize=8)
         ax.set_ylabel("Amplitude (mV)", fontsize=8)
         ax.grid(alpha=0.28)
@@ -390,13 +428,22 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     disclaimer = data.get("disclaimer", {}) or {}
     warning = str(disclaimer.get("warning", "")).strip()
 
+    hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
+    hrv_avg = f"{sum(hrv_vals)/len(hrv_vals):.1f} ms" if hrv_vals else "--"
+    delta_hrv = "--"
+    if len(hrv_vals) >= 2 and hrv_vals[0] > 0:
+        pct = ((hrv_vals[-1] - hrv_vals[0]) / hrv_vals[0]) * 100
+        delta_hrv = f"{pct:+.1f}%"
+    metrics_rows = [
+        ["Metric", "Value"],
+        ["HR (baseline/latest)", f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"],
+        ["RMSSD (baseline/latest)", f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"],
+        ["HRV (session avg / \u0394)", f"{hrv_avg} / {delta_hrv}"],
+        ["QTc (session average)", _fmt_qtc_session_value(qtc_data)],
+        ["QRS (session average)", _fmt_qrs_session_value(qtc_data)],
+    ]
     metrics_table = Table(
-        [
-            ["Metric", "Value"],
-            ["HR (baseline/latest)", f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"],
-            ["RMSSD (baseline/latest)", f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"],
-            ["QTc (session average)", _fmt_qtc_session_value(qtc_data)],
-        ],
+        metrics_rows,
         colWidths=[58 * mm, 122 * mm],
         repeatRows=1,
         hAlign="LEFT",
@@ -422,16 +469,19 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     profile_name = str(data.get("profile_id", "--"))
     prefix_story = [
         Paragraph(f"Hertz & Hearts - One-Page Session Report: {profile_name}", title_style),
-        Paragraph(f"Report generated: {_report_datetime(session_end)}", generated_style),
+        Paragraph(f"Report generated: {format_datetime_for_display(session_end)}", generated_style),
         Spacer(1, 3 * mm),
         Paragraph("Session Overview", heading_style),
         Paragraph(
-            f"Session Start Date & Time: {_report_datetime(start)}",
+            f"Session Start Date & Time: {format_datetime_for_display(start)}",
             body_style,
         ),
         Paragraph(f"Session Type: {data.get('session_type', 'General Monitoring')}", body_style),
         Paragraph(f"Duration: {duration_text}", body_style),
-        Paragraph(f"Report Stage: {str(data.get('report_stage', 'final')).capitalize()}", body_style),
+        Paragraph(
+            f"Report Stage: {'Data collected so far' if str(data.get('report_stage', 'final')).strip().lower() == 'draft' else 'Final'}",
+            body_style,
+        ),
         Spacer(1, 3 * mm),
         Paragraph("Recovery Snapshot", heading_style),
         Paragraph(f"Recovery State: <b>{state}</b>", body_style),
@@ -439,13 +489,24 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     for driver in drivers:
         prefix_story.append(Paragraph(f"- {driver}", body_style))
 
-    prefix_story.extend(
-        [
-            Spacer(1, 3 * mm),
-            Paragraph("Core Metrics", heading_style),
-            metrics_table,
-        ]
-    )
+    core_metrics_block = [
+        Spacer(1, 3 * mm),
+        Paragraph("Core Metrics", heading_style),
+        metrics_table,
+    ]
+    has_qtc = qtc_data.get("session_value_ms") is not None
+    has_qrs = qtc_data.get("session_qrs_avg_ms") is not None
+    if has_qtc or has_qrs:
+        core_metrics_block.append(Spacer(1, 2 * mm))
+        core_metrics_block.append(
+            Paragraph(
+                f"QTc and QRS values are derived from single-lead ECG automated delineation "
+                f"and may vary by approximately ±{ECG_QTc_UNCERTAINTY_PCT}% from reference measurements. "
+                "For trend context only; clinical interpretation requires professional review.",
+                muted_style,
+            )
+        )
+    prefix_story.extend(core_metrics_block)
 
     suffix_story = []
     if warning:
@@ -503,7 +564,7 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
                 )
             block.extend(
                 [
-                    Image(str(trend_path), width=178 * mm, height=42 * mm),
+                    Image(str(trend_path), width=178 * mm, height=63 * mm),
                     Spacer(1, 2 * mm),
                 ]
             )
@@ -574,18 +635,18 @@ def generate_session_report(path: str, data: dict) -> None:
     if start and now:
         duration_min = f"{(now - start).total_seconds() / 60:.1f}"
 
-    report_date = doc.add_paragraph(f"Report generated: {_report_datetime(now)}")
+    report_date = doc.add_paragraph(f"Report generated: {format_datetime_for_display(now)}")
     report_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
     # Section 1: Session Overview
     _add_heading(doc, "Session Overview")
     session_type = data.get("session_type", "General Monitoring")
     report_stage = data.get("report_stage", "final").strip().lower()
-    report_label = "Draft (in-progress)" if report_stage == "draft" else "Final"
+    report_label = "Data collected so far" if report_stage == "draft" else "Final"
     _add_key_value_table(doc, [
         (
             "Session Start Date & Time",
-            _report_datetime(start),
+            format_datetime_for_display(start),
         ),
         ("Session Type", session_type),
         ("Report Stage", report_label),
@@ -613,6 +674,7 @@ def generate_session_report(path: str, data: dict) -> None:
         ("RMSSD", _fmt(post_rmssd, "ms")),
         ("\u0394 RMSSD from Baseline", delta_rmssd),
         ("QTc (session average)", _fmt_qtc_session_value(qtc_data)),
+        ("QRS (session average)", _fmt_qrs_session_value(qtc_data)),
     ], label_width_in=1.92, value_width_in=3.04)
     qtc_trend = qtc_data.get("trend", {})
     if qtc_trend.get("enabled"):
@@ -621,6 +683,19 @@ def generate_session_report(path: str, data: dict) -> None:
             "For trend context only; clinical interpretation requires review.",
         )
         _add_key_value_table(doc, [("QTc Trend Note", trend_label)])
+
+    # ECG-derived metrics interpretative note (when QTc or QRS is present)
+    has_qtc = qtc_data.get("session_value_ms") is not None
+    has_qrs = qtc_data.get("session_qrs_avg_ms") is not None
+    if has_qtc or has_qrs:
+        ecg_note = doc.add_paragraph(
+            f"QTc and QRS values are derived from single-lead ECG automated delineation "
+            f"and may vary by approximately ±{ECG_QTc_UNCERTAINTY_PCT}% from reference measurements. "
+            "For trend context only; clinical interpretation requires professional review."
+        )
+        for run in ecg_note.runs:
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
 
     # Section 4: Intra-Session Statistics
     _add_heading(doc, "Intra-Session Statistics")
@@ -643,11 +718,27 @@ def generate_session_report(path: str, data: dict) -> None:
         ])
     else:
         stats_rows.append(("RMSSD", "No data recorded"))
+    hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
+    if hrv_vals:
+        hrv_avg = sum(hrv_vals) / len(hrv_vals)
+        stats_rows.extend([
+            ("HRV (SDNN) Min", f"{min(hrv_vals):.1f} ms"),
+            ("HRV (SDNN) Max", f"{max(hrv_vals):.1f} ms"),
+            ("HRV (SDNN) Avg", f"{hrv_avg:.1f} ms"),
+        ])
+        delta_hrv = "--"
+        if len(hrv_vals) >= 2 and hrv_vals[0] > 0:
+            pct = ((hrv_vals[-1] - hrv_vals[0]) / hrv_vals[0]) * 100
+            delta_hrv = f"{pct:+.1f}%"
+        stats_rows.append(("\u0394 HRV (first\u2192last)", delta_hrv))
+    else:
+        stats_rows.append(("HRV (SDNN)", "No data recorded"))
     _add_key_value_table(doc, stats_rows, label_width_in=1.92, value_width_in=3.04)
 
     # Section 5: Session Visuals
     if visuals:
         visuals_heading = _add_heading(doc, "Session Visuals")
+        visuals_heading.paragraph_format.page_break_before = True
         # Avoid large whitespace gaps: keep only the minimum critical block together.
         visuals_heading.paragraph_format.keep_with_next = False
         ecg_path = visuals.get("ecg")
@@ -662,7 +753,7 @@ def generate_session_report(path: str, data: dict) -> None:
         if trend_path and trend_path.exists():
             _add_image_with_caption(
                 doc,
-                "HR and RMSSD trend",
+                "HR, RMSSD and HRV trend",
                 trend_path,
                 keep_block=True,
             )
@@ -698,7 +789,7 @@ def generate_session_report(path: str, data: dict) -> None:
     doc.add_paragraph(notes if notes else "(No notes entered.)")
     if report_stage == "draft":
         draft_note = doc.add_paragraph(
-            "This document is a draft exported before session finalization."
+            "This document is a snapshot exported while the session was still recording. Data may change when the session is finalized."
         )
         for run in draft_note.runs:
             run.bold = True
@@ -714,7 +805,7 @@ def generate_session_report(path: str, data: dict) -> None:
         acknowledged_at = disclaimer.get("acknowledged_at") or "--"
         disclaimer_rows = [
             ("Acknowledgment Mode", str(disclaimer.get("acknowledgment_mode", "--"))),
-            ("Acknowledged At", _report_datetime(acknowledged_at)),
+            ("Acknowledged At", format_datetime_for_display(acknowledged_at)),
             ("Source", str(disclaimer.get("source_path", "--"))),
         ]
         _add_key_value_table(doc, disclaimer_rows, label_width_in=1.81, value_width_in=2.32)
@@ -730,7 +821,7 @@ def generate_session_report(path: str, data: dict) -> None:
     page_footer.alignment = WD_ALIGN_PARAGRAPH.LEFT
     page_footer.paragraph_format.tab_stops.add_tab_stop(Inches(6.5), WD_TAB_ALIGNMENT.RIGHT)
     timestamp_run = page_footer.add_run(
-        f"Generated by Hertz & Hearts on {_report_datetime(datetime.now())}"
+        f"Generated by Hertz & Hearts on {format_datetime_for_display(datetime.now())}"
     )
     timestamp_run.font.size = Pt(8)
     timestamp_run.font.color.rgb = RGBColor(0x7F, 0x8C, 0x8D)

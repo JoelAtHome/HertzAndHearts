@@ -212,17 +212,19 @@ class ProfileStoreTests(unittest.TestCase):
 
             store.update_profile_details(
                 "Pat",
-                age=42,
+                dob="1982-03-15",
                 gender="Non-binary",
                 notes="Follow-up in two weeks",
             )
             details = store.get_profile_details("Pat")
-            self.assertEqual(details["age"], 42)
+            self.assertEqual(details["dob"], "1982-03-15")
+            self.assertIsNotNone(details["age"])
+            self.assertGreaterEqual(details["age"], 40)
+            self.assertLessEqual(details["age"], 50)
             self.assertEqual(details["gender"], "Non-binary")
             self.assertEqual(details["notes"], "Follow-up in two weeks")
 
             info = {str(row["name"]): row for row in store.list_profiles_info(include_archived=True)}
-            self.assertEqual(info["Pat"]["age"], 42)
             self.assertEqual(info["Pat"]["gender"], "Non-binary")
 
 
