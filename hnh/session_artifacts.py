@@ -10,7 +10,7 @@ from pathlib import Path
 def _slugify(value: str) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip())
     text = text.strip("-._")
-    return text or "Default"
+    return text or "Admin"
 
 
 def _next_available_dir(path: Path) -> Path:
@@ -36,7 +36,7 @@ class SessionBundle:
     started_at: datetime
 
 
-def create_session_bundle(root: Path, profile_id: str = "Default") -> SessionBundle:
+def create_session_bundle(root: Path, profile_id: str = "Admin") -> SessionBundle:
     now = datetime.now()
     safe_profile = _slugify(profile_id)
     date_key = now.strftime("%Y-%m-%d")

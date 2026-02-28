@@ -15,7 +15,7 @@ def _bundle(root: Path, session_id: str) -> SessionBundle:
     session_dir.mkdir(parents=True, exist_ok=True)
     return SessionBundle(
         session_id=session_id,
-        profile_id="Default",
+        profile_id="Admin",
         session_dir=session_dir,
         csv_path=session_dir / "session.csv",
         report_final_path=session_dir / "session_report.docx",
@@ -114,14 +114,14 @@ class ProfileStoreTests(unittest.TestCase):
     def test_legacy_migration_is_idempotent(self):
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            session_dir = root / "Sessions" / "Default" / "2026" / "2026-02-24" / "20260224-111111"
+            session_dir = root / "Sessions" / "Admin" / "2026" / "2026-02-24" / "20260224-111111"
             session_dir.mkdir(parents=True, exist_ok=True)
             (session_dir / "session_manifest.json").write_text(
                 json.dumps(
                     {
                         "schema_version": 1,
                         "session_id": "20260224-111111",
-                        "profile_id": "Default",
+                        "profile_id": "Admin",
                         "state": "finalized",
                         "timing": {"started_at": "2026-02-24T11:11:11"},
                         "artifacts": {"csv": {"path": str(session_dir / "session.csv")}},

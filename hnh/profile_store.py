@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import re
 import sqlite3
 from contextlib import contextmanager
@@ -13,6 +15,7 @@ from hnh.session_artifacts import SessionBundle
 class ProfileStore:
     """SQLite-backed storage for profiles, per-user prefs, and session index."""
     _LEGACY_MIGRATION_KEY = "legacy_session_migration_v1"
+    _DEFAULT_TO_ADMIN_MIGRATION_KEY = "default_to_admin_migration_v1"
     _LEGACY_PROFILE_NAME = "Legacy User"
 
     def __init__(self, root: Path):
@@ -21,6 +24,7 @@ class ProfileStore:
         self._db_path = self._root / "profiles.db"
         self._initialize()
         self.migrate_legacy_sessions()
+        self.migrate_default_to_admin()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
@@ -74,6 +78,13 @@ class ProfileStore:
                 conn.execute("ALTER TABLE profiles ADD COLUMN notes TEXT")
             if "dob" not in columns:
                 conn.execute("ALTER TABLE profiles ADD COLUMN dob TEXT")
+            if "password_hash" not in columns:
+                conn.execute("ALTER TABLE profiles ADD COLUMN password_hash TEXT")
+            if "role" not in columns:
+                conn.execute("ALTER TABLE profiles ADD COLUMN role TEXT DEFAULT 'user'")
+                conn.execute(
+                    "UPDATE profiles SET role = 'admin' WHERE role IS NULL OR role = ''"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS profile_preferences (
@@ -101,7 +112,7 @@ class ProfileStore:
     @staticmethod
     def _normalize_profile(name: str) -> str:
         value = str(name).strip()
-        return value or "Default"
+        return value or "Admin"
 
     def _get_app_state(self, key: str) -> str | None:
         with self._db() as conn:
@@ -218,6 +229,55 @@ class ProfileStore:
         self._set_app_state(self._LEGACY_MIGRATION_KEY, "done")
         return migrated
 
+    def migrate_default_to_admin(self) -> int:
+        """Rename Default profile to Admin and ensure admin role. One-time migration."""
+        if self._get_app_state(self._DEFAULT_TO_ADMIN_MIGRATION_KEY) == "done":
+            return 0
+        migrated = 0
+        with self._db() as conn:
+            default_row = conn.execute(
+                "SELECT name FROM profiles WHERE name = ? COLLATE NOCASE",
+                ("Default",),
+            ).fetchone()
+            admin_row = conn.execute(
+                "SELECT name FROM profiles WHERE name = ? COLLATE NOCASE",
+                ("Admin",),
+            ).fetchone()
+            if default_row is not None and admin_row is None:
+                actual_default = str(default_row["name"])
+                conn.execute(
+                    "UPDATE profiles SET name = ?, role = ? WHERE name = ? COLLATE NOCASE",
+                    ("Admin", "admin", actual_default),
+                )
+                conn.execute(
+                    "UPDATE profile_preferences SET profile_name = ? WHERE profile_name = ? COLLATE NOCASE",
+                    ("Admin", actual_default),
+                )
+                conn.execute(
+                    "UPDATE session_history SET profile_name = ? WHERE profile_name = ? COLLATE NOCASE",
+                    ("Admin", actual_default),
+                )
+                conn.execute(
+                    "UPDATE app_state SET value = ? WHERE key = ? AND lower(value) = lower(?)",
+                    ("Admin", "last_active_profile", actual_default),
+                )
+                migrated = 1
+            elif default_row is not None and admin_row is not None:
+                actual_default = str(default_row["name"])
+                conn.execute("DELETE FROM profile_preferences WHERE profile_name = ? COLLATE NOCASE", (actual_default,))
+                conn.execute(
+                    "UPDATE session_history SET profile_name = ? WHERE profile_name = ? COLLATE NOCASE",
+                    ("Admin", actual_default),
+                )
+                conn.execute(
+                    "UPDATE app_state SET value = ? WHERE key = ? AND lower(value) = lower(?)",
+                    ("Admin", "last_active_profile", actual_default),
+                )
+                conn.execute("DELETE FROM profiles WHERE name = ? COLLATE NOCASE", (actual_default,))
+                migrated = 1
+        self._set_app_state(self._DEFAULT_TO_ADMIN_MIGRATION_KEY, "done")
+        return migrated
+
     def list_profiles(self, include_archived: bool = False) -> list[str]:
         with self._db() as conn:
             if include_archived:
@@ -241,7 +301,7 @@ class ProfileStore:
             if include_archived:
                 rows = conn.execute(
                     """
-                    SELECT name, created_at, last_used_at, archived_at, age, gender, notes
+                    SELECT name, created_at, last_used_at, archived_at, age, gender, notes, role
                     FROM profiles
                     ORDER BY lower(name), name
                     """
@@ -249,7 +309,7 @@ class ProfileStore:
             else:
                 rows = conn.execute(
                     """
-                    SELECT name, created_at, last_used_at, archived_at, age, gender, notes
+                    SELECT name, created_at, last_used_at, archived_at, age, gender, notes, role
                     FROM profiles
                     WHERE archived_at IS NULL
                     ORDER BY lower(name), name
@@ -257,6 +317,9 @@ class ProfileStore:
                 ).fetchall()
         info: list[dict[str, str | int | bool | None]] = []
         for row in rows:
+            role_val = row["role"] if hasattr(row, "keys") and "role" in row.keys() else None
+            role_str = str(role_val).strip().lower() if role_val else "user"
+            role_str = "admin" if role_str == "admin" else "user"
             info.append(
                 {
                     "name": str(row["name"]),
@@ -267,6 +330,7 @@ class ProfileStore:
                     "age": int(row["age"]) if row["age"] is not None else None,
                     "gender": str(row["gender"]) if row["gender"] else None,
                     "notes": str(row["notes"]) if row["notes"] else None,
+                    "role": role_str,
                 }
             )
         return info
@@ -356,14 +420,15 @@ class ProfileStore:
 
     def ensure_profile(self, name: str) -> str:
         profile_name = self._normalize_profile(name)
+        role = "admin" if profile_name.casefold() == "admin" else "user"
         now = datetime.now().isoformat()
         with self._db() as conn:
             conn.execute(
                 """
-                INSERT OR IGNORE INTO profiles (name, created_at, last_used_at)
-                VALUES (?, ?, ?)
+                INSERT OR IGNORE INTO profiles (name, created_at, last_used_at, role)
+                VALUES (?, ?, ?, ?)
                 """,
-                (profile_name, now, now),
+                (profile_name, now, now, role),
             )
             conn.execute(
                 """
@@ -536,6 +601,89 @@ class ProfileStore:
                 DO UPDATE SET value = excluded.value
                 """,
                 (profile, key, str(value)),
+            )
+
+    _PW_PREFIX = "hnh:"
+
+    def _hash_password(self, profile_name: str, password: str) -> str:
+        data = f"{self._PW_PREFIX}{profile_name}||{password}".encode("utf-8")
+        return hashlib.sha256(data).hexdigest()
+
+    def get_profile_password_hash(self, profile_name: str) -> str | None:
+        profile = self._normalize_profile(profile_name)
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT password_hash FROM profiles WHERE name = ? COLLATE NOCASE",
+                (profile,),
+            ).fetchone()
+        if row is None or row["password_hash"] is None:
+            return None
+        return str(row["password_hash"]).strip() or None
+
+    def profile_has_password(self, profile_name: str) -> bool:
+        return self.get_profile_password_hash(profile_name) is not None
+
+    def verify_profile_password(self, profile_name: str, password: str) -> bool:
+        stored = self.get_profile_password_hash(profile_name)
+        if stored is None:
+            return True
+        if not password:
+            return False
+        expected = self._hash_password(profile_name, password)
+        return secrets.compare_digest(stored, expected)
+
+    def get_profile_role(self, profile_name: str) -> str:
+        """Return 'admin' or 'user'. Missing/Guest legacy profiles default to 'admin'."""
+        if not profile_name or str(profile_name).strip().casefold() == "guest":
+            return "user"
+        profile = self._normalize_profile(profile_name)
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT role FROM profiles WHERE name = ? COLLATE NOCASE",
+                (profile,),
+            ).fetchone()
+        if row is None or row["role"] is None or not str(row["role"]).strip():
+            return "admin"
+        r = str(row["role"]).strip().lower()
+        return r if r in ("admin", "user") else "admin"
+
+    def profile_is_admin(self, profile_name: str) -> bool:
+        """Return True if the profile has admin role. Guest and missing/legacy profiles are treated as non-admin."""
+        return self.get_profile_role(profile_name) == "admin"
+
+    def set_profile_role(self, profile_name: str, role: str) -> None:
+        """Set profile role to 'admin' or 'user'. Admin only."""
+        profile = self._normalize_profile(profile_name)
+        r = str(role).strip().lower()
+        if r not in ("admin", "user"):
+            raise ValueError("Role must be 'admin' or 'user'")
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT name FROM profiles WHERE name = ? COLLATE NOCASE",
+                (profile,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Profile not found: {profile}")
+            conn.execute(
+                "UPDATE profiles SET role = ? WHERE name = ? COLLATE NOCASE",
+                (r, profile),
+            )
+
+    def set_profile_password(self, profile_name: str, password: str) -> None:
+        profile = self._normalize_profile(profile_name)
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT name FROM profiles WHERE name = ? COLLATE NOCASE",
+                (profile,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"Profile not found: {profile}")
+            actual_name = str(row["name"])
+        pw_hash = self._hash_password(actual_name, password) if password else None
+        with self._db() as conn:
+            conn.execute(
+                "UPDATE profiles SET password_hash = ? WHERE name = ? COLLATE NOCASE",
+                (pw_hash, profile),
             )
 
     def clear_profile_pref(self, profile_name: str, key: str) -> None:

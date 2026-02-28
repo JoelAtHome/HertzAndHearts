@@ -192,7 +192,7 @@ def export_session_edf_plus(
     try:
         writer.setSignalHeaders(channel_info)
         writer.setStartdatetime(session_start)
-        writer.setPatientCode(_sanitize_edf_header_text(data.get("profile_id"), "Default"))
+        writer.setPatientCode(_sanitize_edf_header_text(data.get("profile_id"), "Admin"))
         writer.setTechnician("HertzAndHearts")
         writer.setRecordingAdditional(
             _sanitize_edf_header_text(

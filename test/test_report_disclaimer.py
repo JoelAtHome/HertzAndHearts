@@ -16,7 +16,7 @@ class ReportDisclaimerTests(unittest.TestCase):
             report_path = Path(tmp) / "session_report.docx"
             data = {
                 "session_id": "s-001",
-                "profile_id": "Default",
+                "profile_id": "Admin",
                 "session_type": "General Monitoring",
                 "session_start": datetime(2026, 2, 25, 9, 0, 0),
                 "session_end": datetime(2026, 2, 25, 9, 15, 0),
