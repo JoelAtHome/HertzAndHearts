@@ -80,6 +80,7 @@ def main():
     _warn_if_pandas_neurokit_combo_is_risky()
     _emit_research_use_startup_warning()
     app = Application(sys.argv)
+    app.aboutToQuit.connect(lambda: app._view._flush_signal_fault_log("app exit"))
     app._view.show()
     QTimer.singleShot(0, app._view.showMaximized)
     sys.exit(app.exec())

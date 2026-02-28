@@ -1,5 +1,6 @@
 from datetime import datetime, date
 import hashlib
+import os
 import json
 import math
 import random
@@ -451,12 +452,26 @@ class Card0Dialog(QDialog):
         heart.deleteLater()
 
 
+def _skip_password_check() -> bool:
+    """Return True if password verification should be bypassed (e.g. lockout recovery)."""
+    val = os.environ.get("HNH_SKIP_PASSWORD", "").strip().lower()
+    return val in ("1", "true", "yes")
+
+
 class ProfileSelectionDialog(QDialog):
     """Select the active user profile for this app session."""
 
-    def __init__(self, profiles: list[str], last_profile: str | None, parent=None):
+    def __init__(
+        self,
+        profiles: list[str],
+        last_profile: str | None,
+        profile_store: ProfileStore | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
+        self._profile_store = profile_store
         self.selected_profile: str | None = None
+        self.password_entered: str = ""
         self.setModal(True)
         self.setWindowTitle("Select Session User")
         self.setMinimumWidth(520)
@@ -468,10 +483,12 @@ class ProfileSelectionDialog(QDialog):
         info.setWordWrap(True)
         root.addWidget(info)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("User profile:"))
+        form = QFormLayout()
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._combo = QComboBox()
         self._combo.setEditable(False)
+        self._combo.setMinimumWidth(195)
+        self._combo.setMaximumWidth(195)
         unique_profiles = []
         seen: set[str] = set()
         for profile in profiles:
@@ -484,14 +501,21 @@ class ProfileSelectionDialog(QDialog):
             seen.add(key)
             unique_profiles.append(p)
         if not unique_profiles:
-            unique_profiles = ["Default"]
+            unique_profiles = ["Admin"]
         self._combo.addItems(unique_profiles)
         if last_profile:
             idx = self._combo.findText(last_profile, Qt.MatchFixedString)
             if idx >= 0:
                 self._combo.setCurrentIndex(idx)
-        row.addWidget(self._combo, stretch=1)
-        root.addLayout(row)
+        form.addRow("User profile:", self._combo)
+
+        self._pw_edit = QLineEdit()
+        self._pw_edit.setPlaceholderText("Enter password (optional for profiles without one)")
+        self._pw_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        self._pw_edit.setMinimumWidth(195)
+        self._pw_edit.setMaximumWidth(195)
+        form.addRow("Password:", self._pw_edit)
+        root.addLayout(form)
 
         buttons = QHBoxLayout()
         self._new_btn = QPushButton("New Profile...")
@@ -545,7 +569,21 @@ class ProfileSelectionDialog(QDialog):
         if not name:
             QMessageBox.warning(self, "Profile Required", "Please select a profile.")
             return
+        if self._profile_store and not _skip_password_check():
+            if not self._profile_store.verify_profile_password(
+                name, self._pw_edit.text()
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Password",
+                    "The password does not match this profile. Try again or use "
+                    '"Continue as Guest".',
+                )
+                self._pw_edit.clear()
+                self._pw_edit.setFocus()
+                return
         self.selected_profile = name
+        self.password_entered = self._pw_edit.text()
         self.accept()
 
     def _accept_guest(self):
@@ -625,14 +663,21 @@ class SessionHistoryDialog(QDialog):
 class ProfileManagerDialog(QDialog):
     """Manage user profiles (create, rename, archive/delete, restore)."""
 
-    def __init__(self, store: ProfileStore, active_profile: str, parent=None):
+    def __init__(
+        self,
+        store: ProfileStore,
+        active_profile: str,
+        is_admin: bool = True,
+        parent=None,
+    ):
         super().__init__(parent)
         self._store = store
         self._active_profile = active_profile
+        self._is_admin = is_admin
         self.setModal(True)
         self.setWindowModality(Qt.WindowModality.ApplicationModal)
         self.setWindowTitle("Profile Manager")
-        self.resize(780, 460)
+        self.resize(860, 460)
 
         root = QVBoxLayout(self)
         hint = QLabel(
@@ -647,10 +692,11 @@ class ProfileManagerDialog(QDialog):
         top.addWidget(self._show_archived)
         top.addStretch()
         root.addLayout(top)
+        self._show_archived.setVisible(self._is_admin)
 
         self._table = QTableWidget()
-        self._table.setColumnCount(4)
-        self._table.setHorizontalHeaderLabels(["Profile", "Status", "Last Used", "Created"])
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(["Profile", "Status", "Role", "Last Used", "Created"])
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
@@ -661,6 +707,7 @@ class ProfileManagerDialog(QDialog):
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self._table.setSortingEnabled(True)
         root.addWidget(self._table, stretch=1)
 
@@ -706,6 +753,19 @@ class ProfileManagerDialog(QDialog):
         self._notes_input.setPlaceholderText("Optional profile notes")
         self._notes_input.setFixedHeight(84)
         details_form.addRow("Notes", self._notes_input)
+
+        self._role_row = QWidget()
+        role_lay = QHBoxLayout(self._role_row)
+        role_lay.setContentsMargins(0, 0, 0, 0)
+        role_lay.addWidget(QLabel("Role"))
+        self._role_combo = QComboBox()
+        self._role_combo.addItems(["Admin", "User"])
+        self._role_combo.setMaximumWidth(100)
+        role_lay.addWidget(self._role_combo)
+        role_lay.addStretch()
+        details_form.addRow(self._role_row)
+        self._role_row.setVisible(self._is_admin)
+
         root.addWidget(details_group)
 
         actions = QHBoxLayout()
@@ -728,6 +788,11 @@ class ProfileManagerDialog(QDialog):
         self._delete_btn = QPushButton("Delete")
         self._delete_btn.clicked.connect(self._delete_profile)
         actions.addWidget(self._delete_btn)
+
+        self._password_btn = QPushButton("Set/Reset Password")
+        self._password_btn.clicked.connect(self._set_reset_password)
+        actions.addWidget(self._password_btn)
+
         actions.addStretch()
 
         save_close_btn = QPushButton("Save && Close")
@@ -740,6 +805,8 @@ class ProfileManagerDialog(QDialog):
 
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._last_selected_profile: str | None = None
+        for btn in (self._create_btn, self._rename_btn, self._archive_btn, self._restore_btn, self._delete_btn):
+            btn.setVisible(self._is_admin)
         self._refresh()
 
     def _update_age_from_dob(self):
@@ -776,8 +843,10 @@ class ProfileManagerDialog(QDialog):
     def _refresh(self):
         previous = self._selected_profile_name() or self._active_profile
         rows = self._store.list_profiles_info(
-            include_archived=self._show_archived.isChecked()
+            include_archived=self._show_archived.isChecked() if self._is_admin else True
         )
+        if not self._is_admin:
+            rows = [r for r in rows if str(r.get("name") or "").casefold() == self._active_profile.casefold()]
         self._table.setSortingEnabled(False)
         self._table.setRowCount(len(rows))
         for idx, row in enumerate(rows):
@@ -790,6 +859,9 @@ class ProfileManagerDialog(QDialog):
             name_item = QTableWidgetItem(name)
             name_item.setData(Qt.UserRole, name)
             status_item = QTableWidgetItem(status)
+            role_str = str(row.get("role") or "user").strip().lower()
+            role_display = "Admin" if role_str == "admin" else "User"
+            role_item = QTableWidgetItem(role_display)
             last_used_item = QTableWidgetItem(
                 self._fmt_time(row.get("last_used_at") if isinstance(row.get("last_used_at"), str) else None)
             )
@@ -799,8 +871,9 @@ class ProfileManagerDialog(QDialog):
 
             self._table.setItem(idx, 0, name_item)
             self._table.setItem(idx, 1, status_item)
-            self._table.setItem(idx, 2, last_used_item)
-            self._table.setItem(idx, 3, created_item)
+            self._table.setItem(idx, 2, role_item)
+            self._table.setItem(idx, 3, last_used_item)
+            self._table.setItem(idx, 4, created_item)
         self._table.resizeRowsToContents()
         self._table.setSortingEnabled(True)
         if not self._select_row_by_profile(previous) and self._table.rowCount() > 0:
@@ -837,6 +910,7 @@ class ProfileManagerDialog(QDialog):
         self._archive_btn.setEnabled(has_selection and not archived and not is_current)
         self._restore_btn.setEnabled(has_selection and archived)
         self._delete_btn.setEnabled(has_selection and not is_current)
+        self._password_btn.setEnabled(has_selection)
 
     def _on_selection_changed(self):
         new_name = self._selected_profile_name()
@@ -881,6 +955,11 @@ class ProfileManagerDialog(QDialog):
         idx = self._gender_input.findText(gender_raw, Qt.MatchFixedString)
         self._gender_input.setCurrentIndex(idx if idx >= 0 else 2)
         self._notes_input.setPlainText(str(details.get("notes") or ""))
+        if self._is_admin:
+            role = self._store.get_profile_role(name)
+            self._role_combo.setCurrentIndex(0 if role == "admin" else 1)
+            is_own = name.casefold() == self._active_profile.casefold()
+            self._role_combo.setEnabled(not is_own)
 
     def _save_details(self, target_name: str | None = None) -> bool:
         name = target_name or self._selected_profile_name()
@@ -910,6 +989,16 @@ class ProfileManagerDialog(QDialog):
                 gender=gender,
                 notes=notes or None,
             )
+            if self._is_admin:
+                new_role = "admin" if self._role_combo.currentIndex() == 0 else "user"
+                if name.casefold() == self._active_profile.casefold() and new_role == "user":
+                    QMessageBox.warning(
+                        self,
+                        "Cannot Demote",
+                        "You cannot change your own role to User.",
+                    )
+                    return False
+                self._store.set_profile_role(name, new_role)
         except ValueError as exc:
             QMessageBox.warning(self, "Save Failed", str(exc))
             return False
@@ -992,6 +1081,91 @@ class ProfileManagerDialog(QDialog):
             QMessageBox.warning(self, "Delete Failed", str(exc))
             return
         self._refresh()
+
+    def _set_reset_password(self):
+        current = self._selected_profile_name()
+        if not current:
+            QMessageBox.warning(
+                self,
+                "No Profile Selected",
+                "Please select a profile to set or reset its password.",
+            )
+            return
+        dlg = SetPasswordDialog(
+            profile_name=current,
+            profile_store=self._store,
+            parent=self,
+        )
+        if dlg.exec() == QDialog.Accepted:
+            self._refresh()
+
+
+class SetPasswordDialog(QDialog):
+    """Set or reset password for a profile (used when logged in via Profile Manager)."""
+
+    def __init__(
+        self,
+        profile_name: str,
+        profile_store: ProfileStore,
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.setWindowTitle(f"Set/Reset Password — {profile_name}")
+        self._profile_name = profile_name
+        self._store = profile_store
+        layout = QFormLayout(self)
+        layout.addRow(
+            QLabel("Current password (leave blank if none):")
+        )
+        self._current = QLineEdit()
+        self._current.setEchoMode(QLineEdit.EchoMode.Password)
+        self._current.setPlaceholderText("Leave blank to set initial password")
+        layout.addRow(self._current)
+        layout.addRow(QLabel("New password:"))
+        self._new_pw = QLineEdit()
+        self._new_pw.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addRow(self._new_pw)
+        layout.addRow(QLabel("Confirm new password (leave both blank to clear):"))
+        self._confirm = QLineEdit()
+        self._confirm.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addRow(self._confirm)
+        btns = QHBoxLayout()
+        ok = QPushButton("Set Password")
+        ok.clicked.connect(self._apply)
+        ok.setDefault(True)
+        btns.addWidget(ok)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        btns.addWidget(cancel)
+        layout.addRow(btns)
+
+    def _apply(self):
+        if self._store.profile_has_password(self._profile_name):
+            if not self._store.verify_profile_password(
+                self._profile_name, self._current.text()
+            ):
+                QMessageBox.warning(
+                    self,
+                    "Invalid Password",
+                    "Current password is incorrect.",
+                )
+                return
+        new_pw = self._new_pw.text()
+        if new_pw != self._confirm.text():
+            QMessageBox.warning(
+                self,
+                "Mismatch",
+                "New password and confirmation do not match.",
+            )
+            return
+        try:
+            self._store.set_profile_password(self._profile_name, new_pw)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Error", str(exc))
+            return
+        msg = "Password cleared." if not new_pw else "Password has been updated successfully."
+        QMessageBox.information(self, "Password Set", msg)
+        self.accept()
 
 
 class ClickableLabel(QLabel):
@@ -2736,6 +2910,8 @@ class View(QMainWindow):
         self._series_prune_stride = 32
         self._last_data_time = None
         self._suppress_comm_error_popups = False
+        self._signal_fault_buffer: list[dict] = []
+        self._signal_fault_counts: dict[str, int] = {}
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
@@ -2744,6 +2920,7 @@ class View(QMainWindow):
         self._session_rmssd_times: list[float] = []
         self._session_hrv_values: list[float] = []
         self._session_hrv_times: list[float] = []
+        self._session_stress_ratio_values: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
@@ -2752,7 +2929,7 @@ class View(QMainWindow):
         self._session_root = Path.home() / "Hertz-and-Hearts"
         self._profile_store = ProfileStore(self._session_root)
         self._session_profile_id = (
-            self._profile_store.get_last_active_profile() or "Default"
+            self._profile_store.get_last_active_profile() or "Admin"
         )
         self._profile_store.ensure_profile(self._session_profile_id)
 
@@ -2981,6 +3158,8 @@ class View(QMainWindow):
 
         self.start_recording_button = QPushButton("Start")
         self.start_recording_button.clicked.connect(self.start_session)
+        self.stop_recording_button = QPushButton("Stop")
+        self.stop_recording_button.clicked.connect(self.stop_session)
         self.save_recording_button = QPushButton("Save")
         self.save_recording_button.clicked.connect(self.finalize_session)
         self.export_report_button = QPushButton("Report")
@@ -3036,6 +3215,9 @@ class View(QMainWindow):
         self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
         self.poincare_button.setToolTip("Open the live Poincare RR scatter window.")
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
+        self.stop_recording_button.setToolTip(
+            "Stop recording and save data to session folder. Use Save for full report and copy."
+        )
         self.save_recording_button.setToolTip(
             "Finalize the active session and choose where to save session files."
         )
@@ -3188,6 +3370,8 @@ class View(QMainWindow):
         self.poincare_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.start_recording_button.setMaximumWidth(70)
         self.start_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.stop_recording_button.setMaximumWidth(70)
+        self.stop_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.save_recording_button.setMaximumWidth(70)
         self.save_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.export_report_button.setMaximumWidth(116)
@@ -3255,6 +3439,7 @@ class View(QMainWindow):
             "QPushButton:disabled { color: #7f8c8d; background-color: #e0e0e0; }"
         )
         toolbar.addWidget(self.start_recording_button)
+        toolbar.addWidget(self.stop_recording_button)
         toolbar.addWidget(self.save_recording_button)
         toolbar.addWidget(self.export_report_button)
         toolbar.addWidget(self.history_button)
@@ -3293,12 +3478,21 @@ class View(QMainWindow):
     def _prompt_for_session_profile(self) -> str | None:
         profiles = self._profile_store.list_profiles()
         last_profile = self._profile_store.get_last_active_profile()
-        dlg = ProfileSelectionDialog(profiles=profiles, last_profile=last_profile, parent=self)
+        dlg = ProfileSelectionDialog(
+            profiles=profiles,
+            last_profile=last_profile,
+            profile_store=self._profile_store,
+            parent=self,
+        )
         if dlg.exec() != QDialog.Accepted:
             return None
         if dlg.selected_profile is None:
             return None
-        return self._profile_store.ensure_profile(dlg.selected_profile)
+        profile_id = self._profile_store.ensure_profile(dlg.selected_profile)
+        pw = getattr(dlg, "password_entered", "") or ""
+        if pw and profile_id.casefold() != "guest" and not self._profile_store.profile_has_password(profile_id):
+            self._profile_store.set_profile_password(profile_id, pw)
+        return profile_id
 
     def _set_active_profile(self, profile_id: str, announce: bool = False):
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
@@ -3438,6 +3632,7 @@ class View(QMainWindow):
         is_recording = self._session_state == "recording"
         annotation_available = is_recording
         self.start_recording_button.setEnabled(connected and not is_recording)
+        self.stop_recording_button.setEnabled(is_recording)
         self.save_recording_button.setEnabled(is_recording)
         self.annotation.setEnabled(annotation_available)
         self.annotation_button.setEnabled(annotation_available)
@@ -3567,6 +3762,7 @@ class View(QMainWindow):
             "rmssd_time_seconds": list(self._session_rmssd_times),
             "hrv_values": list(self._session_hrv_values),
             "hrv_time_seconds": list(self._session_hrv_times),
+            "stress_ratio_values": list(self._session_stress_ratio_values),
             "ecg_samples": ecg_samples,
             "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
             "ecg_is_simulated": False,
@@ -3575,6 +3771,9 @@ class View(QMainWindow):
             "report_stage": report_stage,
             "qtc": qtc_payload,
             "disclaimer": self._current_disclaimer_payload(),
+            "settling_duration_seconds": getattr(
+                self.settings, "SETTLING_DURATION", 15
+            ),
         }
 
     def _export_optional_edf_plus(self, report_data: dict):
@@ -3698,6 +3897,7 @@ class View(QMainWindow):
         self._session_rmssd_times = []
         self._session_hrv_values = []
         self._session_hrv_times = []
+        self._session_stress_ratio_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
@@ -3720,6 +3920,13 @@ class View(QMainWindow):
             self.show_status(f"Session auto-started: {self._session_bundle.session_dir}")
         else:
             self.show_status(f"Session started: {self._session_bundle.session_dir}")
+
+    def stop_session(self):
+        """End the measuring session, stop recording, and save data to session folder.
+        Does not generate reports or prompt for copy destination. Use Save for that."""
+        self._abandon_active_session()
+        if self._session_bundle is not None:
+            self.show_status(f"Session stopped. Data saved to {self._session_bundle.session_dir}")
 
     def _abandon_active_session(self):
         if self._session_state != "recording":
@@ -3821,6 +4028,7 @@ class View(QMainWindow):
         self._session_rmssd_times = []
         self._session_hrv_values = []
         self._session_hrv_times = []
+        self._session_stress_ratio_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._session_bundle = None
         self.ecg_window.clear()
@@ -3908,6 +4116,7 @@ class View(QMainWindow):
         self._apply_freeze_button_states()
         self.is_phase_active = False
         self._reset_signal_popup()
+        self._flush_signal_fault_log("disconnect")
         self._set_signal_indicator("Disconnected", "gray")
         self.recording_statusbar.set_disconnected()
         self._start_connect_hints()
@@ -4226,9 +4435,11 @@ class View(QMainWindow):
             self.show_status("Profile changes are disabled during an active recording.")
             return
         try:
+            is_admin = self._profile_store.profile_is_admin(self._session_profile_id)
             dlg = ProfileManagerDialog(
                 store=self._profile_store,
                 active_profile=self._session_profile_id,
+                is_admin=is_admin,
                 parent=None,
             )
             dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
@@ -4978,10 +5189,17 @@ class View(QMainWindow):
         msg.raise_()
         msg.activateWindow()
 
-    def _on_rmssd_degraded(self):
+    def _on_rmssd_degraded(self, rmssd_val: float | None = None):
         self._signal_degrade_count += 1
         if not self._signal_popup_shown and self._signal_degrade_count >= SIGNAL_DEGRADE_POPUP_COUNT:
             self._signal_popup_shown = True
+            self._log_signal_fault(
+                "RMSSD_POPUP", "Poor signal — electrodes may be dry",
+                rmssd_ms=round(rmssd_val, 2) if rmssd_val is not None else None,
+                consecutive_breaches=self._signal_degrade_count,
+                threshold_noisy=RMSSD_NOISY_MS,
+                threshold_poor=RMSSD_POOR_MS,
+            )
             self._fire_signal_popup("Poor signal \u2014 electrodes may be dry")
 
     def _reset_signal_popup(self):
@@ -5027,6 +5245,11 @@ class View(QMainWindow):
             self._fault_active = True
             self._consecutive_good = 0
             self._set_signal_indicator("LOST (No data)", "red")
+            self._log_signal_fault(
+                "WATCHDOG_LOST", "No data received",
+                silence_sec=round(silence, 1),
+                threshold_sec=self.settings.DATA_TIMEOUT_SECONDS,
+            )
             self._show_signal_degraded_popup("No data received")
             self._handle_stream_reset(clear_series=False)
 
@@ -5037,6 +5260,123 @@ class View(QMainWindow):
     def _set_signal_indicator(self, text: str, color: str):
         self.health_indicator.setStyleSheet("color: %s; font-size: 18px;" % color)
         self.health_label.setText("Signal: %s" % text)
+
+    def _log_signal_fault(self, fault_type: str, reason: str, **ctx):
+        """Accumulate fault in memory; flushed to disk on disconnect or exit."""
+        ts = datetime.now().isoformat(timespec="milliseconds")
+        record = {"ts": ts, "fault_type": fault_type, "reason": reason, **ctx}
+        self._signal_fault_buffer.append(record)
+        self._signal_fault_counts[fault_type] = self._signal_fault_counts.get(fault_type, 0) + 1
+
+    def _get_signal_fault_recommendation(self) -> str:
+        """Return recommendation string based on dominant fault pattern."""
+        if not self._signal_fault_counts:
+            return ""
+        sorted_types = sorted(
+            self._signal_fault_counts.items(),
+            key=lambda x: -x[1],
+        )
+        top = sorted_types[0][0] if sorted_types else ""
+        second = sorted_types[1][0] if len(sorted_types) > 1 else ""
+        recs = []
+        if top in ("L1_DROPOUT", "WATCHDOG_LOST"):
+            recs.append("Increase Data Timeout (Settings > Signal Quality)")
+            if top == "L1_DROPOUT":
+                recs.append("Increase Dropout IBI Threshold (Advanced)")
+        if "L2_NOISE_HIGH" in (top, second) or "L2_NOISE" == top:
+            recs.append("Increase Noise Ceiling IBI (Advanced)")
+        if "L2_NOISE_LOW" in (top, second):
+            recs.append("Ensure electrodes wet and strap snug; consider Noise Floor IBI (Advanced)")
+        if top == "L3_ERRATIC":
+            recs.append("Increase Deviation Threshold and/or Deviation Window (Signal Quality)")
+        if top == "RMSSD_POPUP":
+            recs.append("Wet strap and ensure snug fit; movement or dry electrodes")
+        if not recs:
+            recs.append("Review Settings > Signal Quality and Advanced; ensure strap fit and electrode contact.")
+        return "; ".join(dict.fromkeys(recs))
+
+    def _get_signal_fault_action(self) -> str:
+        """Return specific actionable guidance (from X to Y) based on fault data and current settings."""
+        if not self._signal_fault_buffer or not self._signal_fault_counts:
+            return ""
+        sorted_types = sorted(
+            self._signal_fault_counts.items(),
+            key=lambda x: -x[1],
+        )
+        top = sorted_types[0][0] if sorted_types else ""
+        records = [r for r in self._signal_fault_buffer if r.get("fault_type") == top]
+        if top == "L3_ERRATIC" and records:
+            current = self.settings.DEVIATION_THRESHOLD
+            max_dev = max(r.get("deviation_pct", 0) for r in records if "deviation_pct" in r)
+            if max_dev >= 0:
+                suggested = max(0.20, min(0.35, (max_dev + 8) / 100))
+                return f"Raise Deviation Threshold from {current:.2f} to {suggested:.2f} (Settings > Signal Quality)"
+        if top == "L1_DROPOUT":
+            current = self.settings.DROPOUT_IBI_MS
+            suggested = min(10000, current + 1000)
+            return f"Raise Dropout IBI Threshold from {current} to {suggested} ms (Settings > Advanced)"
+        if top == "WATCHDOG_LOST" and records:
+            current = self.settings.DATA_TIMEOUT_SECONDS
+            suggested = min(30.0, current + 5.0)
+            return f"Raise Data Timeout from {current} to {suggested} s (Settings > Signal Quality)"
+        if top == "L2_NOISE_HIGH" and records:
+            max_ibi = max(r.get("last_ibi_ms", 0) for r in records if "last_ibi_ms" in r)
+            current = self.settings.NOISE_IBI_HIGH_MS
+            suggested = min(5000, max(max_ibi + 300, current + 500))
+            return f"Raise Noise Ceiling IBI from {current} to {suggested} ms (Settings > Advanced)"
+        if top == "L2_NOISE_LOW" and records:
+            min_ibi = min(r.get("last_ibi_ms", 500) for r in records if "last_ibi_ms" in r)
+            current = self.settings.NOISE_IBI_LOW_MS
+            suggested = max(150, min(min_ibi - 50, current - 50))
+            return f"Lower Noise Floor IBI from {current} to {suggested} ms (Settings > Advanced); ensure strap is snug"
+        if top == "RMSSD_POPUP":
+            return "Wet strap and ensure snug fit; check electrode contact"
+        return ""
+
+    def _flush_signal_fault_log(self, end_reason: str) -> None:
+        """Write in-memory fault log to disk; clear buffer; optionally prompt in DEBUG."""
+        if not self._signal_fault_buffer:
+            return
+        log_path = Path.home() / "Hertz-and-Hearts" / "signal_diag.log"
+        try:
+            log_dir = log_path.parent
+            log_dir.mkdir(parents=True, exist_ok=True)
+            profile = getattr(self, "_session_profile_id", "Admin") or "Admin"
+            ts = datetime.now().isoformat(timespec="seconds")
+            lines = [f"--- {ts} | {profile} | Session ended ({end_reason}) ---\n"]
+            for r in self._signal_fault_buffer:
+                ctx = {k: v for k, v in r.items() if k not in ("ts", "fault_type", "reason")}
+                ctx_str = " ".join(f"{k}={v}" for k, v in ctx.items())
+                line = f"{r['ts']} FAULT={r['fault_type']} reason={r['reason']!r} {ctx_str}".strip() + "\n"
+                lines.append(line)
+            counts = " ".join(f"{k}={v}" for k, v in sorted(self._signal_fault_counts.items()))
+            lines.append(f"--- SUMMARY: {counts} ---\n")
+            rec = self._get_signal_fault_recommendation()
+            if rec:
+                lines.append(f"RECOMMEND: {rec}\n")
+            action = self._get_signal_fault_action()
+            if action:
+                lines.append(f"ACTION: {action}\n")
+            with log_path.open("a", encoding="utf-8", errors="ignore") as fh:
+                fh.writelines(lines)
+        except Exception:
+            pass
+        finally:
+            self._signal_fault_buffer.clear()
+            self._signal_fault_counts.clear()
+        if self.settings.DEBUG:
+            reply = QMessageBox.question(
+                self,
+                "Comm Diagnostics",
+                "Comm errors were detected. Review log file?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply == QMessageBox.Yes:
+                try:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
+                except Exception:
+                    pass
 
     def update_ui_labels(self, data: NamedSignal):
         # 1. RAW BEAT DATA (Heart Rate & Instant Faults)
@@ -5067,6 +5407,13 @@ class View(QMainWindow):
                     self._fault_active = True
                     self._consecutive_good = 0
                     self._set_signal_indicator("FAULT: Bad comm", "red")
+                    recent = list(data.value[1])[-10:]
+                    self._log_signal_fault(
+                        "L1_DROPOUT", "Total signal dropout",
+                        last_ibi_ms=int(last_ibi_ms),
+                        threshold=self.settings.DROPOUT_IBI_MS,
+                        recent_ibis=recent,
+                    )
                     self._show_signal_degraded_popup("Total signal dropout")
                     self._handle_stream_reset(clear_series=False)
                     return
@@ -5076,6 +5423,15 @@ class View(QMainWindow):
                     self._fault_active = True
                     self._consecutive_good = 0
                     self._set_signal_indicator("DROP/NOISE", "red")
+                    fault_sub = "L2_NOISE_HIGH" if last_ibi_ms > self.settings.NOISE_IBI_HIGH_MS else "L2_NOISE_LOW"
+                    recent = list(data.value[1])[-10:]
+                    self._log_signal_fault(
+                        fault_sub, "Signal dropout or noise",
+                        last_ibi_ms=int(last_ibi_ms),
+                        low_ms=self.settings.NOISE_IBI_LOW_MS,
+                        high_ms=self.settings.NOISE_IBI_HIGH_MS,
+                        recent_ibis=recent,
+                    )
                     self._show_signal_degraded_popup("Signal dropout or noise")
                     return
 
@@ -5089,6 +5445,15 @@ class View(QMainWindow):
                             self._fault_active = True
                             self._consecutive_good = 0
                             self._set_signal_indicator("ERRATIC \u2014 irregular beat", "red")
+                            recent = list(data.value[1])[-10:]
+                            self._log_signal_fault(
+                                "L3_ERRATIC", "Erratic heart rate",
+                                last_ibi_ms=int(last_ibi_ms),
+                                avg_ibi_ms=int(avg_ibi),
+                                deviation_pct=round(deviation * 100, 1),
+                                threshold_pct=int(self.settings.DEVIATION_THRESHOLD * 100),
+                                recent_ibis=recent,
+                            )
                             self._show_signal_degraded_popup("Erratic heart rate")
                             return
 
@@ -5103,7 +5468,10 @@ class View(QMainWindow):
         
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":
-            self.stress_ratio_label.setText(f"LF/HF: {data.value[0]:.2f}")
+            val = data.value[0]
+            self.stress_ratio_label.setText(f"LF/HF: {val:.2f}")
+            if self._session_state == "recording":
+                self._session_stress_ratio_values.append(float(val))
 
         # 2b. QTc payload updates from ECG delineation/calculation pipeline.
         elif data.name == "qtc":
@@ -5131,10 +5499,10 @@ class View(QMainWindow):
 
             if rmssd_val > RMSSD_POOR_MS:
                 self._set_signal_indicator("POOR (Dry?)", "red")
-                self._on_rmssd_degraded()
+                self._on_rmssd_degraded(rmssd_val)
             elif rmssd_val > RMSSD_NOISY_MS:
                 self._set_signal_indicator("NOISY", "orange")
-                self._on_rmssd_degraded()
+                self._on_rmssd_degraded(rmssd_val)
             else:
                 self._set_signal_indicator("GOOD", "#00FF00")
                 self._reset_signal_popup()
