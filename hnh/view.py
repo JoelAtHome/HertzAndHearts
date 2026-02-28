@@ -660,6 +660,214 @@ class SessionHistoryDialog(QDialog):
         self._table.resizeRowsToContents()
 
 
+class TrendsWindow(QMainWindow):
+    """Window to compare-plot session trends over day/week/month/year spans."""
+
+    def __init__(self, profile_store, active_profile: str, is_admin: bool = True, parent=None):
+        super().__init__(parent)
+        self._profile_store = profile_store
+        self._active_profile = active_profile
+        self._is_admin = is_admin
+        self.setWindowTitle("Hertz & Hearts — Session Trends")
+        self.resize(900, 520)
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+
+        # Controls row: profile selector, span selector
+        controls = QHBoxLayout()
+        controls.addWidget(QLabel("Profile:"))
+        self._profile_combo = QComboBox()
+        self._profile_combo.setMinimumWidth(140)
+        for name in profile_store.list_profiles():
+            self._profile_combo.addItem(name)
+        idx = self._profile_combo.findText(active_profile, Qt.MatchFixedString)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._profile_combo.currentTextChanged.connect(self._refresh_plot)
+        self._profile_combo.setEnabled(is_admin)
+        controls.addWidget(self._profile_combo)
+
+        controls.addSpacing(24)
+        hint = QLabel("Use mouse to pan; mouse wheel on each axis to zoom. Drag the vertical line over a point to show its values.")
+        hint.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
+        hint.setWordWrap(True)
+        controls.addWidget(hint)
+
+        controls.addStretch()
+        layout.addLayout(controls)
+
+        # Plot
+        date_axis = pg.DateAxisItem(orientation="bottom")
+        self._plot_widget = pg.PlotWidget(axisItems={"bottom": date_axis})
+        self._plot_widget.setLabel("left", "Value")
+        self._plot_widget.setLabel("bottom", "Date & Time")
+        self._plot_widget.addLegend()
+        self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
+        layout.addWidget(self._plot_widget)
+
+        # Value overlay (time + values when cursor is over a point)
+        self._hover_label = QLabel(self._plot_widget)
+        self._hover_label.setStyleSheet(
+            "background: rgba(255,255,255,0.92); padding: 6px 8px; "
+            "border: 1px solid #999; font-size: 11px; font-family: monospace;"
+        )
+        self._hover_label.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self._hover_label.hide()
+        self._trend_data: dict = {}
+        self._cursor_line: pg.InfiniteLine | None = None
+
+        self.setCentralWidget(central)
+        self._refresh_plot()
+
+    def _refresh_plot(self):
+        profile = self._profile_combo.currentText().strip() or self._active_profile
+        rows = self._profile_store.list_session_trends(profile, span="year")
+        self._plot_widget.clear()
+        self._trend_data = {}
+        if not rows:
+            return
+        x = []
+        hr_y, rmssd_y, sdnn_y, qtc_y = [], [], [], []
+        for r in rows:
+            try:
+                dt = datetime.fromisoformat(str(r["ended_at"]))
+                x.append(dt.timestamp())
+            except (ValueError, TypeError):
+                continue
+            hr_y.append(r.get("avg_hr") if r.get("avg_hr") is not None else float("nan"))
+            rmssd_y.append(r.get("avg_rmssd") if r.get("avg_rmssd") is not None else float("nan"))
+            sdnn_y.append(r.get("avg_sdnn") if r.get("avg_sdnn") is not None else float("nan"))
+            qtc_y.append(r.get("qtc_ms") if r.get("qtc_ms") is not None else float("nan"))
+        if not x:
+            return
+        self._trend_data = {"x": x, "hr": hr_y, "rmssd": rmssd_y, "sdnn": sdnn_y, "qtc": qtc_y}
+        _dotted = Qt.PenStyle.DotLine
+        if any(v == v for v in hr_y):
+            self._plot_widget.plot(
+                x, hr_y,
+                pen=pg.mkPen("r", width=1, style=_dotted),
+                symbol="o", symbolSize=8, symbolBrush="r", symbolPen="r",
+                name="HR (bpm)",
+            )
+        if any(v == v for v in rmssd_y):
+            self._plot_widget.plot(
+                x, rmssd_y,
+                pen=pg.mkPen("b", width=1, style=_dotted),
+                symbol="o", symbolSize=8, symbolBrush="b", symbolPen="b",
+                name="RMSSD (ms)",
+            )
+        if any(v == v for v in sdnn_y):
+            self._plot_widget.plot(
+                x, sdnn_y,
+                pen=pg.mkPen("g", width=1, style=_dotted),
+                symbol="o", symbolSize=8, symbolBrush="g", symbolPen="g",
+                name="SDNN (ms)",
+            )
+        if any(v == v for v in qtc_y):
+            self._plot_widget.plot(
+                x, qtc_y,
+                pen=pg.mkPen("m", width=1, style=_dotted),
+                symbol="o", symbolSize=8, symbolBrush="m", symbolPen="m",
+                name="QTc (ms)",
+            )
+        x_min, x_max = min(x), max(x)
+        x_center = (x_min + x_max) / 2.0
+        if self._cursor_line is not None:
+            try:
+                self._cursor_line.sigPositionChanged.disconnect()
+            except Exception:
+                pass
+            self._plot_widget.removeItem(self._cursor_line)
+        self._cursor_line = pg.InfiniteLine(
+            pos=x_center,
+            angle=90,
+            movable=True,
+            bounds=[x_min, x_max],
+            pen=pg.mkPen((60, 120, 190, 200), width=1.5),
+            label="",
+        )
+        self._plot_widget.addItem(self._cursor_line)
+        self._cursor_line.sigPositionChanged.connect(self._on_cursor_line_moved)
+
+    def _nearest_point_index_within_pixels(self, line_x: float, hit_radius_px: float = 30) -> int | None:
+        """Return index of nearest data point if cursor is within hit_radius_px (x-axis) in screen space."""
+        x_arr = self._trend_data.get("x", [])
+        hr = self._trend_data.get("hr", [])
+        if not x_arr:
+            return None
+        vb = self._plot_widget.getViewBox()
+        if vb is None:
+            return None
+        best_i = min(range(len(x_arr)), key=lambda i: abs(x_arr[i] - line_x))
+        y_ref = None
+        for ys in (hr, self._trend_data.get("rmssd", []), self._trend_data.get("sdnn", []), self._trend_data.get("qtc", [])):
+            if best_i < len(ys) and ys[best_i] == ys[best_i]:
+                y_ref = ys[best_i]
+                break
+        if y_ref is None:
+            return None
+        try:
+            sp_point = vb.mapFromView(QPointF(x_arr[best_i], y_ref))
+            sp_line = vb.mapFromView(QPointF(line_x, y_ref))
+        except Exception:
+            return None
+        dx_px = abs(sp_point.x() - sp_line.x())
+        if dx_px <= hit_radius_px:
+            return best_i
+        return None
+
+    def _on_cursor_line_moved(self, line):
+        if not self._trend_data or line is None:
+            self._hover_label.hide()
+            return
+        try:
+            line_x = float(line.value())
+        except (TypeError, ValueError):
+            self._hover_label.hide()
+            return
+        idx = self._nearest_point_index_within_pixels(line_x)
+        if idx is None:
+            self._hover_label.hide()
+            return
+        x_arr = self._trend_data.get("x", [])
+        hr_arr = self._trend_data.get("hr", [])
+        rmssd_arr = self._trend_data.get("rmssd", [])
+        sdnn_arr = self._trend_data.get("sdnn", [])
+        qtc_arr = self._trend_data.get("qtc", [])
+        x = x_arr[idx]
+        hr = float(hr_arr[idx]) if idx < len(hr_arr) and hr_arr[idx] == hr_arr[idx] else None
+        rmssd = float(rmssd_arr[idx]) if idx < len(rmssd_arr) and rmssd_arr[idx] == rmssd_arr[idx] else None
+        sdnn = float(sdnn_arr[idx]) if idx < len(sdnn_arr) and sdnn_arr[idx] == sdnn_arr[idx] else None
+        qtc = float(qtc_arr[idx]) if idx < len(qtc_arr) and qtc_arr[idx] == qtc_arr[idx] else None
+        try:
+            dt = datetime.fromtimestamp(x)
+            time_str = dt.strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OSError):
+            time_str = "—"
+        lines = [time_str]
+        if hr is not None:
+            lines.append(f"HR: {hr:.1f} bpm")
+        if rmssd is not None:
+            lines.append(f"RMSSD: {rmssd:.1f} ms")
+        if sdnn is not None:
+            lines.append(f"SDNN: {sdnn:.1f} ms")
+        if qtc is not None:
+            lines.append(f"QTc: {qtc:.0f} ms")
+        self._hover_label.setText("\n".join(lines))
+        self._hover_label.adjustSize()
+        self._hover_label.move(12, 12)
+        self._hover_label.show()
+
+    def set_active_profile(self, profile: str):
+        self._active_profile = profile
+        idx = self._profile_combo.findText(profile, Qt.MatchFixedString)
+        if idx >= 0:
+            self._profile_combo.setCurrentIndex(idx)
+        self._is_admin = self._profile_store.profile_is_admin(profile)
+        self._profile_combo.setEnabled(self._is_admin)
+
+
 class ProfileManagerDialog(QDialog):
     """Manage user profiles (create, rename, archive/delete, restore)."""
 
@@ -2985,6 +3193,7 @@ class View(QMainWindow):
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
         self.poincare_window = PoincareWindow()
         self.poincare_window.closed.connect(self._on_poincare_window_closed)
+        self._trends_window: TrendsWindow | None = None
         self.ecg_window.installEventFilter(self)
         self.qtc_window.installEventFilter(self)
         self.poincare_window.installEventFilter(self)
@@ -3166,6 +3375,8 @@ class View(QMainWindow):
         self.export_report_button.clicked.connect(self.export_report)
         self.history_button = QPushButton("History")
         self.history_button.clicked.connect(self._open_history)
+        self.trends_button = QPushButton("Show Trends")
+        self.trends_button.clicked.connect(self._open_trends)
         self.profile_manager_button = QPushButton("Profiles")
         self.profile_manager_button.clicked.connect(self._open_profile_manager)
         self.logout_button = QPushButton("Switch User")
@@ -3225,6 +3436,7 @@ class View(QMainWindow):
             "Export report files and choose an output folder (defaults to last used path)."
         )
         self.history_button.setToolTip("Show recent session history for the active user profile.")
+        self.trends_button.setToolTip("Compare-plot session trends over day/week/month/year spans.")
         self.profile_manager_button.setToolTip("Manage user profiles (create, rename, archive, delete).")
         self.annotation.setToolTip("Choose or type a session annotation.")
         self.annotation_button.setToolTip("Add the current annotation to the session log.")
@@ -3378,6 +3590,8 @@ class View(QMainWindow):
         self.export_report_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.history_button.setMaximumWidth(80)
         self.history_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.trends_button.setMaximumWidth(100)
+        self.trends_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.profile_manager_button.setMinimumWidth(70)
         self.profile_manager_button.setMaximumWidth(80)
         self.profile_manager_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
@@ -3443,6 +3657,7 @@ class View(QMainWindow):
         toolbar.addWidget(self.save_recording_button)
         toolbar.addWidget(self.export_report_button)
         toolbar.addWidget(self.history_button)
+        toolbar.addWidget(self.trends_button)
         toolbar.addWidget(self.annotation)
         toolbar.addWidget(self.annotation_button)
 
@@ -3516,6 +3731,8 @@ class View(QMainWindow):
         self._set_debug_mode(debug_pref == "1", announce=False)
         if announce:
             self.show_status(f"Active user: {self._session_profile_id}")
+        if getattr(self, "_trends_window", None) is not None:
+            self._trends_window.set_active_profile(self._session_profile_id)
 
     def _should_show_disclaimer_for_profile(self, profile_id: str) -> bool:
         hide_value = self._profile_store.get_profile_pref(
@@ -3933,6 +4150,7 @@ class View(QMainWindow):
             return
         self.signals.save_recording.emit()
         if self._session_bundle is not None:
+            self._record_session_trend_from_current_state()
             self._profile_store.record_session_finished(
                 session_id=self._session_bundle.session_id,
                 state="abandoned",
@@ -3966,6 +4184,7 @@ class View(QMainWindow):
                 if show_message:
                     self.show_status(f"Final report generation failed: {exc}")
         if self._session_bundle is not None:
+            self._record_session_trend_from_current_state()
             self._profile_store.record_session_finished(
                 session_id=self._session_bundle.session_id,
                 state="finalized",
@@ -4429,6 +4648,64 @@ class View(QMainWindow):
             parent=self,
         )
         dlg.exec()
+
+    def _open_trends(self):
+        if self._trends_window is None:
+            is_admin = self._profile_store.profile_is_admin(self._session_profile_id)
+            self._trends_window = TrendsWindow(
+                self._profile_store,
+                self._session_profile_id,
+                is_admin=is_admin,
+                parent=self,
+            )
+        self._trends_window.set_active_profile(self._session_profile_id)
+        self._trends_window.show()
+        self._trends_window.showNormal()
+        self._trends_window.raise_()
+        self._trends_window.activateWindow()
+
+    def _record_session_trend_from_current_state(self):
+        """Store average session values for trends. Call at end of session (finalize or abandon)."""
+        if self._session_bundle is None or self._session_profile_id is None:
+            return
+        data = self._build_report_data(report_stage="draft")
+        hr_vals = [float(v) for v in (data.get("hr_values") or []) if v is not None]
+        rmssd_vals = [float(v) for v in (data.get("rmssd_values") or []) if v is not None]
+        hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
+        qtc_data = data.get("qtc") or {}
+        avg_hr = float(statistics.mean(hr_vals)) if hr_vals else data.get("last_hr")
+        avg_rmssd = float(statistics.mean(rmssd_vals)) if rmssd_vals else data.get("last_rmssd")
+        avg_sdnn = float(statistics.mean(hrv_vals)) if hrv_vals else None
+        if avg_hr is not None:
+            try:
+                avg_hr = float(avg_hr)
+            except (TypeError, ValueError):
+                avg_hr = None
+        if avg_rmssd is not None:
+            try:
+                avg_rmssd = float(avg_rmssd)
+            except (TypeError, ValueError):
+                avg_rmssd = None
+        qtc_ms = qtc_data.get("session_value_ms") if isinstance(qtc_data, dict) else None
+        if qtc_ms is not None:
+            try:
+                qtc_ms = float(qtc_ms)
+            except (TypeError, ValueError):
+                qtc_ms = None
+        ended = data.get("session_end") or datetime.now()
+        if not isinstance(ended, datetime):
+            ended = datetime.now()
+        self._profile_store.record_session_trend(
+            profile_name=self._session_profile_id,
+            session_id=self._session_bundle.session_id,
+            ended_at=ended,
+            avg_hr=avg_hr,
+            avg_rmssd=avg_rmssd,
+            avg_sdnn=avg_sdnn,
+            qtc_ms=qtc_ms,
+            baseline_hr=self.baseline_hr,
+            baseline_rmssd=self.baseline_rmssd,
+        )
 
     def _open_profile_manager(self):
         if self._session_state == "recording":

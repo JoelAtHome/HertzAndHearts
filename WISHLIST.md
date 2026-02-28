@@ -140,16 +140,16 @@ Top candidates after triage. Keep this list focused and ordered by value.
 - Proposed approach: Implement QTc estimation against the locked presentation contract: Phase 1 fills end-of-session `QTc (session)` only; Phase 2 optionally enables trend output when quality gates pass.
 - Effort: M
 - Impact: Med
-- Status: planned
-- Notes: Populate `qtc` report payload and `metrics.qtc` manifest fields (`session_value_ms`, `summary_method`, `summary_window_seconds`, `status`, `quality`, `trend`) with non-diagnostic messaging and quality-gated unavailable fallback. Data-driven method recommendation is already computed in `qtc.method_suggestion` (`suggested_method`, `reasoning`) and must be surfaced in report/UI so it is not lost.
+- Status: done
+- Notes: Implemented. `qtc` payload and report fields populated; quality-gated unavailable fallback; live QTc trend window; DOCX and one-page PDF reports. Optional follow-ups: surface `method_suggestion` in report/UI; add synthetic/replay tests.
 
 Implementation checklist:
-- [ ] Choose QT correction formula for MVP (default: Bazett) and record formula id in `qtc.summary_method` or adjacent metadata.
-- [ ] Define QT/QRS beat-quality gates (minimum valid beats, noise/artifact rejection, max gap between valid beats).
-- [ ] Implement canonical session summary as median of valid-window QTc values over final 30 seconds (`summary_window_seconds=30`).
-- [ ] Implement unavailable fallback path when quality gates fail (`status=unavailable`, `quality.is_valid=false`, `quality.reason` populated).
-- [ ] Populate report output `QTc (session)` from `qtc.session_value_ms` with non-diagnostic copy.
-- [ ] Keep `qtc.trend.enabled=false` by default and add explicit feature toggle path for Phase 2.
+- [x] Choose QT correction formula for MVP (default: Bazett) and record formula id in `qtc.summary_method` or adjacent metadata.
+- [x] Define QT/QRS beat-quality gates (minimum valid beats, noise/artifact rejection, max gap between valid beats).
+- [x] Implement canonical session summary as median of valid-window QTc values over final 30 seconds (`summary_window_seconds=30`).
+- [x] Implement unavailable fallback path when quality gates fail (`status=unavailable`, `quality.is_valid=false`, `quality.reason` populated).
+- [x] Populate report output `QTc (session)` from `qtc.session_value_ms` with non-diagnostic copy.
+- [x] Keep `qtc.trend.enabled=false` by default and add explicit feature toggle path for Phase 2.
 - [ ] Surface `qtc.method_suggestion` in report/UI (`suggested_method` + plain-language `reasoning`) and include non-diagnostic wording.
 - [ ] Add synthetic test vectors for known QT/RR pairs and expected QTc ranges across low/normal/high heart rates.
 - [ ] Add replay tests on recorded noisy sessions to verify stable summary and proper unavailable behavior.
@@ -162,23 +162,7 @@ Implementation checklist:
 - Status: done
 - Notes: Implemented in profile store schema and Profile Manager details form.
 
-### 7) [F20] Finalize-time quality checklist
-- Problem: Sessions can be finalized with low-quality or incomplete context, which increases interpretation risk.
-- Proposed approach: Add a pre-finalize checklist for data quality, baseline completeness, and report-readiness warnings.
-- Effort: S
-- Impact: High
-- Status: planned
-- Notes: Include explicit confirm/override flow and a persisted checklist outcome in `session_manifest.json`.
-
-### 8) [F01] Live Signal Quality Index (SQI) strip
-- Problem: Users lack a single quantitative confidence indicator across session timeline and outputs.
-- Proposed approach: Compute and display a continuous SQI strip (or score) that reflects confidence in current physiological outputs.
-- Effort: M
-- Impact: High
-- Status: planned
-- Notes: Start with HR/RMSSD/QTc confidence blend and expose component reasons (dropout/noise/instability).
-
-### 9) [F04] Confidence badges on all outputs
+### 7) [F04] Confidence badges on all outputs
 - Problem: Metric labels can appear equally trustworthy even when underlying signal quality differs.
 - Proposed approach: Add High/Moderate/Low confidence badges for key outputs and reports.
 - Effort: M
@@ -186,7 +170,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Depends on SQI and quality-rule definitions; align wording with non-diagnostic guardrails.
 
-### 10) [F12] One-page clinical summary PDF
+### 8) [F12] One-page clinical summary PDF
 - Problem: Current reports are comprehensive but may be too long for fast handoff contexts.
 - Proposed approach: Add a concise one-page summary export focused on key pre/post values, quality, and notable events.
 - Effort: M
@@ -194,15 +178,7 @@ Implementation checklist:
 - Status: done
 - Notes: Implemented as a companion one-page share PDF with layout/formatting polish and one-page guardrails.
 
-### 11) [F15] Versioned analysis metadata
-- Problem: Reproducibility is harder without explicit algorithm/settings version traces per session.
-- Proposed approach: Store analysis version, formula strategy, and settings hash with each session artifact.
-- Effort: S
-- Impact: High
-- Status: planned
-- Notes: Add stable keys to manifest and include in report footer/appendix.
-
-### 12) [F06] Serial session comparison view
+### 9) [F06] Serial session comparison view
 - Problem: It is difficult to compare current session outcomes against recent personal history at a glance.
 - Proposed approach: Add a dedicated serial comparison view for selected sessions with aligned metrics and deltas.
 - Effort: M
@@ -210,7 +186,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Prioritize QTc/RMSSD/HR plus confidence overlays.
 
-### 13) [F13] Session replay mode
+### 10) [F13] Session replay mode
 - Problem: Post-session review lacks synchronized playback for metric changes and annotations.
 - Proposed approach: Add timeline replay for recorded sessions with marker navigation and synchronized chart state.
 - Effort: M
@@ -218,7 +194,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Include variable playback speed and jump-to-annotation controls.
 
-### 14) [F24] Import connectors (common RR/ECG formats)
+### 11) [F24] Import connectors (common RR/ECG formats)
 - Problem: Historical/external recordings are hard to analyze in-app without native import paths.
 - Proposed approach: Add import support for common formats and selected ecosystem exports, then run the same analysis pipeline.
 - Effort: M
@@ -226,7 +202,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Start with CSV/EDF plus one high-value vendor export profile.
 
-### 15) [F08] Tag correlation analytics
+### 12) [F08] Tag correlation analytics
 - Problem: Tagged events are captured but not leveraged to explain metric changes.
 - Proposed approach: Compute and visualize correlations between tags and metric shifts over time.
 - Effort: M
@@ -234,7 +210,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Show association confidence and sample-size caveats to avoid over-interpretation.
 
-### 16) [F09] Circadian heatmap (hour/day patterns)
+### 13) [F09] Circadian heatmap (hour/day patterns)
 - Problem: Time-of-day patterns in stress/recovery signals are not easily visible.
 - Proposed approach: Add heatmap views for metric distributions by hour and day-of-week.
 - Effort: M
@@ -242,7 +218,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Requires enough historical sessions for stable interpretation.
 
-### 17) [F16] Export bundle profiles
+### 14) [F16] Export bundle profiles
 - Problem: Different audiences need different export packages, but current export is one-size-fits-all.
 - Proposed approach: Add export presets (`research`, `clinical review`, `raw`) with deterministic contents.
 - Effort: M
@@ -250,7 +226,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Include manifest-level provenance and file list per bundle.
 
-### 18) [F10] "What changed?" auto-insight card
+### 15) [F10] "What changed?" auto-insight card
 - Problem: Users must manually infer the most important session-to-session changes.
 - Proposed approach: Generate a concise auto-insight card summarizing largest shifts and likely drivers.
 - Effort: L
@@ -258,7 +234,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Keep language cautious and confidence-aware; avoid diagnostic phrasing.
 
-### 19) [F11] Population/peer percentile norms
+### 16) [F11] Population/peer percentile norms
 - Problem: Session interpretation lacks normative context across demographics.
 - Proposed approach: Add optional percentile context by age/sex and quality-filtered cohorts.
 - Effort: L
@@ -266,7 +242,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Requires validated reference datasets and transparent provenance.
 
-### 20) [F31] SpO2/BP integration panel (manual first, device later)
+### 17) [F31] SpO2/BP integration panel (manual first, device later)
 - Problem: Cardiovascular context is incomplete when SpO2/BP is absent from session workflow.
 - Proposed approach: Add manual SpO2/BP entry first, then optional device integrations for auto-capture.
 - Effort: M
@@ -274,7 +250,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Manual-entry phase is feasible now; device phase depends on vendor protocol/API support.
 
-### 21) [F26] EMR-friendly exports (structured PDF/CSV mappings)
+### 18) [F26] EMR-friendly exports (structured PDF/CSV mappings)
 - Problem: Clinical workflow handoff often requires structured artifacts compatible with records systems.
 - Proposed approach: Add structured export profiles and field mappings suitable for EMR ingestion workflows.
 - Effort: L
@@ -282,7 +258,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Full HL7/FHIR/DICOM integration is out of scope for near-term Python desktop delivery.
 
-### 22) [F28] Arrhythmia pre-screen flags (non-diagnostic)
+### 19) [F28] Arrhythmia pre-screen flags (non-diagnostic)
 - Problem: High-risk rhythm patterns may be missed without explicit pre-screening cues.
 - Proposed approach: Add non-diagnostic rhythm suspicion flags (e.g., AF/PVC tendency) with strict quality gating.
 - Effort: L
@@ -290,7 +266,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Requires careful validation and conservative UX to avoid diagnostic overreach; limited by single-lead constraints.
 
-### 23) [PERF] Remove duplicate IBI update wiring
+### 20) [PERF] Remove duplicate IBI update wiring
 - Problem: The app appears to wire `ibi_update -> update_ibis_buffer` in two places, potentially doubling hot-path work and increasing plotting load.
 - Proposed approach: Keep a single authoritative connection for `update_ibis_buffer` and verify beat/update counts remain 1:1.
 - Effort: S
@@ -298,7 +274,7 @@ Implementation checklist:
 - Status: done
 - Notes: Duplicate `ibi_update -> update_ibis_buffer` wiring has been removed; follow-up live-stream validation is still pending to explicitly confirm 1:1 beat/update behavior under normal streaming.
 
-### 24) [PERF] Move QTc compute off the UI thread
+### 21) [PERF] Move QTc compute off the UI thread
 - Problem: QTc extraction/delineation can block the GUI event loop and cause visible stutter during plotting.
 - Proposed approach: Run QTc pipeline in a worker thread/process with latest-only job policy and throttled UI publish.
 - Effort: M
@@ -306,7 +282,7 @@ Implementation checklist:
 - Status: implemented
 - Notes: Shipped single-worker QTc background compute with latest-only request coalescing and stale-result suppression; formulas/thresholds/payload schema were preserved. Optional follow-up: add queue-depth and compute-time telemetry for ongoing verification.
 
-### 25) [PERF] Bound long-session chart series growth
+### 22) [PERF] Bound long-session chart series growth
 - Problem: HR/RMSSD/SDNN chart series can grow without pruning, causing long-session slowdown and memory growth.
 - Proposed approach: Keep only a rolling time window plus small guard buffer in visual series.
 - Effort: M
@@ -314,7 +290,7 @@ Implementation checklist:
 - Status: implemented
 - Notes: Implemented rolling pruning for main HR/RMSSD/SDNN chart series (visible window + guard) with periodic trim checks to keep long-session UI memory and append cost bounded.
 
-### 26) [PERF] Reduce ECG redraw allocation churn
+### 23) [PERF] Reduce ECG redraw allocation churn
 - Problem: Repeated deque-to-array conversion and range work in the redraw loop adds avoidable CPU pressure.
 - Proposed approach: Reuse buffers and minimize per-frame allocations/range resets.
 - Effort: M
@@ -322,7 +298,7 @@ Implementation checklist:
 - Status: implemented
 - Notes: Reduced redraw churn by avoiding redundant numpy conversions for range math and suppressing no-op X/Y range resets in the ECG refresh path.
 
-### 27) [PERF] Refresh profiling harness for current package
+### 24) [PERF] Refresh profiling harness for current package
 - Problem: Existing profiling helpers still reference older package names and are not ready for current hot-path analysis.
 - Proposed approach: Update profiling scripts to current module paths and standardize capture commands.
 - Effort: S
@@ -330,7 +306,7 @@ Implementation checklist:
 - Status: implemented
 - Notes: Updated profiling helpers to current `hnh` package paths and added standardized capture/viewer options (`--output`, `--no-view`) for repeatable hot-path analysis.
 
-### 28) [PERF] Optimize BLE ECG packet decode path
+### 25) [PERF] Optimize BLE ECG packet decode path
 - Problem: Python-loop packet unpacking runs continuously and contributes avoidable CPU overhead.
 - Proposed approach: Vectorize decode logic (or move hot loop to native/compiled path if needed).
 - Effort: M
@@ -338,7 +314,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Keep decoded values bit-for-bit compatible with current output.
 
-### 29) [PERF/UX] Preserve plot history across disconnects with auto system annotations
+### 26) [PERF/UX] Preserve plot history across disconnects with auto system annotations
 - Problem: Clearing plots on disconnect removes useful clinical context; users may not have time to manually annotate connectivity faults.
 - Proposed approach: Keep existing HR/RMSSD/SDNN traces visible, gray plots during disconnect with overlay copy, resume with a blank timeline gap (no deceptive bridge line), and auto-log system annotations for disconnect/reconnect with reason and duration.
 - Effort: M
@@ -346,7 +322,7 @@ Implementation checklist:
 - Status: planned
 - Notes: Persist disconnect intervals/count/total duration in manifest and include generated annotations in CSV/report timelines.
 
-### 30) [F33] EDF export implementation (native + CSV backfill path)
+### 27) [F33] EDF export implementation (native + CSV backfill path)
 - Problem: Session manifests include an EDF artifact path but EDF writing is still marked planned and not produced.
 - Proposed approach: Implement EDF export at finalize-time from captured session streams, plus a follow-on backfill utility that can generate EDF from existing CSV sessions.
 - Effort: M
@@ -354,7 +330,7 @@ Implementation checklist:
 - Status: done
 - Notes: Native finalize-time EDF+ export is implemented with optional toggle, normalized channels, and tests; CSV backfill remains optional future tooling.
 
-### 31) [PERF/UX] Reconnect gap rendering parity (low priority)
+### 28) [PERF/UX] Reconnect gap rendering parity (low priority)
 - Problem: After sensor-induced disconnect/reconnect, traces can resume with wonky continuity; button-driven disconnect/reconnect currently clears all plots, creating inconsistent behavior.
 - Proposed approach: Normalize reconnect handling so both disconnect paths preserve history with an explicit blank gap (or clearly marked disconnect segment) and avoid deceptive line continuity.
 - Effort: M
@@ -416,6 +392,16 @@ Implementation checklist:
 ## Done
 
 Completed items. Include completion date and optional version reference.
+
+### Session trends (Show Trends)
+- Completed: 2026-02-27
+- Outcome: Store avg session values (HR, RMSSD, SDNN, QTc, baselines) per profile at end of each session with date/time. Show Trends button opens a window with compare-plot of past sessions over the last year. Dotted lines with markers; draggable vertical cursor; pixel-based hit so values show when cursor is near a point (zoom-adaptive). Profile selector (admin only); pan/zoom via mouse. Backfill from manifests for existing sessions.
+- Notes: `hnh/profile_store.py` (session_trends table), `hnh/view.py` (TrendsWindow).
+
+### QTc estimation capability
+- Completed: 2026-02-27
+- Outcome: QTc computation and reporting implemented: multiple formulas (Bazett default, Fridericia, Framingham, Hodges), QT/QRS delineation, quality gating, session median over final window, unavailable fallback. Live QTc trend window and button; QTc (session median) and QRS in DOCX and one-page PDF reports with ±15% uncertainty and non-diagnostic wording. Background worker for compute; `method_suggestion` computed (optional: surface in report/UI). Synthetic/replay test coverage optional follow-up.
+- Notes: See `hnh/qtc.py`, `hnh/report.py`, `hnh/view.py` (QtcWindow).
 
 ### Session user selection flow
 - Completed: 2026-02-24

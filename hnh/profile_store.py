@@ -6,16 +6,26 @@ import secrets
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 
 from hnh.session_artifacts import SessionBundle
+
+
+def _float_or_none(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 class ProfileStore:
     """SQLite-backed storage for profiles, per-user prefs, and session index."""
     _LEGACY_MIGRATION_KEY = "legacy_session_migration_v1"
     _DEFAULT_TO_ADMIN_MIGRATION_KEY = "default_to_admin_migration_v1"
+    _TRENDS_BACKFILL_KEY = "session_trends_backfill_v1"
     _LEGACY_PROFILE_NAME = "Legacy User"
 
     def __init__(self, root: Path):
@@ -25,6 +35,7 @@ class ProfileStore:
         self._initialize()
         self.migrate_legacy_sessions()
         self.migrate_default_to_admin()
+        self._backfill_session_trends()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
@@ -105,6 +116,21 @@ class ProfileStore:
                     state TEXT NOT NULL,
                     session_dir TEXT NOT NULL,
                     csv_path TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS session_trends (
+                    session_id TEXT PRIMARY KEY,
+                    profile_name TEXT NOT NULL,
+                    ended_at TEXT NOT NULL,
+                    avg_hr REAL,
+                    avg_rmssd REAL,
+                    avg_sdnn REAL,
+                    qtc_ms REAL,
+                    baseline_hr REAL,
+                    baseline_rmssd REAL
                 )
                 """
             )
@@ -742,6 +768,149 @@ class ProfileStore:
                 """,
                 (now, state, session_id),
             )
+
+    def record_session_trend(
+        self,
+        profile_name: str,
+        session_id: str,
+        ended_at: datetime | str,
+        *,
+        avg_hr: float | None = None,
+        avg_rmssd: float | None = None,
+        avg_sdnn: float | None = None,
+        qtc_ms: float | None = None,
+        baseline_hr: float | None = None,
+        baseline_rmssd: float | None = None,
+    ) -> None:
+        """Store average session metrics for trends comparison."""
+        profile = self._normalize_profile(profile_name)
+        ended = ended_at.isoformat() if isinstance(ended_at, datetime) else str(ended_at)
+        with self._db() as conn:
+            conn.execute(
+                """
+                INSERT INTO session_trends (
+                    session_id, profile_name, ended_at,
+                    avg_hr, avg_rmssd, avg_sdnn, qtc_ms,
+                    baseline_hr, baseline_rmssd
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_id) DO UPDATE SET
+                    profile_name = excluded.profile_name,
+                    ended_at = excluded.ended_at,
+                    avg_hr = excluded.avg_hr,
+                    avg_rmssd = excluded.avg_rmssd,
+                    avg_sdnn = excluded.avg_sdnn,
+                    qtc_ms = excluded.qtc_ms,
+                    baseline_hr = excluded.baseline_hr,
+                    baseline_rmssd = excluded.baseline_rmssd
+                """,
+                (
+                    session_id,
+                    profile,
+                    ended,
+                    avg_hr,
+                    avg_rmssd,
+                    avg_sdnn,
+                    qtc_ms,
+                    baseline_hr,
+                    baseline_rmssd,
+                ),
+            )
+
+    def list_session_trends(
+        self,
+        profile_name: str,
+        *,
+        span: str = "month",
+    ) -> list[dict[str, str | float | None]]:
+        """List session trend rows for a profile within the given time span."""
+        profile = self._normalize_profile(profile_name)
+        now = datetime.now()
+        if span == "day":
+            since = now - timedelta(days=1)
+        elif span == "week":
+            since = now - timedelta(days=7)
+        elif span == "month":
+            since = now - timedelta(days=30)
+        elif span == "year":
+            since = now - timedelta(days=365)
+        else:
+            since = now - timedelta(days=30)
+        since_iso = since.isoformat()
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, profile_name, ended_at,
+                       avg_hr, avg_rmssd, avg_sdnn, qtc_ms,
+                       baseline_hr, baseline_rmssd
+                FROM session_trends
+                WHERE profile_name = ? COLLATE NOCASE AND ended_at >= ?
+                ORDER BY ended_at ASC
+                """,
+                (profile, since_iso),
+            ).fetchall()
+        out: list[dict[str, str | float | None]] = []
+        for row in rows:
+            out.append(
+                {
+                    "session_id": str(row["session_id"]),
+                    "profile_name": str(row["profile_name"]),
+                    "ended_at": str(row["ended_at"]),
+                    "avg_hr": float(row["avg_hr"]) if row["avg_hr"] is not None else None,
+                    "avg_rmssd": float(row["avg_rmssd"]) if row["avg_rmssd"] is not None else None,
+                    "avg_sdnn": float(row["avg_sdnn"]) if row["avg_sdnn"] is not None else None,
+                    "qtc_ms": float(row["qtc_ms"]) if row["qtc_ms"] is not None else None,
+                    "baseline_hr": float(row["baseline_hr"]) if row["baseline_hr"] is not None else None,
+                    "baseline_rmssd": float(row["baseline_rmssd"]) if row["baseline_rmssd"] is not None else None,
+                }
+            )
+        return out
+
+    def _backfill_session_trends(self) -> int:
+        """One-time backfill of session_trends from existing manifests."""
+        if self._get_app_state(self._TRENDS_BACKFILL_KEY) == "done":
+            return 0
+        migrated = 0
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, profile_name, ended_at, session_dir
+                FROM session_history
+                WHERE ended_at IS NOT NULL
+                ORDER BY ended_at ASC
+                """
+            ).fetchall()
+        for row in rows:
+            session_dir = Path(str(row["session_dir"]))
+            manifest_path = session_dir / "session_manifest.json"
+            if not manifest_path.exists():
+                continue
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            metrics = payload.get("metrics") or {}
+            qtc_data = metrics.get("qtc") if isinstance(metrics.get("qtc"), dict) else {}
+            qtc_ms = qtc_data.get("session_value_ms")
+            if qtc_ms is not None:
+                try:
+                    qtc_ms = float(qtc_ms)
+                except (TypeError, ValueError):
+                    qtc_ms = None
+            self.record_session_trend(
+                profile_name=str(row["profile_name"]),
+                session_id=str(row["session_id"]),
+                ended_at=str(row["ended_at"]),
+                avg_hr=_float_or_none(metrics.get("last_hr")),
+                avg_rmssd=_float_or_none(metrics.get("last_rmssd")),
+                avg_sdnn=None,
+                qtc_ms=qtc_ms,
+                baseline_hr=_float_or_none(metrics.get("baseline_hr")),
+                baseline_rmssd=_float_or_none(metrics.get("baseline_rmssd")),
+            )
+            migrated += 1
+        self._set_app_state(self._TRENDS_BACKFILL_KEY, "done")
+        return migrated
 
     def list_sessions(
         self,
