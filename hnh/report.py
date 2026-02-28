@@ -12,7 +12,11 @@ from typing import Any
 
 import numpy as np
 
-from hnh.config import ECG_QRS_UNCERTAINTY_PCT, ECG_QTc_UNCERTAINTY_PCT
+from hnh.config import (
+    ECG_QRS_UNCERTAINTY_PCT,
+    ECG_QTc_UNCERTAINTY_PCT,
+    SETTLING_DURATION,
+)
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
@@ -268,6 +272,33 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
     hr_time_seconds = [float(v) for v in (data.get("hr_time_seconds") or []) if v is not None]
     rmssd_time_seconds = [float(v) for v in (data.get("rmssd_time_seconds") or []) if v is not None]
     hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
+
+    # Truncate trend data to skip initial settling transient (~SETTLING_DURATION)
+    # so plots don't falsely show near-zero starting values.
+    truncate_sec = float(data.get("settling_duration_seconds", SETTLING_DURATION))
+
+    def _truncate_settling(
+        values: list[float], times_sec: list[float], min_sec: float
+    ) -> tuple[list[float], list[float]]:
+        if not values or not times_sec or len(values) != len(times_sec):
+            return values, times_sec
+        kept = [(v, t) for v, t in zip(values, times_sec) if t >= min_sec]
+        if not kept:
+            return values[-1:], times_sec[-1:]  # keep at least one point
+        vs, ts = zip(*kept)
+        return list(vs), list(ts)
+
+    if truncate_sec > 0:
+        hr_values, hr_time_seconds = _truncate_settling(
+            hr_values, hr_time_seconds, truncate_sec
+        )
+        rmssd_values, rmssd_time_seconds = _truncate_settling(
+            rmssd_values, rmssd_time_seconds, truncate_sec
+        )
+        hrv_values, hrv_time_seconds = _truncate_settling(
+            hrv_values, hrv_time_seconds, truncate_sec
+        )
+
     ecg_values = [float(v) for v in (data.get("ecg_samples") or []) if v is not None]
     ecg_rate = int(data.get("ecg_sample_rate_hz") or 130)
 
@@ -312,11 +343,11 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
         if hrv_values:
             x_hrv = _time_axis_minutes(len(hrv_values), hrv_time_seconds)
             ax_hrv.plot(x_hrv, hrv_values, color="black", linewidth=1.0)
-            ax_hrv.set_ylabel("HRV (SDNN) (ms)", fontsize=8)
+            ax_hrv.set_ylabel("HRV·SDNN (ms)", fontsize=8)
             ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
             ax_hrv.grid(alpha=0.25)
         else:
-            ax_hrv.text(0.02, 0.5, "No HRV trend data", transform=ax_hrv.transAxes, fontsize=8)
+            ax_hrv.text(0.02, 0.5, "No HRV·SDNN trend data", transform=ax_hrv.transAxes, fontsize=8)
             ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
         for axis in (ax_hr, ax_rmssd, ax_hrv):
             axis.tick_params(axis="both", labelsize=7)
@@ -434,12 +465,15 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     if len(hrv_vals) >= 2 and hrv_vals[0] > 0:
         pct = ((hrv_vals[-1] - hrv_vals[0]) / hrv_vals[0]) * 100
         delta_hrv = f"{pct:+.1f}%"
+    stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
+    lf_hf_avg = f"{sum(stress_vals)/len(stress_vals):.2f}" if stress_vals else "--"
     metrics_rows = [
         ["Metric", "Value"],
         ["HR (baseline/latest)", f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"],
         ["RMSSD (baseline/latest)", f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"],
-        ["HRV (session avg / \u0394)", f"{hrv_avg} / {delta_hrv}"],
-        ["QTc (session average)", _fmt_qtc_session_value(qtc_data)],
+        ["HRV·SDNN (session avg / \u0394)", f"{hrv_avg} / {delta_hrv}"],
+        ["LF/HF (session avg)", lf_hf_avg],
+        ["QTc (session median)", _fmt_qtc_session_value(qtc_data)],
         ["QRS (session average)", _fmt_qrs_session_value(qtc_data)],
     ]
     metrics_table = Table(
@@ -653,8 +687,8 @@ def generate_session_report(path: str, data: dict) -> None:
         ("Total Duration", f"{duration_min} minutes"),
     ], label_width_in=1.92, value_width_in=3.04)
 
-    # Section 2: Pre-Session Baselines
-    _add_heading(doc, "Pre-Session Baselines")
+    # Section 2: Pre-Session Baseline Averages
+    _add_heading(doc, "Pre-Session Baseline Averages")
     _add_key_value_table(doc, [
         ("Heart Rate", _fmt(data.get("baseline_hr"), "bpm", 0)),
         ("RMSSD", _fmt(data.get("baseline_rmssd"), "ms")),
@@ -662,18 +696,17 @@ def generate_session_report(path: str, data: dict) -> None:
 
     # Section 3: Post-Session Readings
     _add_heading(doc, "Post-Session Readings")
-    pre_rmssd = data.get("baseline_rmssd")
-    post_rmssd = data.get("last_rmssd")
     qtc_data = data.get("qtc", {}) or {}
-    delta_rmssd = "--"
-    if pre_rmssd is not None and post_rmssd is not None and pre_rmssd > 0:
-        pct = ((post_rmssd - pre_rmssd) / pre_rmssd) * 100
-        delta_rmssd = f"{pct:+.1f}%"
+    hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
+    last_hrv = hrv_vals[-1] if hrv_vals else None
+    stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
+    last_lf_hf = stress_vals[-1] if stress_vals else None
     _add_key_value_table(doc, [
-        ("Heart Rate", _fmt(data.get("last_hr"), "bpm", 0)),
-        ("RMSSD", _fmt(post_rmssd, "ms")),
-        ("\u0394 RMSSD from Baseline", delta_rmssd),
-        ("QTc (session average)", _fmt_qtc_session_value(qtc_data)),
+        ("Heart Rate (latest)", _fmt(data.get("last_hr"), "bpm", 0)),
+        ("RMSSD (latest)", _fmt(data.get("last_rmssd"), "ms")),
+        ("HRV·SDNN (latest)", _fmt(last_hrv, "ms")),
+        ("LF/HF (latest)", _fmt(last_lf_hf, "", 2) if last_lf_hf is not None else _fmt(None, "", 0)),
+        ("QTc (session median)", _fmt_qtc_session_value(qtc_data)),
         ("QRS (session average)", _fmt_qrs_session_value(qtc_data)),
     ], label_width_in=1.92, value_width_in=3.04)
     qtc_trend = qtc_data.get("trend", {})
@@ -697,17 +730,26 @@ def generate_session_report(path: str, data: dict) -> None:
             run.font.size = Pt(9)
             run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
 
-    # Section 4: Intra-Session Statistics
-    _add_heading(doc, "Intra-Session Statistics")
+    # Section 4: Session Statistics
+    _add_heading(doc, "Session Statistics")
     hr_vals = data.get("hr_values", [])
     rmssd_vals = data.get("rmssd_values", [])
     stats_rows = []
+    baseline_hr = _to_float(data.get("baseline_hr"))
+    baseline_rmssd = _to_float(data.get("baseline_rmssd"))
+    last_hr_val = _to_float(data.get("last_hr"))
+    last_rmssd_val = _to_float(data.get("last_rmssd"))
     if hr_vals:
         stats_rows.extend([
             ("HR Min", f"{min(hr_vals):.0f} bpm"),
             ("HR Max", f"{max(hr_vals):.0f} bpm"),
             ("HR Avg", f"{sum(hr_vals)/len(hr_vals):.0f} bpm"),
         ])
+        delta_hr = "--"
+        if baseline_hr is not None and last_hr_val is not None and baseline_hr > 0:
+            pct = ((last_hr_val - baseline_hr) / baseline_hr) * 100
+            delta_hr = f"{pct:+.1f}%"
+        stats_rows.append(("\u0394 HR from Baseline", delta_hr))
     else:
         stats_rows.append(("Heart Rate", "No data recorded"))
     if rmssd_vals:
@@ -716,23 +758,37 @@ def generate_session_report(path: str, data: dict) -> None:
             ("RMSSD Max", f"{max(rmssd_vals):.1f} ms"),
             ("RMSSD Avg", f"{sum(rmssd_vals)/len(rmssd_vals):.1f} ms"),
         ])
+        delta_rmssd = "--"
+        if baseline_rmssd is not None and last_rmssd_val is not None and baseline_rmssd > 0:
+            pct = ((last_rmssd_val - baseline_rmssd) / baseline_rmssd) * 100
+            delta_rmssd = f"{pct:+.1f}%"
+        stats_rows.append(("\u0394 RMSSD from Baseline", delta_rmssd))
     else:
         stats_rows.append(("RMSSD", "No data recorded"))
     hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
     if hrv_vals:
         hrv_avg = sum(hrv_vals) / len(hrv_vals)
         stats_rows.extend([
-            ("HRV (SDNN) Min", f"{min(hrv_vals):.1f} ms"),
-            ("HRV (SDNN) Max", f"{max(hrv_vals):.1f} ms"),
-            ("HRV (SDNN) Avg", f"{hrv_avg:.1f} ms"),
+            ("HRV·SDNN Min", f"{min(hrv_vals):.1f} ms"),
+            ("HRV·SDNN Max", f"{max(hrv_vals):.1f} ms"),
+            ("HRV·SDNN Avg", f"{hrv_avg:.1f} ms"),
         ])
         delta_hrv = "--"
         if len(hrv_vals) >= 2 and hrv_vals[0] > 0:
             pct = ((hrv_vals[-1] - hrv_vals[0]) / hrv_vals[0]) * 100
             delta_hrv = f"{pct:+.1f}%"
-        stats_rows.append(("\u0394 HRV (first\u2192last)", delta_hrv))
+        stats_rows.append(("\u0394 HRV·SDNN (first\u2192last)", delta_hrv))
     else:
-        stats_rows.append(("HRV (SDNN)", "No data recorded"))
+        stats_rows.append(("HRV·SDNN", "No data recorded"))
+    stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
+    if stress_vals:
+        stats_rows.extend([
+            ("LF/HF Min", f"{min(stress_vals):.2f}"),
+            ("LF/HF Max", f"{max(stress_vals):.2f}"),
+            ("LF/HF Avg", f"{sum(stress_vals)/len(stress_vals):.2f}"),
+        ])
+    else:
+        stats_rows.append(("LF/HF", "No data recorded"))
     _add_key_value_table(doc, stats_rows, label_width_in=1.92, value_width_in=3.04)
 
     # Section 5: Session Visuals
@@ -753,7 +809,7 @@ def generate_session_report(path: str, data: dict) -> None:
         if trend_path and trend_path.exists():
             _add_image_with_caption(
                 doc,
-                "HR, RMSSD and HRV trend",
+                "HR, RMSSD and HRV·SDNN trend",
                 trend_path,
                 keep_block=True,
             )

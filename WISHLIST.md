@@ -481,6 +481,11 @@ Completed items. Include completion date and optional version reference.
 - Outcome: Report button "Report to Now" during recording; report stage labels "Data collected so far"/"Final" with snapshot disclaimer; QRS session average in reports; QTc/QRS ±15% measurement uncertainty in reports and UI; ECG strip duplicate title removed; trend plot lines thinner; Profile Manager date format matches reports; age label no longer grayed out.
 - Notes: ECG_QTc_UNCERTAINTY_PCT and ECG_QRS_UNCERTAINTY_PCT in config; format_datetime_for_display shared for reports and profiles.
 
+### Session closure and report clarity (2026-02-27)
+- Completed: 2026-02-27
+- Outcome: Explicit Stop button for ending sessions (saves data without report prompt); Post-Session Readings limited to latest values (HR, RMSSD, HRV·SDNN, LF/HF, QTc, QRS); Session Statistics renamed from Intra-Session and holds all deltas (Δ HR/RMSSD from Baseline, Δ HRV·SDNN first→last); Pre-Session Baselines retitled to Pre-Session Baseline Averages; HRV·SDNN labeling (middle dot) to avoid fraction ambiguity; QTc labeled as session median; trend plots truncated to skip initial settling period; LF/HF added to reports (Post-Session latest, Session Statistics Min/Max/Avg, one-page PDF session avg).
+- Notes: Stop button enables clean session closure without full finalize; HRV·SDNN replaces HRV (SDNN) and HRV/SDNN; stress_ratio_values recorded during sessions for LF/HF reporting.
+
 ### Profile password login and user roles (2026-02-27)
 - Completed: 2026-02-27
 - Outcome: Optional per-profile password verification at login; user roles (admin vs user) with Profile Manager access control; Admin profile as default (replacing Default) with admin rights; normal users restricted to viewing/editing own profile only; Role column in Profile Manager table; Set/Reset Password in Profile Manager.
