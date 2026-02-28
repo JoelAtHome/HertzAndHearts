@@ -434,7 +434,7 @@ Completed items. Include completion date and optional version reference.
 ### Multiple user profiles and per-user history
 - Completed: 2026-02-24
 - Outcome: Profile CRUD (create/rename/archive/restore/delete), one-time legacy migration indexing, profile-scoped history query APIs, and read-only in-app history viewer.
-- Notes: Profile Manager blocked during recording; Switch User allowed anytime. Profile details auto-save when switching profiles in Profile Manager.
+- Notes: Profile Manager blocked during recording; Switch User allowed anytime. Profile details auto-save when switching profiles in Profile Manager. Extended 2026-02-27 with password login, user roles (admin/user), and Role column.
 
 ### Profile demographics metadata (age, gender, notes)
 - Completed: 2026-02-24
@@ -480,6 +480,11 @@ Completed items. Include completion date and optional version reference.
 - Completed: 2026-02-27
 - Outcome: Report button "Report to Now" during recording; report stage labels "Data collected so far"/"Final" with snapshot disclaimer; QRS session average in reports; QTc/QRS ±15% measurement uncertainty in reports and UI; ECG strip duplicate title removed; trend plot lines thinner; Profile Manager date format matches reports; age label no longer grayed out.
 - Notes: ECG_QTc_UNCERTAINTY_PCT and ECG_QRS_UNCERTAINTY_PCT in config; format_datetime_for_display shared for reports and profiles.
+
+### Profile password login and user roles (2026-02-27)
+- Completed: 2026-02-27
+- Outcome: Optional per-profile password verification at login; user roles (admin vs user) with Profile Manager access control; Admin profile as default (replacing Default) with admin rights; normal users restricted to viewing/editing own profile only; Role column in Profile Manager table; Set/Reset Password in Profile Manager.
+- Notes: New profiles default to user role; Admin profile gets admin role; HNH_SKIP_PASSWORD env var for lockout recovery; `docs/password_and_lockout.md` documents recovery and password flows.
 
 ## Triage Workflow
 
