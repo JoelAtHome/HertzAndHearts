@@ -17,7 +17,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtCore import (
     Qt, QThread, Signal, Slot, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
-    QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
+    QRect, QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
     QEventLoop, QUrl, QDate,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
@@ -3270,6 +3270,7 @@ class View(QMainWindow):
     def __init__(self, model: Model):
         super().__init__()
         self._maximized_once = False
+        self._cached_frame_inset: QMargins | None = None
 
         # 1. TRACKERS & STATE
         self.settings = Settings()
@@ -3437,14 +3438,14 @@ class View(QMainWindow):
         self.hrv_widget.plot.legend().setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
         self.sdnn_series = QLineSeries()
-        self.sdnn_series.setName("HRV/SDNN (ms)")
+        self.sdnn_series.setName("HRV(SDNN)")
         sdnn_color = QColor(0, 130, 255)
         pen = QPen(sdnn_color)
         pen.setWidth(2)
         self.sdnn_series.setPen(pen)
 
         self.hrv_y_axis_right = QValueAxis()
-        self.hrv_y_axis_right.setTitleText("HRV/SDNN (ms)")
+        self.hrv_y_axis_right.setTitleText("HRV(SDNN)")
         self.hrv_y_axis_right.setTitleBrush(QBrush(sdnn_color))
         self.hrv_y_axis_right.setLabelsColor(sdnn_color)
         self.hrv_y_axis_right.setRange(0, 50)
@@ -3596,6 +3597,10 @@ class View(QMainWindow):
         self._refresh_annotation_list()
         self.annotation_button = QPushButton("Annotate")
         self.annotation_button.clicked.connect(self.emit_annotation)
+        self.annotation.activated.connect(self.emit_annotation)
+        self.annotation.installEventFilter(self)
+        if self.annotation.lineEdit() is not None:
+            self.annotation.lineEdit().installEventFilter(self)
         self._apply_freeze_button_states()
 
         # Settings button
@@ -3892,14 +3897,14 @@ class View(QMainWindow):
         if selected is not None and selected.casefold() != self._session_profile_id.casefold():
             self._set_active_profile(selected, announce=True)
 
-    def _prompt_for_session_profile(self) -> str | None:
+    def _prompt_for_session_profile(self, *, use_parent: bool = True) -> str | None:
         profiles = self._profile_store.list_profiles()
         last_profile = self._profile_store.get_last_active_profile()
         dlg = ProfileSelectionDialog(
             profiles=profiles,
             last_profile=last_profile,
             profile_store=self._profile_store,
-            parent=self,
+            parent=self if use_parent else None,
         )
         if dlg.exec() != QDialog.Accepted:
             return None
@@ -3974,7 +3979,7 @@ class View(QMainWindow):
         return True
 
     def _run_startup_flow(self):
-        selected_profile = self._prompt_for_session_profile()
+        selected_profile = self._prompt_for_session_profile(use_parent=False)
         if selected_profile is None:
             self.close()
             return
@@ -3986,15 +3991,73 @@ class View(QMainWindow):
         else:
             self._disclaimer_acknowledged_at = None
             self._disclaimer_ack_mode = "profile_skip_preference"
-        # Startup modal dialogs can steal/restore window state on some platforms;
-        # re-assert maximized state once startup flow is complete.
-        QTimer.singleShot(0, self.showMaximized)
+        # Show main window with correct geometry (it was never shown, avoiding
+        # Windows parent-window corruption when a modal with parent closes).
+        self._show_main_window_fullscreen()
+
+    def _show_maximized_fit(self):
+        """Maximize and constrain to available screen (avoids Windows cutoff)."""
+        self.showMaximized()
+        QTimer.singleShot(60, self._measure_and_apply_fit_geometry)
+
+    def _show_main_window_fullscreen(self):
+        """Show main window filling available screen (used after startup flow)."""
+        screen = self.screen()
+        if screen is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+        if screen is not None:
+            avail = screen.availableGeometry()
+            inset = self._window_frame_inset()
+            geom = QRect(
+                avail.x() + inset.left(),
+                avail.y() + inset.top(),
+                avail.width() - inset.left() - inset.right(),
+                avail.height() - inset.top() - inset.bottom(),
+            )
+            self.setGeometry(geom)
+        self._maximized_once = True
+        self.show()
+        QTimer.singleShot(60, self._measure_and_apply_fit_geometry)
+        QTimer.singleShot(350, self.showMaximized)
+
+    def _window_frame_inset(self) -> QMargins:
+        """Window frame size; uses cached measurement when available."""
+        if self._cached_frame_inset is not None:
+            return self._cached_frame_inset
+        return QMargins(10, 40, 10, 10)
+
+    def _measure_and_apply_fit_geometry(self):
+        """Measure actual window frame and apply geometry that fits the screen."""
+        if not self.isVisible():
+            return
+        fg = self.frameGeometry()
+        g = self.geometry()
+        left = max(0, g.left() - fg.left())
+        top = max(0, g.top() - fg.top())
+        right = max(0, fg.right() - g.right())
+        bottom = max(0, fg.bottom() - g.bottom())
+        self._cached_frame_inset = QMargins(left, top, right, bottom)
+
+        screen = self.screen()
+        if screen is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+        if screen is not None:
+            avail = screen.availableGeometry()
+            geom = QRect(
+                avail.x() + left,
+                avail.y() + top,
+                avail.width() - left - right,
+                avail.height() - top - bottom,
+            )
+            self.setGeometry(geom)
 
     def showEvent(self, event):
         super().showEvent(event)
         if not self._maximized_once:
             self._maximized_once = True
-            QTimer.singleShot(0, self.showMaximized)
+            QTimer.singleShot(0, self._show_maximized_fit)
 
     def closeEvent(self, event):
         self._suppress_comm_error_popups = True
@@ -4745,6 +4808,10 @@ class View(QMainWindow):
         return lbl
 
     def eventFilter(self, obj, event):
+        if obj in (self.annotation, self.annotation.lineEdit()) and event.type() == QEvent.Type.KeyPress:
+            if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
+                QTimer.singleShot(0, self.emit_annotation)
+                return False
         if obj in {self.ecg_window, self.qtc_window, self.poincare_window, self.psd_window} and event.type() in {
             QEvent.Type.WindowStateChange,
             QEvent.Type.Show,

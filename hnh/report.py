@@ -25,10 +25,13 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
 
 
-def _add_heading(doc: Document, text: str, level: int = 2):
+def _add_heading(doc: Document, text: str, level: int = 2, *, compact: bool = False):
     h = doc.add_heading(text, level=level)
     for run in h.runs:
         run.font.color.rgb = RGBColor(0x1A, 0x52, 0x76)
+    if compact:
+        h.paragraph_format.space_before = Pt(4)
+        h.paragraph_format.space_after = Pt(2)
     return h
 
 
@@ -146,6 +149,7 @@ def _add_key_value_table(
     *,
     label_width_in: float = 2.6,
     value_width_in: float = 4.1,
+    compact: bool = False,
 ):
     """Two-column table: label | value."""
     table = doc.add_table(rows=len(rows), cols=2)
@@ -154,6 +158,7 @@ def _add_key_value_table(
     table.autofit = False
     label_w = Inches(label_width_in)
     value_w = Inches(value_width_in)
+    font_pt = Pt(9) if compact else None
     for i, (label, value) in enumerate(rows):
         left = table.rows[i].cells[0]
         right = table.rows[i].cells[1]
@@ -162,10 +167,20 @@ def _add_key_value_table(
         left.text = label
         cell = right
         cell.text = value
+        for p in left.paragraphs:
+            for run in p.runs:
+                if font_pt:
+                    run.font.size = font_pt
         for p in cell.paragraphs:
             for run in p.runs:
                 run.bold = True
-    doc.add_paragraph("")
+                if font_pt:
+                    run.font.size = font_pt
+    if compact:
+        spacer = doc.add_paragraph()
+        spacer.paragraph_format.space_after = Pt(2)
+    else:
+        doc.add_paragraph("")
 
 
 def _fmt(val, unit: str = "", precision: int = 1) -> str:
@@ -343,11 +358,11 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
         if hrv_values:
             x_hrv = _time_axis_minutes(len(hrv_values), hrv_time_seconds)
             ax_hrv.plot(x_hrv, hrv_values, color="black", linewidth=1.0)
-            ax_hrv.set_ylabel("HRV·SDNN (ms)", fontsize=8)
+            ax_hrv.set_ylabel("HRV(SDNN) (ms)", fontsize=8)
             ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
             ax_hrv.grid(alpha=0.25)
         else:
-            ax_hrv.text(0.02, 0.5, "No HRV·SDNN trend data", transform=ax_hrv.transAxes, fontsize=8)
+            ax_hrv.text(0.02, 0.5, "No HRV(SDNN) trend data", transform=ax_hrv.transAxes, fontsize=8)
             ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
         for axis in (ax_hr, ax_rmssd, ax_hrv):
             axis.tick_params(axis="both", labelsize=7)
@@ -471,7 +486,7 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
         ["Metric", "Value"],
         ["HR (baseline/latest)", f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"],
         ["RMSSD (baseline/latest)", f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"],
-        ["HRV·SDNN (session avg / \u0394)", f"{hrv_avg} / {delta_hrv}"],
+        ["HRV(SDNN) (session avg / \u0394)", f"{hrv_avg} / {delta_hrv}"],
         ["LF/HF (session avg)", lf_hf_avg],
         ["QTc (session median)", _fmt_qtc_session_value(qtc_data)],
         ["QRS (session average)", _fmt_qrs_session_value(qtc_data)],
@@ -639,7 +654,7 @@ def generate_session_report(path: str, data: dict) -> None:
         session_start (datetime), session_end (datetime),
         csv_path,
         annotations  -- list of (timestamp_str, text)
-        hr_values, rmssd_values  -- lists of floats for stats
+        hr_values, rmssd_values, snr_values  -- lists of floats for stats
         notes  -- str from user
         disclaimer -- dict with warning/text/source/hash/ack metadata
     """
@@ -647,6 +662,9 @@ def generate_session_report(path: str, data: dict) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     visuals = _build_visual_images(data, output.parent)
     doc = Document()
+    section = doc.sections[0]
+    section.top_margin = Inches(0.65)
+    section.bottom_margin = Inches(0.65)
 
     # Title
     profile_name = str(data.get("profile_id", "--")).strip() or "Unknown"
@@ -662,6 +680,7 @@ def generate_session_report(path: str, data: dict) -> None:
     title_run.font.size = Pt(title_size)
     title_run.font.bold = True
     title_run.font.color.rgb = RGBColor(0x1A, 0x52, 0x76)
+    title.paragraph_format.space_after = Pt(2)
 
     now = data.get("session_end") or datetime.now()
     start = data.get("session_start")
@@ -671,9 +690,10 @@ def generate_session_report(path: str, data: dict) -> None:
 
     report_date = doc.add_paragraph(f"Report generated: {format_datetime_for_display(now)}")
     report_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    report_date.paragraph_format.space_after = Pt(4)
 
     # Section 1: Session Overview
-    _add_heading(doc, "Session Overview")
+    _add_heading(doc, "Session Overview", compact=True)
     session_type = data.get("session_type", "General Monitoring")
     report_stage = data.get("report_stage", "final").strip().lower()
     report_label = "Data collected so far" if report_stage == "draft" else "Final"
@@ -685,17 +705,17 @@ def generate_session_report(path: str, data: dict) -> None:
         ("Session Type", session_type),
         ("Report Stage", report_label),
         ("Total Duration", f"{duration_min} minutes"),
-    ], label_width_in=1.92, value_width_in=3.04)
+    ], label_width_in=1.92, value_width_in=3.04, compact=True)
 
     # Section 2: Pre-Session Baseline Averages
-    _add_heading(doc, "Pre-Session Baseline Averages")
+    _add_heading(doc, "Pre-Session Baseline Averages", compact=True)
     _add_key_value_table(doc, [
         ("Heart Rate", _fmt(data.get("baseline_hr"), "bpm", 0)),
         ("RMSSD", _fmt(data.get("baseline_rmssd"), "ms")),
-    ], label_width_in=1.92, value_width_in=3.04)
+    ], label_width_in=1.92, value_width_in=3.04, compact=True)
 
     # Section 3: Post-Session Readings
-    _add_heading(doc, "Post-Session Readings")
+    _add_heading(doc, "Post-Session Readings", compact=True)
     qtc_data = data.get("qtc", {}) or {}
     hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
     last_hrv = hrv_vals[-1] if hrv_vals else None
@@ -704,18 +724,18 @@ def generate_session_report(path: str, data: dict) -> None:
     _add_key_value_table(doc, [
         ("Heart Rate (latest)", _fmt(data.get("last_hr"), "bpm", 0)),
         ("RMSSD (latest)", _fmt(data.get("last_rmssd"), "ms")),
-        ("HRV·SDNN (latest)", _fmt(last_hrv, "ms")),
+        ("HRV(SDNN) (latest)", _fmt(last_hrv, "ms")),
         ("LF/HF (latest)", _fmt(last_lf_hf, "", 2) if last_lf_hf is not None else _fmt(None, "", 0)),
         ("QTc (session median)", _fmt_qtc_session_value(qtc_data)),
         ("QRS (session average)", _fmt_qrs_session_value(qtc_data)),
-    ], label_width_in=1.92, value_width_in=3.04)
+    ], label_width_in=1.92, value_width_in=3.04, compact=True)
     qtc_trend = qtc_data.get("trend", {})
     if qtc_trend.get("enabled"):
         trend_label = qtc_trend.get(
             "label",
             "For trend context only; clinical interpretation requires review.",
         )
-        _add_key_value_table(doc, [("QTc Trend Note", trend_label)])
+        _add_key_value_table(doc, [("QTc Trend Note", trend_label)], compact=True)
 
     # ECG-derived metrics interpretative note (when QTc or QRS is present)
     has_qtc = qtc_data.get("session_value_ms") is not None
@@ -726,12 +746,13 @@ def generate_session_report(path: str, data: dict) -> None:
             f"and may vary by approximately ±{ECG_QTc_UNCERTAINTY_PCT}% from reference measurements. "
             "For trend context only; clinical interpretation requires professional review."
         )
+        ecg_note.paragraph_format.space_after = Pt(4)
         for run in ecg_note.runs:
-            run.font.size = Pt(9)
+            run.font.size = Pt(8)
             run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
 
     # Section 4: Session Statistics
-    _add_heading(doc, "Session Statistics")
+    _add_heading(doc, "Session Statistics", compact=True)
     hr_vals = data.get("hr_values", [])
     rmssd_vals = data.get("rmssd_values", [])
     stats_rows = []
@@ -769,17 +790,17 @@ def generate_session_report(path: str, data: dict) -> None:
     if hrv_vals:
         hrv_avg = sum(hrv_vals) / len(hrv_vals)
         stats_rows.extend([
-            ("HRV·SDNN Min", f"{min(hrv_vals):.1f} ms"),
-            ("HRV·SDNN Max", f"{max(hrv_vals):.1f} ms"),
-            ("HRV·SDNN Avg", f"{hrv_avg:.1f} ms"),
+            ("HRV(SDNN) Min", f"{min(hrv_vals):.1f} ms"),
+            ("HRV(SDNN) Max", f"{max(hrv_vals):.1f} ms"),
+            ("HRV(SDNN) Avg", f"{hrv_avg:.1f} ms"),
         ])
         delta_hrv = "--"
         if len(hrv_vals) >= 2 and hrv_vals[0] > 0:
             pct = ((hrv_vals[-1] - hrv_vals[0]) / hrv_vals[0]) * 100
             delta_hrv = f"{pct:+.1f}%"
-        stats_rows.append(("\u0394 HRV·SDNN (first\u2192last)", delta_hrv))
+        stats_rows.append(("\u0394 HRV(SDNN) (first\u2192last)", delta_hrv))
     else:
-        stats_rows.append(("HRV·SDNN", "No data recorded"))
+        stats_rows.append(("HRV(SDNN)", "No data recorded"))
     stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
     if stress_vals:
         stats_rows.extend([
@@ -789,7 +810,21 @@ def generate_session_report(path: str, data: dict) -> None:
         ])
     else:
         stats_rows.append(("LF/HF", "No data recorded"))
-    _add_key_value_table(doc, stats_rows, label_width_in=1.92, value_width_in=3.04)
+    snr_vals = [float(v) for v in (data.get("snr_values") or []) if v is not None]
+    if snr_vals:
+        snr_vals_sorted = sorted(snr_vals)
+        n = len(snr_vals_sorted)
+        low = snr_vals_sorted[0]
+        median = snr_vals_sorted[n // 2] if n else 0.0
+        high = snr_vals_sorted[-1]
+        stats_rows.extend([
+            ("ECG SNR Low", f"{low:.1f} dB"),
+            ("ECG SNR Median", f"{median:.1f} dB"),
+            ("ECG SNR High", f"{high:.1f} dB"),
+        ])
+    else:
+        stats_rows.append(("ECG SNR", "No data recorded"))
+    _add_key_value_table(doc, stats_rows, label_width_in=1.92, value_width_in=3.04, compact=True)
 
     # Section 5: Session Visuals
     if visuals:
@@ -809,7 +844,7 @@ def generate_session_report(path: str, data: dict) -> None:
         if trend_path and trend_path.exists():
             _add_image_with_caption(
                 doc,
-                "HR, RMSSD and HRV·SDNN trend",
+                "HR, RMSSD and HRV(SDNN) trend",
                 trend_path,
                 keep_block=True,
             )
