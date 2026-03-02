@@ -42,6 +42,8 @@ from hnh.config import (
     ECG_SAMPLE_RATE,
     ECG_QRS_UNCERTAINTY_PCT, ECG_QTc_UNCERTAINTY_PCT,
     RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
+    SIGNAL_POPUP_AUTO_DISMISS_MS,
+    PSD_VAGAL_BAND,
 )
 from hnh.settings import Settings, SettingsDialog, REGISTRY
 from hnh.report import (
@@ -71,6 +73,12 @@ YELLOW = QColor(255, 255, 0)
 RED = QColor(255, 0, 0)
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
+
+# Popup reasons that auto-dismiss; others (erratic HR, no data, total dropout) require acknowledgment.
+_SIGNAL_POPUP_AUTO_DISMISS_REASONS = frozenset({
+    "Signal dropout or noise",
+    "Poor signal \u2014 electrodes may be dry",
+})
 
 _CARD0_DISCLAIMER_PATH = Path(__file__).with_name("disclaimer.md")
 _RESEARCH_USE_WARNING = "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT."
@@ -3073,6 +3081,185 @@ class PoincareWindow(QMainWindow):
         super().closeEvent(event)
 
 
+class PSDWindow(QMainWindow):
+    closed = Signal()
+    info_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Hertz & Hearts — PSD (Vagal Resonance)")
+        self.setMinimumSize(560, 420)
+        self.resize(800, 500)
+        self._vagal_lo, self._vagal_hi = PSD_VAGAL_BAND
+        self._default_x_range = (0.0, 0.5)
+        self._zoom_factor = 1.4
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        self._zoom_out_button = QPushButton("\u2212")
+        self._zoom_out_button.setToolTip("Zoom out (show wider frequency range).")
+        self._zoom_out_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._zoom_out_button.setFixedWidth(28)
+        self._zoom_out_button.clicked.connect(self._zoom_out)
+        header.addWidget(self._zoom_out_button)
+        self._zoom_in_button = QPushButton("+")
+        self._zoom_in_button.setToolTip("Zoom in (narrower frequency range).")
+        self._zoom_in_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._zoom_in_button.setFixedWidth(28)
+        self._zoom_in_button.clicked.connect(self._zoom_in)
+        header.addWidget(self._zoom_in_button)
+        self._zoom_reset_button = QPushButton("Reset")
+        self._zoom_reset_button.setToolTip("Reset view to default 0–0.5 Hz range.")
+        self._zoom_reset_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._zoom_reset_button.setMinimumWidth(52)
+        self._zoom_reset_button.clicked.connect(self._reset_zoom)
+        header.addWidget(self._zoom_reset_button)
+        header.addStretch()
+        self._info_button = QPushButton("i")
+        self._info_button.setFixedWidth(22)
+        self._info_button.setToolTip("What is Vagal Resonance and this PSD plot?")
+        self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
+        self._info_button.clicked.connect(self.info_requested.emit)
+        header.addWidget(self._info_button)
+        self._pin_button = QPushButton("\U0001F4CC")
+        self._pin_button.setCheckable(True)
+        self._pin_button.setToolTip("Pin/unpin this window on top.")
+        self._pin_button.setStyleSheet("font-size: 14px; border: none; padding: 0 2px;")
+        self._pin_button.setFixedWidth(24)
+        self._pin_button.setFlat(True)
+        self._pin_button.toggled.connect(self._set_pinned)
+        header.addWidget(self._pin_button)
+        layout.addLayout(header)
+
+        self._plot = pg.PlotWidget(background="w")
+        self._plot.showGrid(x=True, y=True, alpha=0.25)
+        self._plot.setLabel("left", "Power (ms²/Hz)", color="k")
+        self._plot.setLabel("bottom", "Frequency (Hz)", color="k")
+        self._plot.getAxis("bottom").enableAutoSIPrefix(False)
+        self._plot.getAxis("left").setTextPen("k")
+        self._plot.getAxis("bottom").setTextPen("k")
+        self._plot.getAxis("left").setPen(pg.mkPen("k"))
+        self._plot.getAxis("bottom").setPen(pg.mkPen("k"))
+        self._plot.setMouseEnabled(x=True, y=True)
+        self._plot.hideButtons()
+        self._plot.setXRange(*self._default_x_range, padding=0)
+
+        self._vagal_region = pg.LinearRegionItem(
+            values=(self._vagal_lo, self._vagal_hi),
+            orientation=pg.LinearRegionItem.Vertical,
+            movable=False,
+            brush=(70, 130, 210, 48),
+            pen=pg.mkPen((30, 78, 153, 120), width=1),
+        )
+        self._plot.addItem(self._vagal_region)
+        self._psd_curve = self._plot.plot(
+            pen=pg.mkPen((25, 118, 210), width=2),
+        )
+        layout.addWidget(self._plot, stretch=1)
+
+        metrics_row = QHBoxLayout()
+        self._peak_label = QLabel("0.1 Hz peak: --")
+        self._peak_label.setStyleSheet(
+            "font-size: 11px; color: #2c3e50; "
+            "border: 1px solid #bdc3c7; border-radius: 3px; "
+            "padding: 2px 8px; background: #f8f9fa;"
+        )
+        metrics_row.addWidget(self._peak_label)
+        metrics_row.addStretch()
+        layout.addLayout(metrics_row)
+
+        self.setCentralWidget(central)
+        self.statusBar().showMessage("Waiting for R-R data...")
+        self._pinned = False
+        self._update_pin_button_visual()
+
+    def _update_pin_button_visual(self):
+        self._pin_button.setChecked(self._pinned)
+        if self._pinned:
+            self._pin_button.setStyleSheet(
+                "font-size: 14px; border: 1px solid #1b6ec2; border-radius: 3px; "
+                "padding: 0 2px;"
+            )
+        else:
+            self._pin_button.setStyleSheet("font-size: 14px; border: none; padding: 0 2px;")
+
+    def _set_pinned(self, checked: bool):
+        self._pinned = bool(checked)
+        self.setWindowFlag(Qt.WindowStaysOnTopHint, self._pinned)
+        self.show()
+        self._update_pin_button_visual()
+
+    def _zoom_in(self):
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return
+        rng = vb.viewRange()
+        x_lo, x_hi = rng[0][0], rng[0][1]
+        center = (x_lo + x_hi) / 2.0
+        span = (x_hi - x_lo) / self._zoom_factor
+        span = max(0.01, min(span, self._default_x_range[1] - self._default_x_range[0]))
+        nlo = center - span / 2
+        nhi = center + span / 2
+        nlo = max(self._default_x_range[0], min(nlo, self._default_x_range[1] - span))
+        nhi = nlo + span
+        vb.setXRange(nlo, nhi, padding=0)
+
+    def _zoom_out(self):
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return
+        rng = vb.viewRange()
+        x_lo, x_hi = rng[0][0], rng[0][1]
+        center = (x_lo + x_hi) / 2.0
+        span = (x_hi - x_lo) * self._zoom_factor
+        span = min(span, self._default_x_range[1] - self._default_x_range[0])
+        nlo = center - span / 2
+        nhi = center + span / 2
+        nlo = max(self._default_x_range[0], nlo)
+        nhi = min(self._default_x_range[1], nhi)
+        vb.setXRange(nlo, nhi, padding=0)
+
+    def _reset_zoom(self):
+        self._plot.setXRange(*self._default_x_range, padding=0)
+        self.statusBar().showMessage("View reset to 0–0.5 Hz.")
+
+    def clear(self):
+        self._psd_curve.setData([], [])
+        self._peak_label.setText("0.1 Hz peak: --")
+        self.statusBar().showMessage("Waiting for R-R data...")
+
+    def update_from_psd(self, freqs: list[float], psd: list[float]):
+        if not freqs or not psd or len(freqs) != len(psd):
+            self.clear()
+            return
+        f = np.asarray(freqs)
+        p = np.asarray(psd)
+        self._psd_curve.setData(f, p)
+        vagal_mask = (f >= self._vagal_lo) & (f <= self._vagal_hi)
+        if np.any(vagal_mask):
+            peak_power = float(np.max(p[vagal_mask]))
+            peak_idx = int(np.argmax(p[vagal_mask]))
+            peak_freq = float(f[vagal_mask][peak_idx])
+            self._peak_label.setText(
+                f"0.1 Hz band peak: {peak_power:.4f} @ {peak_freq:.3f} Hz"
+            )
+        else:
+            self._peak_label.setText("0.1 Hz band: no data in range")
+        self.statusBar().showMessage(
+            "Drag to pan, scroll or +/- to zoom. Shaded band = Vagal Resonance (0.07–0.13 Hz)."
+        )
+
+    def closeEvent(self, event):
+        if self._pinned:
+            self._pinned = False
+            self._update_pin_button_visual()
+        self.closed.emit()
+        super().closeEvent(event)
+
+
 class ViewSignals(QObject):
     annotation = Signal(tuple)
     start_recording = Signal(str)
@@ -3129,6 +3316,7 @@ class View(QMainWindow):
         self._session_hrv_values: list[float] = []
         self._session_hrv_times: list[float] = []
         self._session_stress_ratio_values: list[float] = []
+        self._session_snr_values: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
@@ -3193,12 +3381,17 @@ class View(QMainWindow):
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
         self.poincare_window = PoincareWindow()
         self.poincare_window.closed.connect(self._on_poincare_window_closed)
+        self.psd_window = PSDWindow()
+        self.psd_window.closed.connect(self._on_psd_window_closed)
         self._trends_window: TrendsWindow | None = None
         self.ecg_window.installEventFilter(self)
         self.qtc_window.installEventFilter(self)
         self.poincare_window.installEventFilter(self)
+        self.psd_window.installEventFilter(self)
         self.poincare_window.info_requested.connect(self.show_poincare_info)
+        self.psd_window.info_requested.connect(self.show_psd_info)
         self.model.ibis_buffer_update.connect(self._update_poincare)
+        self.model.psd_update.connect(self._update_psd)
 
         self.logger = Logger()
         self.logger_thread = QThread()
@@ -3364,6 +3557,9 @@ class View(QMainWindow):
         self.poincare_button = QPushButton("Poincare (no sensor)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.clicked.connect(self.toggle_poincare_window)
+        self.psd_button = QPushButton("PSD (no sensor)")
+        self.psd_button.setEnabled(False)
+        self.psd_button.clicked.connect(self.toggle_psd_window)
 
         self.start_recording_button = QPushButton("Start")
         self.start_recording_button.clicked.connect(self.start_session)
@@ -3425,6 +3621,9 @@ class View(QMainWindow):
         self.ecg_button.setToolTip("Open/close the live ECG monitor window.")
         self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
         self.poincare_button.setToolTip("Open the live Poincare RR scatter window.")
+        self.psd_button.setToolTip(
+            "Open the PSD (Power Spectral Density) window showing Vagal Resonance at 0.1 Hz."
+        )
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
         self.stop_recording_button.setToolTip(
             "Stop recording and save data to session folder. Use Save for full report and copy."
@@ -3580,6 +3779,8 @@ class View(QMainWindow):
         self.qtc_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.poincare_button.setMaximumWidth(130)
         self.poincare_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.psd_button.setMaximumWidth(130)
+        self.psd_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.start_recording_button.setMaximumWidth(70)
         self.start_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.stop_recording_button.setMaximumWidth(70)
@@ -3615,6 +3816,7 @@ class View(QMainWindow):
         toolbar.addWidget(self.ecg_button)
         toolbar.addWidget(self.qtc_button)
         toolbar.addWidget(self.poincare_button)
+        toolbar.addWidget(self.psd_button)
         toolbar.addStretch()
 
         _stat_style = (
@@ -3815,7 +4017,7 @@ class View(QMainWindow):
             else:
                 self._abandon_active_session()
         # Ensure auxiliary plot windows close with the main app window.
-        for popup in (self.ecg_window, self.qtc_window, self.poincare_window):
+        for popup in (self.ecg_window, self.qtc_window, self.poincare_window, self.psd_window):
             try:
                 popup.close()
             except Exception:
@@ -3866,6 +4068,7 @@ class View(QMainWindow):
         self.export_report_button.setEnabled(self._session_bundle is not None)
         self.export_report_button.setText("Report to Now" if is_recording else "Report")
         self.poincare_button.setEnabled(connected)
+        self.psd_button.setEnabled(connected)
         if not connected:
             self.qtc_button.setEnabled(False)
             if not connecting:
@@ -3875,6 +4078,7 @@ class View(QMainWindow):
                 self.ecg_button.setText("ECG (no sensor)")
                 self.qtc_button.setText("QTc (no sensor)")
                 self.poincare_button.setText("Poincare (no sensor)")
+                self.psd_button.setText("PSD (no sensor)")
         elif self.ecg_button.isEnabled():
             self.qtc_button.setEnabled(True)
         self._apply_freeze_button_states()
@@ -3980,6 +4184,7 @@ class View(QMainWindow):
             "hrv_values": list(self._session_hrv_values),
             "hrv_time_seconds": list(self._session_hrv_times),
             "stress_ratio_values": list(self._session_stress_ratio_values),
+            "snr_values": list(self._session_snr_values),
             "ecg_samples": ecg_samples,
             "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
             "ecg_is_simulated": False,
@@ -4115,6 +4320,7 @@ class View(QMainWindow):
         self._session_hrv_values = []
         self._session_hrv_times = []
         self._session_stress_ratio_values = []
+        self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
@@ -4248,6 +4454,7 @@ class View(QMainWindow):
         self._session_hrv_values = []
         self._session_hrv_times = []
         self._session_stress_ratio_values = []
+        self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._session_bundle = None
         self.ecg_window.clear()
@@ -4273,6 +4480,8 @@ class View(QMainWindow):
         self.qtc_button.setText("QTc (starting...)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.setText("Poincare (starting...)")
+        self.psd_button.setEnabled(False)
+        self.psd_button.setText("PSD (starting...)")
         self.sensor.connect_client(*sensor)
         self._connect_attempt_timer.start()
         self._last_data_time = None
@@ -4307,6 +4516,9 @@ class View(QMainWindow):
         if self.poincare_window.isVisible():
             self.poincare_window.hide()
         self.poincare_window.clear()
+        if self.psd_window.isVisible():
+            self.psd_window.hide()
+        self.psd_window.clear()
         self.hrv_widget.time_series.clear()
         self.hr_trend_series.clear()
         self.sdnn_series.clear()
@@ -4328,6 +4540,8 @@ class View(QMainWindow):
         self.qtc_button.setText("QTc (no sensor)")
         self.poincare_button.setEnabled(False)
         self.poincare_button.setText("Poincare (no sensor)")
+        self.psd_button.setEnabled(False)
+        self.psd_button.setText("PSD (no sensor)")
         self._main_plots_frozen = False
         self._all_plots_frozen = False
         self.ecg_window.set_stream_frozen(False)
@@ -4398,7 +4612,24 @@ class View(QMainWindow):
             self.poincare_window.showMinimized()
         self._refresh_popup_control_labels()
 
+    def toggle_psd_window(self):
+        if not self.psd_window.isVisible():
+            self.psd_window.show()
+            self.psd_window.showNormal()
+            self.psd_window.raise_()
+            self.psd_window.activateWindow()
+        elif self.psd_window.isMinimized():
+            self.psd_window.showNormal()
+            self.psd_window.raise_()
+            self.psd_window.activateWindow()
+        else:
+            self.psd_window.showMinimized()
+        self._refresh_popup_control_labels()
+
     def _on_poincare_window_closed(self):
+        self._refresh_popup_control_labels()
+
+    def _on_psd_window_closed(self):
         self._refresh_popup_control_labels()
 
     @staticmethod
@@ -4427,6 +4658,9 @@ class View(QMainWindow):
         if self.poincare_button.isEnabled():
             poincare_mode = self._popup_button_mode(self.poincare_window)
             self.poincare_button.setText(self._popup_button_text("Poincare", poincare_mode))
+        if self.psd_button.isEnabled():
+            psd_mode = self._popup_button_mode(self.psd_window)
+            self.psd_button.setText(self._popup_button_text("PSD", psd_mode))
 
     def show_poincare_info(self):
         parent = self.poincare_window if self.poincare_window.isVisible() else self
@@ -4452,6 +4686,27 @@ class View(QMainWindow):
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec()
 
+    def show_psd_info(self):
+        parent = self.psd_window if self.psd_window.isVisible() else self
+        msg = QMessageBox(parent)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("PSD & Vagal Resonance Help")
+        msg.setWindowModality(Qt.WindowModal)
+        msg.setText(
+            "<b>What this shows</b><br>"
+            "Power Spectral Density (PSD) of heart rate variability from the "
+            "interpolated R-R interval stream. FFT-based (Welch method).<br><br>"
+            "<b>Vagal Resonance (0.1 Hz)</b><br>"
+            "The shaded band highlights 0.07–0.13 Hz (~6 breaths/min). A narrow, "
+            "high-amplitude peak here indicates optimal vagal tone and baroreflex "
+            "resonance—often associated with pelvic floor relaxation and coherent "
+            "breathing.<br><br>"
+            "<b>Interaction</b><br>"
+            "Drag to pan, mouse wheel or +/- buttons to zoom. Reset restores 0–0.5 Hz view."
+        )
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.exec()
+
     def _update_poincare(self, data: NamedSignal):
         if data.name != "ibis":
             return
@@ -4461,6 +4716,16 @@ class View(QMainWindow):
         if not rr:
             return
         self.poincare_window.update_from_ibis(rr)
+
+    def _update_psd(self, data: NamedSignal):
+        if data.name != "psd":
+            return
+        if not isinstance(data.value, (list, tuple)) or len(data.value) < 2:
+            return
+        freqs, psd = data.value[0], data.value[1]
+        if not freqs or not psd:
+            return
+        self.psd_window.update_from_psd(list(freqs), list(psd))
 
     # -- Connect-CTA helpers -------------------------------------------------
 
@@ -4480,7 +4745,7 @@ class View(QMainWindow):
         return lbl
 
     def eventFilter(self, obj, event):
-        if obj in {self.ecg_window, self.qtc_window, self.poincare_window} and event.type() in {
+        if obj in {self.ecg_window, self.qtc_window, self.poincare_window, self.psd_window} and event.type() in {
             QEvent.Type.WindowStateChange,
             QEvent.Type.Show,
             QEvent.Type.Hide,
@@ -5465,6 +5730,8 @@ class View(QMainWindow):
         msg.open()
         msg.raise_()
         msg.activateWindow()
+        if reason in _SIGNAL_POPUP_AUTO_DISMISS_REASONS:
+            QTimer.singleShot(SIGNAL_POPUP_AUTO_DISMISS_MS, msg.close)
 
     def _on_rmssd_degraded(self, rmssd_val: float | None = None):
         self._signal_degrade_count += 1
@@ -5761,6 +6028,12 @@ class View(QMainWindow):
                     self.qrs_label.setText(f"QRS: {float(qrs_val):.1f} ms")
                 except (TypeError, ValueError):
                     self.qrs_label.setText("QRS: -- ms")
+                snr_db = data.value.get("snr_db")
+                if snr_db is not None and self._session_state == "recording":
+                    try:
+                        self._session_snr_values.append(float(snr_db))
+                    except (TypeError, ValueError):
+                        pass
                 self._refresh_popup_control_labels()
 
         # 3. AVERAGED DATA (RMSSD & Stability)

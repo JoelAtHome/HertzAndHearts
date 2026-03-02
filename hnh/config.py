@@ -70,6 +70,10 @@ MAX_HRV_TARGET: Final[int] = 600
 # use 20 for faster testing during development.
 FREQUENCY_WINDOW_SIZE: Final[int] = 20
 
+# Vagal resonance band (Hz) — 0.1 Hz ≈ 6 breaths/min; a narrow peak
+# here indicates optimal vagal tone / baroreflex resonance.
+PSD_VAGAL_BAND: Final[tuple[float, float]] = (0.07, 0.13)
+
 # ──────────────────────────────────────────────────────────────────────
 #  SESSION TIMING (Calibration Phases)
 # ──────────────────────────────────────────────────────────────────────
@@ -153,6 +157,10 @@ NOISE_IBI_HIGH_MS: Final[int] = 2000  # > 2000 ms ≈ HR < 30 bpm
 RMSSD_NOISY_MS: Final[int] = 200   # was 150; raised for breathing-variation tolerance
 RMSSD_POOR_MS: Final[int] = 240    # was 200; dry strap typically much higher
 SIGNAL_DEGRADE_POPUP_COUNT: Final[int] = 12  # consecutive RMSSD breaches before popup (was 8)
+
+# Popups with these reasons auto-dismiss; others require acknowledgment.
+# "No data received" and "Total signal dropout" are kept modal (connection/sensor issues).
+SIGNAL_POPUP_AUTO_DISMISS_MS: Final[int] = 5500  # ~5.5 s for readable transient notices
 
 # Level 3 fault (adaptive): percentage deviation from the rolling
 # average that triggers an "ERRATIC" warning.  0.30 = 30%.

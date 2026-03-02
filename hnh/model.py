@@ -30,6 +30,7 @@ class Model(QObject):
     pacer_rate_update = Signal(NamedSignal)
     hrv_target_update = Signal(NamedSignal)
     stress_ratio_update = Signal(NamedSignal)
+    psd_update = Signal(NamedSignal)
     qtc_update = Signal(NamedSignal)
     _qtc_compute_done = Signal(int, int, object)
     _qtc_compute_failed = Signal(int)
@@ -242,6 +243,11 @@ class Model(QObject):
                 print(f"--- FREQUENCY MATH UNLOCKED ---")
                 print(f"STRESS RATIO: {stress_val:.2f}")
             self.stress_ratio_update.emit(NamedSignal(name="stress_ratio", value=[stress_val]))
+            # Convert PSD from s²/Hz to ms²/Hz for display
+            psd_ms2 = psd * 1e6
+            self.psd_update.emit(
+                NamedSignal(name="psd", value=(freqs.tolist(), psd_ms2.tolist()))
+            )
         except Exception as e:
             print(f"!!! MATH ERROR: {e}")
 
