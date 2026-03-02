@@ -17,6 +17,7 @@ from hnh.config import (
     MIN_HRV_TARGET,
     MAX_HRV_TARGET,
     ECG_SAMPLE_RATE,
+    LF_HF_ANALYSIS_WINDOW,
 )
 from hnh.settings import Settings
 from hnh.qtc import QtcConfig, compute_qtc_payload_from_ecg
@@ -207,12 +208,18 @@ class Model(QObject):
 
     def compute_local_hrv(self):
         # Wait until we have enough RR samples before spectral analysis.
-        if len(self.rr_intervals) < self._settings.FREQUENCY_WINDOW_SIZE:
+        n = len(self.rr_intervals)
+        if n < self._settings.FREQUENCY_WINDOW_SIZE:
             return
         try:
             from scipy.signal import welch
 
-            rr_ms = np.asarray(list(self.rr_intervals), dtype=float)
+            # Use a fixed analysis window (56 beats) instead of full buffer so
+            # consecutive computations differ meaningfully. Full buffer (~200 beats)
+            # with updates every 5 beats gave >95% overlap → near-identical LF/HF
+            # values and flat min/max/avg in reports.
+            analysis_size = min(LF_HF_ANALYSIS_WINDOW, n)
+            rr_ms = np.asarray(list(self.rr_intervals)[-analysis_size:], dtype=float)
             if rr_ms.size < 4:
                 return
 

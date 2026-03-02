@@ -70,6 +70,12 @@ MAX_HRV_TARGET: Final[int] = 600
 # use 20 for faster testing during development.
 FREQUENCY_WINDOW_SIZE: Final[int] = 20
 
+# Number of RR intervals used per LF/HF computation. Using a shorter window
+# than the full buffer yields temporal variation in session stats (min/max/avg).
+# Clinical standard: 56 (~1 min). Full buffer (~200 beats) gave near-identical
+# values because consecutive computations overlapped by >95%.
+LF_HF_ANALYSIS_WINDOW: Final[int] = 56
+
 # Vagal resonance band (Hz) — 0.1 Hz ≈ 6 breaths/min; a narrow peak
 # here indicates optimal vagal tone / baroreflex resonance.
 PSD_VAGAL_BAND: Final[tuple[float, float]] = (0.07, 0.13)
