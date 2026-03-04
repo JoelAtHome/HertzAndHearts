@@ -6,7 +6,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from itertools import islice
 from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtBluetooth import QBluetoothDeviceInfo
-from hnh.utils import get_sensor_address, sign, NamedSignal
+from hnh.utils import get_sensor_address, NamedSignal
 from hnh.config import (
     tick_to_breathing_rate,
     HRV_BUFFER_SIZE,
@@ -292,13 +292,6 @@ class Model(QObject):
         
         # 3. Add the new '0' point for the latest beat
         self.ibis_seconds.append(0.0)
-
-    def update_hrv_seconds(self, seconds: float):
-        """Standard rolling window update for the HRV chart."""
-        self.hrv_seconds = deque(
-            [i - seconds for i in self.hrv_seconds], HRV_BUFFER_SIZE
-        )
-        self.hrv_seconds.append(0.0)
 
     def _build_qtc_config(self) -> QtcConfig:
         return QtcConfig(

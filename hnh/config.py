@@ -137,19 +137,9 @@ ECG_SAMPLE_RATE: Final[int] = 130  # Hz
 # How many seconds of ECG waveform are visible at once.
 ECG_DISPLAY_SECONDS: Final[int] = 5
 
-# Total samples held in the ECG circular buffer.
-ECG_BUFFER_SIZE: Final[int] = ECG_SAMPLE_RATE * ECG_DISPLAY_SECONDS  # 650
-
 # Chart refresh interval.  33 ms ≈ 30 fps — a good balance between
 # smooth animation and CPU/GPU load.
 ECG_REFRESH_MS: Final[int] = 33
-
-# ──────────────────────────────────────────────────────────────────────
-#  ECG TRIGGER (R-peak Detection for Oscilloscope Sweep)
-# ──────────────────────────────────────────────────────────────────────
-# Initial threshold (mV) for detecting an R-peak to trigger a new sweep.
-# Automatically adapts to 50% of tracked peak amplitude during operation.
-ECG_TRIGGER_THRESHOLD: Final[float] = 0.3
 
 # ──────────────────────────────────────────────────────────────────────
 #  SIGNAL QUALITY DETECTION
