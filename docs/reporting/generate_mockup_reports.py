@@ -73,12 +73,14 @@ def _build_session_payload(
 
 def _write_mock_csv(path: Path, hr_values: list[float], rmssd_values: list[float], start: datetime):
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = ["event,value,timestamp"]
+    lines = ["event,value,timestamp,elapsed_sec"]
     now = start
+    elapsed = 0.0
     for hr, rmssd in zip(hr_values, rmssd_values):
-        lines.append(f"HR,{hr:.1f},{now.isoformat(timespec='seconds')}")
-        lines.append(f"RMSSD,{rmssd:.2f},{now.isoformat(timespec='seconds')}")
+        lines.append(f"HR,{hr:.1f},{now.isoformat(timespec='seconds')},{elapsed}")
+        lines.append(f"hrv,{rmssd:.2f},{now.isoformat(timespec='seconds')},{elapsed}")
         now += timedelta(seconds=15)
+        elapsed += 15
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 

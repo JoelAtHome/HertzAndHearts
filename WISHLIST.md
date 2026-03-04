@@ -91,8 +91,15 @@ Complexity review checklist:
 - [ ] Is there usage evidence to justify promotion to default visibility?
 - [ ] Does this release still have one clearly dominant primary user outcome?
 
+### Generate report from past session (post-stop)
+- Problem: Users who end sessions with Stop (not Save) get CSV + manifest but no reports. Once the session is no longer active, there is no way to generate the DOCX/PDF report from the stored data.
+- Proposed approach: Add a way to generate reports from past sessions—e.g. via Session History (select session → "Generate report") or a small CLI/script that builds report data from CSV + manifest and writes DOCX/PDF into the session folder.
+- Effort: M
+- Impact: Med
+- Status: idea
+- Notes: Report data currently built from in-memory state; would need to derive hr_values, rmssd_values, etc. from CSV. Manifest holds session metadata.
+
 ### Example: Save breathing presets
-- Problem: Users repeat the same target and breathing rate setup each session.
 - Proposed approach: Add named preset save/load controls in the main UI.
 - Effort: M
 - Impact: High
@@ -392,6 +399,11 @@ Implementation checklist:
 ## Done
 
 Completed items. Include completion date and optional version reference.
+
+### CSV export: IBI, HRV, time, and elapsed_sec
+- Completed: 2026-03-02
+- Outcome: Session recording CSV now logs raw IBI (RR) intervals plus derived HRV (RMSSD), with `elapsed_sec` for Kubios/HRVAS-style downstream analysis. Header: `event,value,timestamp,elapsed_sec`. Event types: IBI (ms), hrv (ms), Annotation, and disclaimer metadata. Enables both simple viewing of derived metrics and full RR-based re-analysis in external tools.
+- Notes: `hnh/logger.py`, `hnh/view.py` (ibis_buffer_update → logger); mock CSV in `docs/reporting/generate_mockup_reports.py` updated for format consistency.
 
 ### Session trends (Show Trends)
 - Completed: 2026-02-27

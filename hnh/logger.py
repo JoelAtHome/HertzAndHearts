@@ -24,7 +24,7 @@ class Logger(QObject):
             self.status_update.emit(f"Failed to start recording: {exc}")
             return
         self.current_path = file_path
-        self.file.write("event,value,timestamp\n")  # header
+        self.file.write("event,value,timestamp,elapsed_sec\n")  # header
         self.file.flush()
         self.recording_status.emit(0)
         self.status_update.emit(f"Started recording to {self.file.name}.")
@@ -47,13 +47,27 @@ class Logger(QObject):
         if not self.file:
             return
         key, val = data
-        try:
-            if isinstance(val, list):
-                val = val[-1]
-            if isinstance(val, tuple):
-                val = val[-1][-1]
-        except (IndexError, TypeError):
-            return
         timestamp = datetime.now().isoformat()
-        self.file.write(f"{key},{val},{timestamp}\n")
+
+        if key == "ibis":
+            try:
+                _, buffer = val
+                if not buffer:
+                    return
+                value = buffer[-1]  # IBI in ms
+                elapsed_sec = sum(buffer)  # seconds from first beat
+            except (TypeError, ValueError, IndexError):
+                return
+            self.file.write(f"IBI,{value},{timestamp},{elapsed_sec}\n")
+        else:
+            try:
+                if isinstance(val, list):
+                    value = val[-1]
+                elif isinstance(val, tuple):
+                    value = val[-1][-1]
+                else:
+                    value = val
+            except (IndexError, TypeError):
+                return
+            self.file.write(f"{key},{value},{timestamp},\n")
         self.file.flush()

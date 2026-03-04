@@ -3455,6 +3455,7 @@ class View(QMainWindow):
         self.signals.annotation.connect(self.logger.write_to_file)
         self.logger.recording_status.connect(self.show_recording_status)
         self.logger.status_update.connect(self.show_status)
+        self.model.ibis_buffer_update.connect(self.logger.write_to_file)
         self.model.hrv_update.connect(self.logger.write_to_file)
 
         # 4. UI WIDGETS
