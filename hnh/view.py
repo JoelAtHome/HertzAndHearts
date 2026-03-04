@@ -1,11 +1,7 @@
 from datetime import datetime, date
 import hashlib
-import io
 import os
 import json
-import struct
-import sys
-import wave
 import math
 import random
 import shutil
@@ -16,7 +12,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
 from PySide6.QtGui import (
-    QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor, QPixmap, QFont,
+    QPen, QIcon, QImage, QLinearGradient, QBrush, QGradient, QColor, QPixmap, QFont,
     QKeySequence, QShortcut, QDesktopServices, QPainter,
 )
 from PySide6.QtCore import (
@@ -81,36 +77,8 @@ RED = QColor(255, 0, 0)
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
 
-
-def _play_shutter_sound() -> None:
-    """Play a short camera shutter click (Windows only via winsound)."""
-    try:
-        if sys.platform != "win32":
-            return
-        import winsound
-        sample_rate = 22050
-        duration_ms = 60
-        n_samples = int(sample_rate * duration_ms / 1000)
-        data = []
-        for i in range(n_samples):
-            t = i / sample_rate
-            decay = math.exp(-t * 60)
-            val = int(32767 * 0.25 * decay * math.sin(2 * math.pi * 1200 * t))
-            data.append(max(-32768, min(32767, val)))
-        buf = struct.pack(f"<{n_samples}h", *data)
-        with io.BytesIO() as f:
-            with wave.open(f, "wb") as w:
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(sample_rate)
-                w.writeframes(buf)
-            wav_bytes = f.getvalue()
-        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
-    except Exception:
-        pass
-
-
 # Popup reasons that auto-dismiss; others (erratic HR, no data, total dropout) require acknowledgment.
+
 _SIGNAL_POPUP_AUTO_DISMISS_REASONS = frozenset({
     "Signal dropout or noise",
     "Poor signal \u2014 electrodes may be dry",
@@ -762,9 +730,14 @@ class TrendsWindow(QMainWindow):
         controls.addWidget(self._profile_combo)
 
         controls.addSpacing(24)
-        hint = QLabel("Use mouse to pan; mouse wheel on each axis to zoom. Drag the vertical line over a point to show its values.")
+        hint = QLabel(
+            "Use mouse to pan; mouse wheel on each axis to zoom. "
+            "Drag the vertical line over a point to show its values.\n"
+            "Legend may be moved if desired."
+        )
         hint.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
         hint.setWordWrap(True)
+        hint.setMinimumWidth(560)
         controls.addWidget(hint)
 
         controls.addStretch()
@@ -775,7 +748,10 @@ class TrendsWindow(QMainWindow):
         self._plot_widget = pg.PlotWidget(axisItems={"bottom": date_axis})
         self._plot_widget.setLabel("left", "Value")
         self._plot_widget.setLabel("bottom", "Date & Time")
-        self._plot_widget.addLegend()
+        self._plot_widget.addLegend(
+            offset=(-20, 20),  # top-right corner to avoid overlapping plot data
+            brush=(30, 30, 35, 200),  # semi-opaque dark background for readability
+        )
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
         layout.addWidget(self._plot_widget)
 
@@ -2227,7 +2203,6 @@ class EcgWindow(QMainWindow):
             self._statusbar.showMessage("Image capture failed.")
             return
         self.image_captured.emit(pixmap)
-        _play_shutter_sound()
         # Visual feedback: white flash overlay over plot for ~250ms
         central = self.centralWidget()
         if central is None:
@@ -3622,10 +3597,24 @@ class View(QMainWindow):
         sdnn_color = QColor(0, 130, 255)
         pen = QPen(sdnn_color)
         pen.setWidth(2)
+        pen.setStyle(Qt.PenStyle.DashLine)  # distinguishable on monochrome printouts
         self.sdnn_series.setPen(pen)
+        # X-shaped markers for monochrome distinguishability from solid RMSSD line
+        sdnn_marker_size = 7
+        self.sdnn_series.setMarkerSize(sdnn_marker_size)
+        x_marker = QImage(sdnn_marker_size, sdnn_marker_size, QImage.Format.Format_ARGB32)
+        x_marker.fill(QColor(0, 0, 0, 0))
+        px = QPainter(x_marker)
+        px.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        px.setPen(QPen(sdnn_color, 1))
+        m = sdnn_marker_size
+        px.drawLine(1, 1, m - 2, m - 2)
+        px.drawLine(m - 2, 1, 1, m - 2)
+        px.end()
+        self.sdnn_series.setLightMarker(x_marker)
 
         self.hrv_y_axis_right = QValueAxis()
-        self.hrv_y_axis_right.setTitleText("HRV(SDNN)")
+        self.hrv_y_axis_right.setTitleText("HRV(SDNN) --x--")
         self.hrv_y_axis_right.setTitleBrush(QBrush(sdnn_color))
         self.hrv_y_axis_right.setLabelsColor(sdnn_color)
         self.hrv_y_axis_right.setRange(0, 50)
