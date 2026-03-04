@@ -78,6 +78,7 @@ class SensorClient(QObject):
     ecg_ready = Signal()
     status_update = Signal(str)
     battery_update = Signal(int)  # 0-100 percent, or -1 if unknown/unsupported
+    verity_limited_support = Signal()
 
     PMD_SERVICE_UUID = QBluetoothUuid(QUuid("{FB005C80-02E7-F387-1CAD-8ACD2D8DF0C8}"))
     PMD_CONTROL_UUID = QBluetoothUuid(QUuid("{FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8}"))
@@ -116,6 +117,8 @@ class SensorClient(QObject):
         self.HR_CHARACTERISTIC: QBluetoothUuid.CharacteristicType = (
             QBluetoothUuid.CharacteristicType.HeartRateMeasurement
         )
+        self._connected_device_name: str = ""
+        self._verity_warning_emitted = False
 
     def _sensor_address(self):
         return get_sensor_remote_address(self.client)
@@ -131,6 +134,8 @@ class SensorClient(QObject):
         self.status_update.emit(
             f"Connecting to sensor at {get_sensor_address(sensor)} (this might take a while)."
         )
+        self._connected_device_name = sensor.name() or ""
+        self._verity_warning_emitted = False
         self.client = QLowEnergyController.createCentral(sensor)
         self.client.errorOccurred.connect(self._catch_error)
         self.client.connected.connect(self._discover_services)
@@ -274,6 +279,9 @@ class SensorClient(QObject):
             print("HR characteristic is invalid.")
         self.hr_service.writeDescriptor(self.hr_notification, self.ENABLE_NOTIFICATION)
         self.status_update.emit(f"Connected to {self._sensor_address()}")
+        if not self._verity_warning_emitted and "verity" in self._connected_device_name.lower():
+            self._verity_warning_emitted = True
+            self.verity_limited_support.emit()
 
     def _start_pmd_notification(self, state: QLowEnergyService.ServiceState):
         if state != QLowEnergyService.RemoteServiceDiscovered:

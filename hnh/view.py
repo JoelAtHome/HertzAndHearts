@@ -133,6 +133,8 @@ def _info_ok(parent, title: str, text: str) -> None:
 
 
 def _save_last_sensor(name, address):
+    if not name or "verity" in (name or "").lower():
+        return
     try:
         SENSOR_CONFIG.write_text(json.dumps({"name": name, "address": address}))
     except Exception:
@@ -140,7 +142,11 @@ def _save_last_sensor(name, address):
 
 def _load_last_sensor():
     try:
-        return json.loads(SENSOR_CONFIG.read_text())
+        data = json.loads(SENSOR_CONFIG.read_text())
+        if data and "verity" in (data.get("name") or "").lower():
+            SENSOR_CONFIG.unlink(missing_ok=True)
+            return None
+        return data
     except Exception:
         return None
 
@@ -3460,6 +3466,7 @@ class View(QMainWindow):
 
         self.sensor = SensorClient()
         self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
+        self.sensor.verity_limited_support.connect(self._on_verity_limited_support)
         self.sensor.ecg_update.connect(self.model.update_ecg_samples)
         self.sensor.status_update.connect(self.show_status)
         self.sensor.battery_update.connect(self._update_battery_display)
@@ -4771,6 +4778,20 @@ class View(QMainWindow):
     def _on_psd_window_closed(self):
         self._refresh_popup_control_labels()
 
+    def _on_verity_limited_support(self):
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Polar Verity Sense — Limited Support")
+        msg.setWindowModality(Qt.WindowModal)
+        msg.setText(
+            "This device does not provide beat-to-beat RR intervals required for "
+            "HRV plotting, RMSSD, or spectral analysis.<br><br>"
+            "Data will not be displayed. Use a <b>Polar H10</b> chest strap for full functionality."
+        )
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
+        msg.exec()
+
     @staticmethod
     def _popup_button_mode(window: QMainWindow) -> str:
         if not window.isVisible():
@@ -5826,7 +5847,9 @@ class View(QMainWindow):
             if self.address_menu.currentText():
                 parts = self.address_menu.currentText().split(",")
                 if len(parts) >= 2:
-                    _save_last_sensor(parts[0].strip(), parts[1].strip())
+                    name, addr = parts[0].strip(), parts[1].strip()
+                    if "verity" not in name.lower():
+                        _save_last_sensor(name, addr)
             self._auto_start_recording()
         elif "error" in status.lower() or "Disconnecting" in status:
             # If connect failed or link dropped, unblock reconnect immediately.
