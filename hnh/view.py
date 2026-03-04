@@ -1599,7 +1599,7 @@ class EcgWindow(QMainWindow):
         self._plot_widget.addItem(self._cursor_arrow_b)
         self._cursor_delta_text = pg.TextItem(
             html='<span style="color:#4169e1; font-size:10pt;"><b>Δt</b></span>',
-            anchor=(0.5, 1.0),
+            anchor=(0, 0.5),  # left edge at pos, vertically centered (beside arrow)
         )
         self._cursor_delta_text.setVisible(False)
         self._plot_widget.addItem(self._cursor_delta_text)
@@ -2124,28 +2124,24 @@ class EcgWindow(QMainWindow):
         self._cursor_arrow_b.setPos(x1, y_line)
         self._cursor_arrow_a.setVisible(True)
         self._cursor_arrow_b.setVisible(True)
-        x_mid = (x0 + x1) * 0.5
         view_box = self._plot_widget.getViewBox()
-        _px_x, px_y = view_box.viewPixelSize()
-        # Keep label consistently just above the arrowed line, with a tight,
-        # pixel-aware gap so it does not overlap or drift too far.
-        gap = max(0.022 * y_span, 3.0 * float(px_y))
-        y_text_base = y_line + gap
-        # Detect waveform overlap: sample max y in cursor span and move text above if needed.
-        if len(self._times) >= 2 and len(self._values) >= 2:
-            t_arr = np.array(self._times)
-            v_arr = np.array(self._values)
-            in_range = (t_arr >= x0) & (t_arr <= x1)
-            if np.any(in_range):
-                max_y_in_range = float(np.max(v_arr[in_range]))
-                text_height_est = 18.0 * float(px_y)
-                if max_y_in_range + text_height_est >= y_text_base:
-                    y_text_base = max_y_in_range + gap
-        y_text = min(y_hi - 0.02 * y_span, y_text_base)
+        px_x, _px_y = view_box.viewPixelSize()
+        x_rng = self._plot_widget.viewRange()[0]
+        x_lo, x_hi = float(x_rng[0]), float(x_rng[1])
+        gap_x = max(0.008 * (x1 - x0), 5.0 * float(px_x))
+        # Place label to the side with more room; anchor so it stays beside the arrow.
+        room_right = x_hi - x1
+        room_left = x0 - x_lo
+        if room_right >= room_left:
+            x_text = x1 + gap_x
+            self._cursor_delta_text.setAnchor((0, 0.5))  # left edge at pos
+        else:
+            x_text = x0 - gap_x
+            self._cursor_delta_text.setAnchor((1, 0.5))  # right edge at pos
         self._cursor_delta_text.setHtml(
             f'<span style="color:#4169e1; font-size:10pt;"><b>Δt {dt_ms:.1f} ms</b></span>'
         )
-        self._cursor_delta_text.setPos(x_mid, y_text)
+        self._cursor_delta_text.setPos(x_text, y_line)
         self._cursor_delta_text.setVisible(True)
 
     def _capture_cursor_measurement(self):
@@ -5408,6 +5404,7 @@ class View(QMainWindow):
         self._hrv_axis_ceiling = int(-(-hrv_hi // 5)) * 5
         self._hrv_axis_floor = max(0, int(hrv_lo // 5) * 5)
         self.hrv_widget.y_axis.setRange(self._hrv_axis_floor, self._hrv_axis_ceiling)
+        self.hrv_widget.chart().update()
 
         # SDNN: baseline-centered range.
         sdnn_vals = self._visible_series_values(self.sdnn_series, hrv_x_min, hrv_x_max)
@@ -5675,11 +5672,13 @@ class View(QMainWindow):
             # --- CONTINUOUS PHASE ENGINE ---
             
             # PHASE 1: BASELINE COLLECTION (exclude warmup to avoid stabilization artifacts)
+            # Only use RMSSD values below noisy threshold; high RMSSD = erratic RR = poor signal.
             if (
                 elapsed >= PLOT_WARMUP_SECONDS
                 and elapsed < total_calibration_time
             ):
-                self.baseline_values.append(y)
+                if y <= RMSSD_NOISY_MS:
+                    self.baseline_values.append(y)
 
             # PHASE 2: CALCULATE AVERAGES
             elif self.baseline_rmssd is None and self.baseline_values:
@@ -5745,6 +5744,9 @@ class View(QMainWindow):
         self.pacer_label.setText(f"Rate: {rate.value}")
 
     def update_hrv_target(self, target: NamedSignal):
+        # Do not overwrite RMSSD axis when user has reset Y axes (data-driven range)
+        if self._hrv_axis_floor is not None:
+            return
         self.hrv_widget.y_axis.setRange(0, target.value)
 
     def _sync_aux_windows_to_main_xrange(self, x_lo: float, x_hi: float):
