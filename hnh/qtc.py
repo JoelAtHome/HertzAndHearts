@@ -53,6 +53,49 @@ def compute_qtc_ms(qt_ms: float, rr_ms: float, formula: QtcFormula) -> float | N
     return None
 
 
+def _compute_snr_db(cleaned: np.ndarray, rpeaks: list, sampling_rate: int) -> float | None:
+    """
+    Compute signal-to-noise ratio (dB) from cleaned ECG and R-peak indices.
+    Signal: RMS of QRS windows around each R-peak. Noise: std of baseline between beats.
+    """
+    if len(rpeaks) < 3:
+        return None
+    rpeaks_arr = np.asarray(rpeaks, dtype=int)
+    # Signal window: ±6 samples (~46ms) around R-peak = QRS-dominated
+    half_win = min(6, sampling_rate // 20)
+    signal_vals: list[float] = []
+    noise_vals: list[float] = []
+    n = len(cleaned)
+    for i in range(1, len(rpeaks_arr)):
+        r = rpeaks_arr[i]
+        r_prev = rpeaks_arr[i - 1]
+        rr = r - r_prev
+        if rr < sampling_rate // 5:  # skip very short intervals
+            continue
+        # Signal: QRS window around R
+        lo = max(0, r - half_win)
+        hi = min(n, r + half_win + 1)
+        seg = cleaned[lo:hi]
+        if seg.size >= 3:
+            rms = float(np.sqrt(np.mean(seg.astype(float) ** 2)) + 1e-12)
+            signal_vals.append(rms)
+        # Noise: middle 40% of RR (baseline between T and next P)
+        mid_start = r_prev + int(0.35 * rr)
+        mid_end = r_prev + int(0.65 * rr)
+        if mid_end - mid_start >= half_win * 2:
+            noise_seg = cleaned[mid_start:mid_end]
+            noise_vals.extend(noise_seg.astype(float).tolist())
+    if not signal_vals or len(noise_vals) < 10:
+        return None
+    rms_signal = float(np.sqrt(np.mean(np.array(signal_vals) ** 2)))
+    std_noise = float(np.std(noise_vals) + 1e-9)
+    if std_noise <= 0:
+        return None
+    ratio = rms_signal / std_noise
+    snr_db = 20.0 * np.log10(max(ratio, 1e-6))
+    return float(np.clip(snr_db, 0.0, 50.0))  # cap for display stability
+
+
 def _to_int_or_none(value) -> int | None:
     if value is None:
         return None
@@ -137,13 +180,13 @@ def suggest_qtc_method(
     return {"suggested_method": "bazett", "reasoning": reason}
 
 
-def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[list[dict], str | None]:
+def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[list[dict], str | None, float | None]:
     if len(ecg_samples) < max(cfg.sampling_rate * 5, 400):
-        return [], "insufficient ecg data"
+        return [], "insufficient ecg data", None
     try:
         import neurokit2 as nk
     except Exception:
-        return [], "neurokit2 unavailable"
+        return [], "neurokit2 unavailable", None
 
     try:
         ecg = np.asarray(ecg_samples, dtype=float)
@@ -163,7 +206,8 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
             _, peaks_info = nk.ecg_peaks(cleaned, sampling_rate=cfg.sampling_rate, correct_artifacts=True)
             rpeaks = peaks_info.get("ECG_R_Peaks", [])
             if len(rpeaks) < 3:
-                return [], "insufficient r peaks"
+                return [], "insufficient r peaks", None
+            snr_db = _compute_snr_db(cleaned, rpeaks, cfg.sampling_rate)
             q_onsets: list = []
             s_offsets: list = []
             t_offsets: list = []
@@ -194,11 +238,11 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
                     t_offsets = t_candidates
                     break
     except Exception:
-        return [], "ecg delineation failed"
+        return [], "ecg delineation failed", None
 
     n = min(len(rpeaks), len(q_onsets), len(t_offsets))
     if n < 2:
-        return [], "insufficient delineation"
+        return [], "insufficient delineation", snr_db
 
     candidates: list[dict] = []
     for idx in range(1, n):
@@ -234,14 +278,15 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
             }
         )
     if not candidates:
-        return [], "no valid qt candidates"
-    return candidates, None
+        return [], "no valid qt candidates", snr_db
+    return candidates, None, snr_db
 
 
-def build_qtc_payload(candidates: list[dict], cfg: QtcConfig) -> dict:
+def build_qtc_payload(candidates: list[dict], cfg: QtcConfig, snr_db: float | None = None) -> dict:
     payload = {
         "session_value_ms": None,
         "qrs_ms": None,
+        "snr_db": snr_db,
         "summary_method": "median_valid_window",
         "summary_window_seconds": int(cfg.summary_window_seconds),
         "status": "unavailable",
@@ -386,8 +431,8 @@ def build_qtc_payload(candidates: list[dict], cfg: QtcConfig) -> dict:
 
 
 def compute_qtc_payload_from_ecg(ecg_samples: list[float], cfg: QtcConfig) -> dict:
-    candidates, err = extract_qt_candidates(ecg_samples, cfg)
-    payload = build_qtc_payload(candidates, cfg)
+    candidates, err, snr_db = extract_qt_candidates(ecg_samples, cfg)
+    payload = build_qtc_payload(candidates, cfg, snr_db)
     if err and not payload["quality"]["is_valid"]:
         payload["quality"]["reason"] = err
     return payload
