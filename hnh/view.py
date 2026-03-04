@@ -2125,23 +2125,50 @@ class EcgWindow(QMainWindow):
         self._cursor_arrow_a.setVisible(True)
         self._cursor_arrow_b.setVisible(True)
         view_box = self._plot_widget.getViewBox()
-        px_x, _px_y = view_box.viewPixelSize()
-        x_rng = self._plot_widget.viewRange()[0]
-        x_lo, x_hi = float(x_rng[0]), float(x_rng[1])
-        gap_x = max(0.008 * (x1 - x0), 5.0 * float(px_x))
-        # Place label to the side with more room; anchor so it stays beside the arrow.
-        room_right = x_hi - x1
-        room_left = x0 - x_lo
-        if room_right >= room_left:
-            x_text = x1 + gap_x
-            self._cursor_delta_text.setAnchor((0, 0.5))  # left edge at pos
+        _px_x, px_y = view_box.viewPixelSize()
+        x_mid = (x0 + x1) * 0.5
+        text_height_px = 18.0
+        margin = max(0.02 * y_span, 4.0 * float(px_y))
+        # Sample waveform in cursor span to detect overlap at top vs bottom.
+        top_crowded = bottom_crowded = False
+        min_y_in_range = y_lo
+        max_y_in_range = y_hi
+        if len(self._times) >= 2 and len(self._values) >= 2:
+            t_arr = np.array(self._times)
+            v_arr = np.array(self._values)
+            in_range = (t_arr >= x0) & (t_arr <= x1)
+            if np.any(in_range):
+                min_y_in_range = float(np.min(v_arr[in_range]))
+                max_y_in_range = float(np.max(v_arr[in_range]))
+                top_band = y_hi - text_height_px * float(px_y)
+                bottom_band = y_lo + text_height_px * float(px_y)
+                top_crowded = max_y_in_range >= top_band
+                bottom_crowded = min_y_in_range <= bottom_band
+        # Place at very top or very bottom, whichever has no overlap (or more room).
+        # Use anchors so text stays INSIDE the view (avoids clipping):
+        # - Bottom: anchor (0.5, 1.0) = bottom of text at pos, text extends upward
+        # - Top: anchor (0.5, 0) = top of text at pos, text extends downward
+        if top_crowded and not bottom_crowded:
+            y_text = y_lo + margin
+            self._cursor_delta_text.setAnchor((0.5, 1.0))  # bottom at pos, grows up
+        elif bottom_crowded and not top_crowded:
+            y_text = y_hi - margin
+            self._cursor_delta_text.setAnchor((0.5, 0))  # top at pos, grows down
+        elif top_crowded and bottom_crowded:
+            # Both crowded: pick side with more clearance.
+            if (min_y_in_range - y_lo) >= (y_hi - max_y_in_range):
+                y_text = y_lo + margin
+                self._cursor_delta_text.setAnchor((0.5, 1.0))
+            else:
+                y_text = y_hi - margin
+                self._cursor_delta_text.setAnchor((0.5, 0))
         else:
-            x_text = x0 - gap_x
-            self._cursor_delta_text.setAnchor((1, 0.5))  # right edge at pos
+            y_text = y_lo + margin
+            self._cursor_delta_text.setAnchor((0.5, 1.0))
         self._cursor_delta_text.setHtml(
             f'<span style="color:#4169e1; font-size:10pt;"><b>Δt {dt_ms:.1f} ms</b></span>'
         )
-        self._cursor_delta_text.setPos(x_text, y_line)
+        self._cursor_delta_text.setPos(x_mid, y_text)
         self._cursor_delta_text.setVisible(True)
 
     def _capture_cursor_measurement(self):
