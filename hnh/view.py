@@ -1,7 +1,11 @@
 from datetime import datetime, date
 import hashlib
+import io
 import os
 import json
+import struct
+import sys
+import wave
 import math
 import random
 import shutil
@@ -76,6 +80,35 @@ YELLOW = QColor(255, 255, 0)
 RED = QColor(255, 0, 0)
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
+
+
+def _play_shutter_sound() -> None:
+    """Play a short camera shutter click (Windows only via winsound)."""
+    try:
+        if sys.platform != "win32":
+            return
+        import winsound
+        sample_rate = 22050
+        duration_ms = 60
+        n_samples = int(sample_rate * duration_ms / 1000)
+        data = []
+        for i in range(n_samples):
+            t = i / sample_rate
+            decay = math.exp(-t * 60)
+            val = int(32767 * 0.25 * decay * math.sin(2 * math.pi * 1200 * t))
+            data.append(max(-32768, min(32767, val)))
+        buf = struct.pack(f"<{n_samples}h", *data)
+        with io.BytesIO() as f:
+            with wave.open(f, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(sample_rate)
+                w.writeframes(buf)
+            wav_bytes = f.getvalue()
+        winsound.PlaySound(wav_bytes, winsound.SND_MEMORY | winsound.SND_ASYNC | winsound.SND_NODEFAULT)
+    except Exception:
+        pass
+
 
 # Popup reasons that auto-dismiss; others (erratic HR, no data, total dropout) require acknowledgment.
 _SIGNAL_POPUP_AUTO_DISMISS_REASONS = frozenset({
@@ -2194,6 +2227,30 @@ class EcgWindow(QMainWindow):
             self._statusbar.showMessage("Image capture failed.")
             return
         self.image_captured.emit(pixmap)
+        _play_shutter_sound()
+        # Visual feedback: white flash overlay over plot for ~250ms
+        central = self.centralWidget()
+        if central is None:
+            return
+        overlay = QWidget(central)
+        overlay.setGeometry(self._plot_widget.geometry())
+        overlay.setStyleSheet("background-color: white;")
+        overlay.raise_()
+        overlay.show()
+        effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(250)
+        anim.setStartValue(0.9)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def cleanup():
+            overlay.deleteLater()
+            anim.deleteLater()
+
+        anim.finished.connect(cleanup)
+        anim.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
 
     def set_image_capture_enabled(self, enabled: bool) -> None:
         self._capture_image_button.setEnabled(enabled)
@@ -3439,6 +3496,7 @@ class View(QMainWindow):
         self._session_stress_ratio_values: list[float] = []
         self._session_snr_values: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
+        self._last_qtc_diag_logged: tuple = ()  # (method, qrs_source) for DEBUG throttle
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
         self._disclaimer_acknowledged_at: str | None = None
@@ -4113,9 +4171,8 @@ class View(QMainWindow):
             self._disclaimer_ack_mode = "profile_skip_preference"
 
     def _show_maximized_fit(self):
-        """Maximize and constrain to available screen (avoids Windows cutoff)."""
-        self.showMaximized()
-        QTimer.singleShot(60, self._measure_and_apply_fit_geometry)
+        """Size window to available screen (avoid showMaximized which can push window off-screen on Windows)."""
+        self._measure_and_apply_fit_geometry()
 
     def _show_main_window_fullscreen(self):
         """Show main window filling available screen (used after startup flow)."""
@@ -4136,7 +4193,9 @@ class View(QMainWindow):
         self._maximized_once = True
         self.show()
         QTimer.singleShot(60, self._measure_and_apply_fit_geometry)
-        QTimer.singleShot(350, self.showMaximized)
+        # Do NOT call showMaximized here: on Windows it overwrites our correct
+        # geometry and can push the window off-screen. Our setGeometry already
+        # fills the available screen.
 
     def _window_frame_inset(self) -> QMargins:
         """Window frame size; uses cached measurement when available."""
@@ -4170,11 +4229,35 @@ class View(QMainWindow):
             )
             self.setGeometry(geom)
 
+    def _ensure_window_on_screen(self):
+        """Clamp window to visible screen area. Safety net for off-screen recovery."""
+        if not self.isVisible():
+            return
+        screen = self.screen()
+        if screen is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+        if screen is None:
+            return
+        avail = screen.availableGeometry()
+        g = self.geometry()
+        # Early exit: already fully on screen
+        if avail.contains(g):
+            return
+        # Clamp to available bounds
+        new_x = max(avail.left(), min(g.x(), avail.right() - min(g.width(), avail.width())))
+        new_y = max(avail.top(), min(g.y(), avail.bottom() - min(g.height(), avail.height())))
+        new_w = min(g.width(), avail.width())
+        new_h = min(g.height(), avail.height())
+        self.setGeometry(QRect(new_x, new_y, new_w, new_h))
+
     def showEvent(self, event):
         super().showEvent(event)
         if not self._maximized_once:
             self._maximized_once = True
             QTimer.singleShot(0, self._show_maximized_fit)
+        # Safety net: ensure window stays on screen (handles monitor changes, etc.)
+        QTimer.singleShot(100, self._ensure_window_on_screen)
 
     def closeEvent(self, event):
         self._suppress_comm_error_popups = True
@@ -4490,6 +4573,7 @@ class View(QMainWindow):
         self._session_stress_ratio_values = []
         self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
+        self._last_qtc_diag_logged = ()
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
             bundle=self._session_bundle,
@@ -4625,6 +4709,7 @@ class View(QMainWindow):
         self._session_stress_ratio_values = []
         self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
+        self._last_qtc_diag_logged = ()
         self._session_bundle = None
         self.ecg_window.clear()
         self.qtc_window.clear()
@@ -5994,6 +6079,7 @@ class View(QMainWindow):
     def _handle_stream_reset(self, clear_series: bool = True):
         self.model.clear_buffers()
         self._session_qtc_payload = default_qtc_payload()
+        self._last_qtc_diag_logged = ()
         self._arm_main_plot_warmup(clear_series=clear_series)
         self.qtc_window.clear()
         if self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
@@ -6295,6 +6381,12 @@ class View(QMainWindow):
                         self._session_snr_values.append(float(snr_db))
                     except (TypeError, ValueError):
                         pass
+                diag = data.value.get("delineation_diagnostics") or {}
+                if diag and self.settings.DEBUG:
+                    key = (diag.get("delineation_method"), diag.get("qrs_boundary_source"))
+                    if key != self._last_qtc_diag_logged:
+                        self._last_qtc_diag_logged = key
+                        print(f"ECG delineation: method={key[0]}, qrs_source={key[1]}")
                 self._refresh_popup_control_labels()
 
         # 3. AVERAGED DATA (RMSSD & Stability)

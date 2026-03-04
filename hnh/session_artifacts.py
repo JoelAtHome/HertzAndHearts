@@ -68,6 +68,7 @@ def default_qtc_payload() -> dict:
         "session_value_ms": None,
         "qrs_ms": None,
         "session_qrs_avg_ms": None,
+        "delineation_diagnostics": {},
         "summary_method": "median_valid_window",
         "summary_window_seconds": 30,
         "status": "unavailable",

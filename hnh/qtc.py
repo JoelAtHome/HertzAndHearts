@@ -180,13 +180,17 @@ def suggest_qtc_method(
     return {"suggested_method": "bazett", "reasoning": reason}
 
 
-def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[list[dict], str | None, float | None]:
+def extract_qt_candidates(
+    ecg_samples: list[float], cfg: QtcConfig
+) -> tuple[list[dict], str | None, float | None, dict]:
+    """Extract QT/QRS candidates. Returns (candidates, error, snr_db, diagnostics)."""
+    _empty_diag: dict = {}
     if len(ecg_samples) < max(cfg.sampling_rate * 5, 400):
-        return [], "insufficient ecg data", None
+        return [], "insufficient ecg data", None, _empty_diag
     try:
         import neurokit2 as nk
     except Exception:
-        return [], "neurokit2 unavailable", None
+        return [], "neurokit2 unavailable", None, _empty_diag
 
     try:
         ecg = np.asarray(ecg_samples, dtype=float)
@@ -206,43 +210,73 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
             _, peaks_info = nk.ecg_peaks(cleaned, sampling_rate=cfg.sampling_rate, correct_artifacts=True)
             rpeaks = peaks_info.get("ECG_R_Peaks", [])
             if len(rpeaks) < 3:
-                return [], "insufficient r peaks", None
+                return [], "insufficient r peaks", None, _empty_diag
             snr_db = _compute_snr_db(cleaned, rpeaks, cfg.sampling_rate)
             q_onsets: list = []
             s_offsets: list = []
             t_offsets: list = []
-            for method in ("dwt", "cwt", "peak"):
+            delineation_method_used: str | None = None
+            qrs_boundary_source: str | None = None
+            # DWT first: wavelet-based, validated for QRS onset/offset (Q to J point).
+            # CWT fallback; prominence/peak last (prominence gives R-wave bounds, not full QRS).
+            for method in ("dwt", "cwt", "prominence", "peak"):
                 try:
+                    kwargs: dict = {}
+                    if method == "prominence":
+                        kwargs = {"max_qrs_interval": 180}  # ms, allows normal-wide QRS
                     _, waves = nk.ecg_delineate(
                         cleaned,
                         rpeaks,
                         sampling_rate=cfg.sampling_rate,
                         method=method,
                         show=False,
+                        **kwargs,
                     )
                 except Exception:
                     continue
-                q_candidates = waves.get("ECG_Q_Onsets", [])
-                if not q_candidates:
-                    # "peak" mode may not provide onset boundaries.
-                    q_candidates = waves.get("ECG_Q_Peaks", [])
-                s_candidates = waves.get("ECG_S_Offsets", [])
-                if not s_candidates:
-                    # Fallback when offset boundaries are unavailable.
-                    s_candidates = waves.get("ECG_S_Peaks", [])
                 t_candidates = waves.get("ECG_T_Offsets", [])
-                n_local = min(len(rpeaks), len(q_candidates), len(t_candidates))
+                if not t_candidates:
+                    continue
+                # Prefer R_Onsets/R_Offsets (full QRS bounds) — dwt, cwt, prominence provide these.
+                r_onsets = waves.get("ECG_R_Onsets", [])
+                r_offsets = waves.get("ECG_R_Offsets", [])
+                if r_onsets and r_offsets and len(r_onsets) >= 2 and len(r_offsets) >= 2:
+                    q_onsets = r_onsets
+                    s_offsets = r_offsets
+                    qrs_boundary_source = "R_Onsets_R_Offsets"
+                else:
+                    # Fallback: Q_Onsets + S_Offsets (some NeuroKit variants); else peaks.
+                    q_candidates = waves.get("ECG_Q_Onsets", [])
+                    if not q_candidates:
+                        q_candidates = waves.get("ECG_Q_Peaks", [])
+                    s_candidates = waves.get("ECG_S_Offsets", [])
+                    if not s_candidates:
+                        s_candidates = waves.get("ECG_S_Peaks", [])
+                    if q_candidates and s_candidates:
+                        q_onsets = q_candidates
+                        s_offsets = s_candidates
+                        has_q_onset = bool(waves.get("ECG_Q_Onsets"))
+                        has_s_offset = bool(waves.get("ECG_S_Offsets"))
+                        qrs_boundary_source = (
+                            "Q_Onsets_S_Offsets" if (has_q_onset and has_s_offset) else "Q_Peaks_S_Peaks"
+                        )
+                n_local = min(len(rpeaks), len(q_onsets), len(s_offsets), len(t_candidates))
                 if n_local >= 2:
-                    q_onsets = q_candidates
-                    s_offsets = s_candidates
                     t_offsets = t_candidates
+                    delineation_method_used = method
                     break
     except Exception:
-        return [], "ecg delineation failed", None
+        return [], "ecg delineation failed", None, _empty_diag
 
     n = min(len(rpeaks), len(q_onsets), len(t_offsets))
     if n < 2:
-        return [], "insufficient delineation", snr_db
+        return [], "insufficient delineation", snr_db, _empty_diag
+
+    diagnostics = {}
+    if delineation_method_used is not None:
+        diagnostics["delineation_method"] = delineation_method_used
+    if qrs_boundary_source is not None:
+        diagnostics["qrs_boundary_source"] = qrs_boundary_source
 
     candidates: list[dict] = []
     for idx in range(1, n):
@@ -278,15 +312,21 @@ def extract_qt_candidates(ecg_samples: list[float], cfg: QtcConfig) -> tuple[lis
             }
         )
     if not candidates:
-        return [], "no valid qt candidates", snr_db
-    return candidates, None, snr_db
+        return [], "no valid qt candidates", snr_db, diagnostics
+    return candidates, None, snr_db, diagnostics
 
 
-def build_qtc_payload(candidates: list[dict], cfg: QtcConfig, snr_db: float | None = None) -> dict:
+def build_qtc_payload(
+    candidates: list[dict],
+    cfg: QtcConfig,
+    snr_db: float | None = None,
+    delineation_diagnostics: dict | None = None,
+) -> dict:
     payload = {
         "session_value_ms": None,
         "qrs_ms": None,
         "snr_db": snr_db,
+        "delineation_diagnostics": delineation_diagnostics or {},
         "summary_method": "median_valid_window",
         "summary_window_seconds": int(cfg.summary_window_seconds),
         "status": "unavailable",
@@ -431,8 +471,8 @@ def build_qtc_payload(candidates: list[dict], cfg: QtcConfig, snr_db: float | No
 
 
 def compute_qtc_payload_from_ecg(ecg_samples: list[float], cfg: QtcConfig) -> dict:
-    candidates, err, snr_db = extract_qt_candidates(ecg_samples, cfg)
-    payload = build_qtc_payload(candidates, cfg, snr_db)
+    candidates, err, snr_db, diagnostics = extract_qt_candidates(ecg_samples, cfg)
+    payload = build_qtc_payload(candidates, cfg, snr_db, delineation_diagnostics=diagnostics)
     if err and not payload["quality"]["is_valid"]:
         payload["quality"]["reason"] = err
     return payload
