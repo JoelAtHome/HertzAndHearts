@@ -91,6 +91,10 @@ SETTLING_DURATION: Final[int] = 15  # seconds
 # becomes the patient's baseline reference.
 BASELINE_DURATION: Final[int] = 30  # seconds
 
+# Initial warmup: ignore first N seconds of data for plotting and baseline
+# calculations to avoid sensor-stabilization artifacts.
+PLOT_WARMUP_SECONDS: Final[float] = 5.0
+
 # Export EDF+ session artifact on finalization.
 # Disabled by default to keep baseline recording/export lightweight.
 EXPORT_EDF_PLUS_D: Final[bool] = False

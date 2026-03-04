@@ -13,7 +13,7 @@ import pyqtgraph as pg
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
 from PySide6.QtGui import (
     QPen, QIcon, QLinearGradient, QBrush, QGradient, QColor, QPixmap, QFont,
-    QKeySequence, QShortcut, QDesktopServices,
+    QKeySequence, QShortcut, QDesktopServices, QPainter,
 )
 from PySide6.QtCore import (
     Qt, QThread, Signal, Slot, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
     QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
+    QGraphicsView,
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit,
 )
@@ -37,6 +38,7 @@ from hnh.pacer import Pacer
 from hnh.model import Model
 from hnh.config import (
     breathing_rate_to_tick, HRV_HISTORY_DURATION, IBI_HISTORY_DURATION,
+    PLOT_WARMUP_SECONDS,
     MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
     MIN_PLOT_IBI, MAX_PLOT_IBI,
     ECG_SAMPLE_RATE,
@@ -1456,6 +1458,11 @@ class PacerWidget(QChartView):
 class XYSeriesWidget(QChartView):
     def __init__(self, x_values, y_values, line_color=QColor(0, 0, 0)):
         super().__init__()
+        self.setViewport(QWidget())
+        self.setBackgroundBrush(QBrush(Qt.GlobalColor.white))
+        self.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        self.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        self.setViewportUpdateMode(QGraphicsView.ViewportUpdateMode.FullViewportUpdate)
         self.plot = QChart()
         self.plot.legend().setVisible(False)
         self.plot.setBackgroundRoundness(0)
@@ -1658,8 +1665,8 @@ class EcgWindow(QMainWindow):
         self._cursor_b_select_button.toggled.connect(lambda checked: self._select_active_cursor("B", checked))
         self._cursor_interval_type_combo = QComboBox()
         self._cursor_interval_type_combo.addItems(["R-R", "QRS", "QT", "PR", "Other"])
-        self._cursor_interval_type_combo.setMinimumWidth(90)
-        self._cursor_interval_type_combo.setMaximumWidth(95)
+        self._cursor_interval_type_combo.setMinimumWidth(54)
+        self._cursor_interval_type_combo.setMaximumWidth(58)
         self._cursor_interval_type_combo.setToolTip("Context for the logged interval (what Δt represents).")
         self._cursor_capture_button = QPushButton("Log Δt")
         self._cursor_capture_button.setFixedWidth(62)
@@ -1678,8 +1685,8 @@ class EcgWindow(QMainWindow):
         controls_row.addWidget(self._cursor_a_select_button)
         controls_row.addWidget(self._cursor_b_select_button)
         controls_row.addWidget(self._cursor_interval_type_combo)
-        controls_row.addWidget(self._capture_image_button)
         controls_row.addWidget(self._cursor_capture_button)
+        controls_row.addWidget(self._capture_image_button)
         controls_row.addStretch(1)
         controls_row.addWidget(self._relock_button)
         controls_row.addWidget(self._freeze_button)
@@ -1935,7 +1942,7 @@ class EcgWindow(QMainWindow):
             return []
         baseline = float(np.median(y_arr[idxs]))
         amp = y_arr - baseline
-        min_amp = float(np.percentile(amp[idxs], 60))
+        min_amp = float(np.percentile(amp[idxs], 40))
         local_noise = float(np.std(y_arr[idxs])) + 1e-6
         out: list[tuple[int, float, float, float, float]] = []
         for i in range(i0, i1 + 1):
@@ -2014,6 +2021,16 @@ class EcgWindow(QMainWindow):
         _score, a_t, b_t = max(pairs, key=lambda x: x[0])
         return a_t, b_t
 
+    def _snap_time_to_nearest_r_peak(self, t: float, x_lo: float, x_hi: float) -> float:
+        """Snap time to nearest R-peak in view; return t unchanged if no peaks."""
+        peaks = self._find_positive_peak_indices(x_lo, x_hi)
+        if not peaks:
+            return t
+        t_arr = np.asarray(self._times, dtype=float)
+        peak_times = np.array([float(t_arr[p[0]]) for p in peaks])
+        idx = int(np.argmin(np.abs(peak_times - t)))
+        return float(peak_times[idx])
+
     def _enable_cursors_for_frozen_view(self):
         if len(self._times) < 2:
             self._set_cursor_controls_enabled(False)
@@ -2029,6 +2046,14 @@ class EcgWindow(QMainWindow):
             span = max(0.2, x_hi - x_lo)
             a_pos = x_lo + 0.33 * span
             b_pos = x_lo + 0.66 * span
+            a_pos = self._snap_time_to_nearest_r_peak(a_pos, x_lo, x_hi)
+            b_pos = self._snap_time_to_nearest_r_peak(b_pos, x_lo, x_hi)
+            if abs(b_pos - a_pos) < 0.05:
+                peaks = self._find_positive_peak_indices(x_lo, x_hi)
+                if len(peaks) >= 2:
+                    t_arr = np.asarray(self._times, dtype=float)
+                    a_pos = float(t_arr[peaks[0][0]])
+                    b_pos = float(t_arr[peaks[1][0]])
         else:
             a_pos, b_pos = suggested
         self._cursor_suppress_events = True
@@ -2099,7 +2124,18 @@ class EcgWindow(QMainWindow):
         # Keep label consistently just above the arrowed line, with a tight,
         # pixel-aware gap so it does not overlap or drift too far.
         gap = max(0.022 * y_span, 3.0 * float(px_y))
-        y_text = min(y_hi - 0.02 * y_span, y_line + gap)
+        y_text_base = y_line + gap
+        # Detect waveform overlap: sample max y in cursor span and move text above if needed.
+        if len(self._times) >= 2 and len(self._values) >= 2:
+            t_arr = np.array(self._times)
+            v_arr = np.array(self._values)
+            in_range = (t_arr >= x0) & (t_arr <= x1)
+            if np.any(in_range):
+                max_y_in_range = float(np.max(v_arr[in_range]))
+                text_height_est = 18.0 * float(px_y)
+                if max_y_in_range + text_height_est >= y_text_base:
+                    y_text_base = max_y_in_range + gap
+        y_text = min(y_hi - 0.02 * y_span, y_text_base)
         self._cursor_delta_text.setHtml(
             f'<span style="color:#4169e1; font-size:10pt;"><b>Δt {dt_ms:.1f} ms</b></span>'
         )
@@ -3331,18 +3367,21 @@ class View(QMainWindow):
         self.baseline_hr_values = []
         self.baseline_hr = None
         self.start_time = None 
-        self._plot_start_delay_seconds = 3.0
+        self._plot_start_delay_seconds = float(PLOT_WARMUP_SECONDS)
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
         self._hr_ewma = None
+        self._hr_ewma_post_warmup = False
         self._signal_popup_shown = False
         self._signal_degrade_count = 0
         self._signal_popup_widget: QMessageBox | None = None
         self._pending_signal_popup_reason: str | None = None
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
+        self._hrv_axis_floor = None
         self._hrv_axis_ceiling = None
+        self._sdnn_axis_floor = None
         self._sdnn_axis_ceiling = None
         self._main_plot_warmup_until: float | None = None
         self._main_plots_frozen = False
@@ -3352,6 +3391,7 @@ class View(QMainWindow):
         self._debug_heart_anim_groups = []
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._rmssd_smooth_post_warmup = False
         self._main_plot_visible_sec = 60.0
         self._main_plot_guard_sec = 12.0
         self._series_prune_stride = 32
@@ -3422,6 +3462,7 @@ class View(QMainWindow):
         self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
         self.sensor.ecg_update.connect(self.model.update_ecg_samples)
         self.sensor.status_update.connect(self.show_status)
+        self.sensor.battery_update.connect(self._update_battery_display)
 
         self.ecg_window = EcgWindow()
         self.qtc_window = QtcWindow()
@@ -3474,8 +3515,7 @@ class View(QMainWindow):
         self.hr_trend_series.attachAxis(self.ibis_widget.x_axis)
         self.hr_trend_series.attachAxis(self.ibis_widget.y_axis)
 
-        self.ibis_widget.plot.legend().setVisible(True)
-        self.ibis_widget.plot.legend().setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.ibis_widget.plot.legend().setVisible(False)
 
         self.hr_y_axis_right = QValueAxis()
         self.hr_y_axis_right.setLabelsVisible(False)
@@ -3487,8 +3527,7 @@ class View(QMainWindow):
         self.hrv_widget = XYSeriesWidget(self.model.hrv_seconds, self.model.hrv_buffer)
         self.hrv_widget.y_axis.setRange(0, 10)
         self.hrv_widget.time_series.setName("RMSSD (ms)")
-        self.hrv_widget.plot.legend().setVisible(True)
-        self.hrv_widget.plot.legend().setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+        self.hrv_widget.plot.legend().setVisible(False)
 
         self.sdnn_series = QLineSeries()
         self.sdnn_series.setName("HRV(SDNN)")
@@ -3584,6 +3623,16 @@ class View(QMainWindow):
         saved = _load_last_sensor()
         if saved:
             self.address_menu.addItem(f"{saved['name']}, {saved['address']}")
+        self.battery_label = QLabel("\u2014")  # em dash when unknown, value% when connected
+        self.battery_label.setStyleSheet(
+            "font-size: 10px; color: #666; background: #e0e0e0; "
+            "border-radius: 3px; padding: 1px 4px;"
+        )
+        self.battery_label.setFixedWidth(36)
+        self.battery_label.setAlignment(Qt.AlignCenter)
+        self.battery_label.setToolTip(
+            '<span style="color: black; white-space: nowrap;">Sensor battery level (shown when connected).</span>'
+        )
         self.connect_button = QPushButton("Connect")
         self.connect_button.setAutoDefault(True)
         self.connect_button.setDefault(False)
@@ -3843,13 +3892,14 @@ class View(QMainWindow):
         self._disclaimer_link.setStyleSheet(
             "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
         )
-        self.address_menu.setMaximumWidth(320)
+        self.address_menu.setMaximumWidth(200)
         self.address_menu.setStyleSheet("font-size: 11px;")
 
         toolbar.addWidget(self.scan_button)
         toolbar.addWidget(self.address_menu)
         toolbar.addWidget(self.connect_button)
         toolbar.addWidget(self.disconnect_button)
+        toolbar.addWidget(self.battery_label)
 
         _sep1 = QFrame()
         _sep1.setFixedSize(1, 18)
@@ -4519,10 +4569,13 @@ class View(QMainWindow):
         self._fault_active = False
         self._consecutive_good = 0
         self._hr_ewma = None
+        self._hr_ewma_post_warmup = False
         self._reset_signal_popup()
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
+        self._hrv_axis_floor = None
         self._hrv_axis_ceiling = None
+        self._sdnn_axis_floor = None
         self._sdnn_axis_ceiling = None
         self._main_plots_frozen = False
         self._all_plots_frozen = False
@@ -4531,6 +4584,7 @@ class View(QMainWindow):
         self._apply_freeze_button_states()
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._rmssd_smooth_post_warmup = False
         self._session_annotations = []
         self._session_hr_values = []
         self._session_hr_times = []
@@ -5204,12 +5258,16 @@ class View(QMainWindow):
         self._fault_active = False
         self._consecutive_good = 0
         self._hr_ewma = None
+        self._hr_ewma_post_warmup = False
         self._hr_axis_floor = None
         self._hr_axis_ceiling = None
+        self._hrv_axis_floor = None
         self._hrv_axis_ceiling = None
+        self._sdnn_axis_floor = None
         self._sdnn_axis_ceiling = None
         self._rmssd_smooth_buf = []
         self._sdnn_smooth_buf = []
+        self._rmssd_smooth_post_warmup = False
         self._last_data_time = time.time()
         self._handle_stream_reset()
         self.hr_trend_series.clear()
@@ -5268,8 +5326,9 @@ class View(QMainWindow):
         if hr_vals:
             hr_lo = max(30.0, min(hr_vals))
             hr_hi = min(220.0, max(hr_vals))
-            span = max(40.0, hr_hi - hr_lo)
-            pad = max(8.0, span * 0.15)
+            data_span = hr_hi - hr_lo
+            span = max(12.0, data_span)
+            pad = max(2.0, span * 0.15)
             hr_lo = max(30.0, hr_lo - pad)
             hr_hi = min(220.0, hr_hi + pad)
         else:
@@ -5287,40 +5346,70 @@ class View(QMainWindow):
             hr_hi = max(hr_hi, float(self.baseline_hr) + 2.0)
             hr_lo = max(30.0, hr_lo)
             hr_hi = min(220.0, hr_hi)
-        if hr_hi - hr_lo < 40.0:
+        if hr_hi - hr_lo < 12.0:
             center = (hr_hi + hr_lo) / 2.0
-            hr_lo = max(30.0, center - 20.0)
-            hr_hi = min(220.0, center + 20.0)
+            hr_lo = max(30.0, center - 6.0)
+            hr_hi = min(220.0, center + 6.0)
         self._hr_axis_floor = int(hr_lo)
         self._hr_axis_ceiling = int(hr_hi)
         self.ibis_widget.y_axis.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
         self.hr_y_axis_right.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
 
-        # RMSSD/SDNN: use maxima from currently visible points so highs are not clipped.
-        rmssd_vals = self._visible_series_values(self.hrv_widget.time_series, x_min, x_max)
-        sdnn_vals = self._visible_series_values(self.sdnn_series, x_min, x_max)
+        # RMSSD: baseline-centered range like HR plot.
+        hrv_x_min = float(self.hrv_widget.x_axis.min())
+        hrv_x_max = float(self.hrv_widget.x_axis.max())
+        rmssd_vals = self._visible_series_values(self.hrv_widget.time_series, hrv_x_min, hrv_x_max)
         if rmssd_vals:
-            hrv_ceil = max(20.0, max(rmssd_vals) * 1.2)
+            rmssd_lo = max(0.0, min(rmssd_vals))
+            rmssd_hi = max(rmssd_vals)
+            data_span = rmssd_hi - rmssd_lo
+            span = max(6.0, data_span)
+            pad = max(1.0, span * 0.15)
+            hrv_lo = max(0.0, rmssd_lo - pad)
+            hrv_hi = rmssd_hi + pad
         else:
             rmssd_ref = self.baseline_rmssd
             if rmssd_ref is None and self._session_rmssd_values:
                 rmssd_ref = self._session_rmssd_values[-1]
             if rmssd_ref is None:
                 rmssd_ref = 20.0
-            hrv_ceil = max(20.0, rmssd_ref * 1.5)
-        # Guardrail: keep baseline RMSSD visible after manual Y-axis reset.
+            half_span = max(15.0, rmssd_ref * 0.5)
+            hrv_lo = max(0.0, rmssd_ref - half_span)
+            hrv_hi = rmssd_ref + half_span
         if self.baseline_rmssd is not None:
-            hrv_ceil = max(hrv_ceil, float(self.baseline_rmssd) + 2.0)
-        self._hrv_axis_ceiling = int(-(-hrv_ceil // 5)) * 5
-        self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
+            hrv_lo = min(hrv_lo, float(self.baseline_rmssd) - 2.0)
+            hrv_hi = max(hrv_hi, float(self.baseline_rmssd) + 2.0)
+            hrv_lo = max(0.0, hrv_lo)
+        if hrv_hi - hrv_lo < 6.0:
+            center = (hrv_hi + hrv_lo) / 2.0
+            hrv_lo = max(0.0, center - 3.0)
+            hrv_hi = center + 3.0
+        self._hrv_axis_ceiling = int(-(-hrv_hi // 5)) * 5
+        self._hrv_axis_floor = max(0, int(hrv_lo // 5) * 5)
+        self.hrv_widget.y_axis.setRange(self._hrv_axis_floor, self._hrv_axis_ceiling)
 
+        # SDNN: baseline-centered range.
+        sdnn_vals = self._visible_series_values(self.sdnn_series, hrv_x_min, hrv_x_max)
         if sdnn_vals:
-            sdnn_ceil = max(30.0, max(sdnn_vals) * 1.2)
+            sdnn_lo = max(0.0, min(sdnn_vals))
+            sdnn_hi = max(sdnn_vals)
+            data_span = sdnn_hi - sdnn_lo
+            span = max(4.0, data_span)
+            pad = max(1.0, span * 0.15)
+            sdnn_floor = max(0.0, sdnn_lo - pad)
+            sdnn_ceil = sdnn_hi + pad
         else:
             sdnn_ref = self._sdnn_smooth_buf[-1] if self._sdnn_smooth_buf else 30.0
-            sdnn_ceil = max(30.0, sdnn_ref * 1.5)
+            half_span = max(10.0, sdnn_ref * 0.5)
+            sdnn_floor = max(0.0, sdnn_ref - half_span)
+            sdnn_ceil = sdnn_ref + half_span
+        if sdnn_ceil - sdnn_floor < 4.0:
+            center = (sdnn_ceil + sdnn_floor) / 2.0
+            sdnn_floor = max(0.0, center - 2.0)
+            sdnn_ceil = center + 2.0
         self._sdnn_axis_ceiling = int(-(-sdnn_ceil // 5)) * 5
-        self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
+        self._sdnn_axis_floor = max(0, int(sdnn_floor // 5) * 5)
+        self.hrv_y_axis_right.setRange(self._sdnn_axis_floor, self._sdnn_axis_ceiling)
         self.show_status("Y-axes reset to visible data range.")
 
     def _update_phase_progress_banner(self, elapsed: float, source: str = "unknown"):
@@ -5506,6 +5595,10 @@ class View(QMainWindow):
             total_calibration_time = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
 
             # Add smoothed RMSSD to Chart
+            if elapsed >= PLOT_WARMUP_SECONDS and not self._rmssd_smooth_post_warmup:
+                self._rmssd_smooth_post_warmup = True
+                self._rmssd_smooth_buf.clear()
+                self._sdnn_smooth_buf.clear()
             ibis = list(self.model.ibis_buffer)
             cur_hr = 60000.0 / ibis[-1] if ibis and ibis[-1] > 0 else 70
             smooth_n = max(5, round(cur_hr / 60 * self.settings.SMOOTH_SECONDS))
@@ -5545,7 +5638,8 @@ class View(QMainWindow):
             if rmssd_padded > self._hrv_axis_ceiling:
                 self._hrv_axis_ceiling = rmssd_padded
             if not self._main_plots_frozen:
-                self.hrv_widget.y_axis.setRange(0, self._hrv_axis_ceiling)
+                hrv_floor = 0 if self._hrv_axis_floor is None else self._hrv_axis_floor
+                self.hrv_widget.y_axis.setRange(hrv_floor, self._hrv_axis_ceiling)
 
             if self._sdnn_axis_ceiling is None:
                 self._sdnn_axis_ceiling = 50
@@ -5554,12 +5648,16 @@ class View(QMainWindow):
                 if sdnn_padded > self._sdnn_axis_ceiling:
                     self._sdnn_axis_ceiling = sdnn_padded
             if not self._main_plots_frozen:
-                self.hrv_y_axis_right.setRange(0, self._sdnn_axis_ceiling)
+                sdnn_floor = 0 if self._sdnn_axis_floor is None else self._sdnn_axis_floor
+                self.hrv_y_axis_right.setRange(sdnn_floor, self._sdnn_axis_ceiling)
 
             # --- CONTINUOUS PHASE ENGINE ---
             
-            # PHASE 1: BASELINE COLLECTION
-            if elapsed < total_calibration_time:
+            # PHASE 1: BASELINE COLLECTION (exclude warmup to avoid stabilization artifacts)
+            if (
+                elapsed >= PLOT_WARMUP_SECONDS
+                and elapsed < total_calibration_time
+            ):
                 self.baseline_values.append(y)
 
             # PHASE 2: CALCULATE AVERAGES
@@ -5889,6 +5987,33 @@ class View(QMainWindow):
         self.health_indicator.setStyleSheet("color: %s; font-size: 18px;" % color)
         self.health_label.setText("Signal: %s" % text)
 
+    @Slot(int)
+    def _update_battery_display(self, level: int):
+        """Update battery label: numerical percentage with color based on level."""
+        if level < 0:
+            self.battery_label.setText("\u2014")
+            self.battery_label.setStyleSheet(
+                "font-size: 10px; color: #666; background: #e0e0e0; "
+                "border-radius: 3px; padding: 1px 4px;"
+            )
+            return
+        self.battery_label.setText(f"{level}%")
+        if level >= 50:
+            self.battery_label.setStyleSheet(
+                "font-size: 10px; color: black; font-weight: 700; "
+                "background: #a5d6a7; border-radius: 3px; padding: 1px 4px;"
+            )
+        elif level >= 20:
+            self.battery_label.setStyleSheet(
+                "font-size: 10px; color: black; font-weight: 700; "
+                "background: #ffcc80; border-radius: 3px; padding: 1px 4px;"
+            )
+        else:
+            self.battery_label.setStyleSheet(
+                "font-size: 10px; color: black; font-weight: 700; "
+                "background: #ef9a9a; border-radius: 3px; padding: 1px 4px;"
+            )
+
     def _log_signal_fault(self, fault_type: str, reason: str, **ctx):
         """Accumulate fault in memory; flushed to disk on disconnect or exit."""
         ts = datetime.now().isoformat(timespec="milliseconds")
@@ -6171,8 +6296,8 @@ class View(QMainWindow):
                 self.qtc_window.sync_timeline_to_main(self._plot_start_delay_seconds)
                 if self.ecg_button.text() != "ECG (waiting for data...)":
                     self.ecg_button.setText("ECG (waiting for data...)")
-                if self.qtc_button.isEnabled() and self.qtc_button.text() != "QTc (warming up...)":
-                    self.qtc_button.setText("QTc (warming up...)")
+                if self.qtc_button.text() not in ("QTc (warming up...)", "QTc (waiting for data...)"):
+                    self.qtc_button.setText("QTc (waiting for data...)")
                 if self.settings.DEBUG:
                     print("Timer Started")
 
@@ -6183,6 +6308,9 @@ class View(QMainWindow):
 
             w = self.settings.HR_EWMA_WEIGHT
             if self._hr_ewma is None:
+                self._hr_ewma = hr
+            elif elapsed >= PLOT_WARMUP_SECONDS and not self._hr_ewma_post_warmup:
+                self._hr_ewma_post_warmup = True
                 self._hr_ewma = hr
             else:
                 self._hr_ewma = w * hr + (1.0 - w) * self._hr_ewma

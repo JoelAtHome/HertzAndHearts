@@ -1,6 +1,6 @@
 import struct
 import numpy as np
-from PySide6.QtCore import QObject, Signal, QByteArray, QUuid
+from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer
 from PySide6.QtBluetooth import (
     QBluetoothDeviceDiscoveryAgent,
     QLowEnergyController,
@@ -77,6 +77,7 @@ class SensorClient(QObject):
     ecg_update = Signal(object)
     ecg_ready = Signal()
     status_update = Signal(str)
+    battery_update = Signal(int)  # 0-100 percent, or -1 if unknown/unsupported
 
     PMD_SERVICE_UUID = QBluetoothUuid(QUuid("{FB005C80-02E7-F387-1CAD-8ACD2D8DF0C8}"))
     PMD_CONTROL_UUID = QBluetoothUuid(QUuid("{FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8}"))
@@ -86,6 +87,10 @@ class SensorClient(QObject):
         0x02, 0x00, 0x00, 0x01, 0x82, 0x00, 0x01, 0x01, 0x0E, 0x00
     ]))
     ECG_STOP_COMMAND = QByteArray(bytes([0x03, 0x00]))
+
+    # Standard BLE Battery Service (0x180F) and Battery Level characteristic (0x2A19)
+    BATTERY_SERVICE_UUID = QBluetoothUuid(0x180F)
+    BATTERY_LEVEL_UUID = QBluetoothUuid(0x2A19)
 
     def __init__(self):
         super().__init__()
@@ -99,6 +104,10 @@ class SensorClient(QObject):
         self._ecg_start_pending = False
         self._ecg_data_received = False
         self._pmd_descriptors_pending = 0
+        self.battery_service: Union[None, QLowEnergyService] = None
+        self._battery_timer = QTimer(self)
+        self._battery_timer.setInterval(90_000)  # 90 seconds
+        self._battery_timer.timeout.connect(self._read_battery)
         self.ENABLE_NOTIFICATION: QByteArray = QByteArray.fromHex(b"0100")
         self.DISABLE_NOTIFICATION: QByteArray = QByteArray.fromHex(b"0000")
         self.HR_SERVICE: QBluetoothUuid.ServiceClassUuid = (
@@ -182,6 +191,8 @@ class SensorClient(QObject):
         self.hr_service.characteristicChanged.connect(self._data_handler)
         self.hr_service.discoverDetails()
 
+        self._connect_battery_service()
+
         pmd_uuid_str = self.PMD_SERVICE_UUID.toString().lower()
         pmd_match = [
             s for s in self.client.services()
@@ -203,6 +214,48 @@ class SensorClient(QObject):
             self.pmd_service.discoverDetails()
         else:
             print(f"Couldn't establish connection to PMD service on {self._sensor_address()}.")
+
+    def _connect_battery_service(self):
+        """Connect to BLE Battery Service (0x180F) if available. Polar H10 and many HR sensors support it."""
+        if self.client is None:
+            return
+        battery_match = [
+            s for s in self.client.services()
+            if s == self.BATTERY_SERVICE_UUID
+        ]
+        if not battery_match:
+            self.battery_update.emit(-1)
+            return
+        self.battery_service = self.client.createServiceObject(battery_match[0])
+        if not self.battery_service:
+            self.battery_update.emit(-1)
+            return
+        self.battery_service.stateChanged.connect(self._on_battery_service_ready)
+        self.battery_service.characteristicRead.connect(self._on_battery_level_read)
+        self.battery_service.discoverDetails()
+
+    def _on_battery_service_ready(self, state: QLowEnergyService.ServiceState):
+        if state != QLowEnergyService.RemoteServiceDiscovered:
+            return
+        if self.battery_service is None:
+            return
+        self._read_battery()
+        self._battery_timer.start()
+
+    def _read_battery(self):
+        if self.battery_service is None:
+            return
+        char = self.battery_service.characteristic(self.BATTERY_LEVEL_UUID)
+        if char.isValid():
+            self.battery_service.readCharacteristic(char)
+
+    def _on_battery_level_read(self, char: QLowEnergyCharacteristic, value: QByteArray):
+        data = value.data()
+        if len(data) >= 1:
+            level = min(100, max(0, data[0]))
+            self.battery_update.emit(level)
+        else:
+            self.battery_update.emit(-1)
 
     def _start_hr_notification(self, state: QLowEnergyService.ServiceState):
         if state != QLowEnergyService.RemoteServiceDiscovered:
@@ -346,9 +399,28 @@ class SensorClient(QObject):
         self._ecg_start_pending = False
         self._ecg_data_received = False
         self._pmd_descriptors_pending = 0
+        self._battery_timer.stop()
+        self.battery_update.emit(-1)
+        self._remove_battery_service()
         self._remove_pmd_service()
         self._remove_service()
         self._remove_client()
+
+    def _remove_battery_service(self):
+        if self.battery_service is None:
+            return
+        try:
+            self.battery_service.stateChanged.disconnect()
+            self.battery_service.characteristicRead.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        try:
+            self.battery_service.deleteLater()
+        except Exception as e:
+            if DEBUG:
+                print(f"Couldn't remove battery service: {e}")
+        finally:
+            self.battery_service = None
 
     def _remove_pmd_service(self):
         if self.pmd_service is None:
