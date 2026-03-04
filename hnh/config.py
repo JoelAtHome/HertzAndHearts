@@ -95,6 +95,12 @@ BASELINE_DURATION: Final[int] = 30  # seconds
 # Disabled by default to keep baseline recording/export lightweight.
 EXPORT_EDF_PLUS_D: Final[bool] = False
 
+# Folder where finalized sessions are copied. Empty = use default (~/Hertz-and-Hearts).
+SESSION_SAVE_PATH: Final[str] = ""
+
+# Open session folder in file manager after Stop & Save.
+OPEN_SESSION_FOLDER_ON_SAVE: Final[bool] = True
+
 # Number of seconds of beats averaged when smoothing the RMSSD chart
 # line.  Larger = smoother trace, smaller = more beat-to-beat detail.
 SMOOTH_SECONDS: Final[int] = 18

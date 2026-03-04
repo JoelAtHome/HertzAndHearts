@@ -58,6 +58,7 @@ from hnh.session_artifacts import (
     default_qtc_payload,
     write_manifest,
 )
+from hnh.session_artifacts import _slugify as _slugify_profile
 from hnh.edf_export import export_session_edf_plus
 from hnh.profile_store import ProfileStore
 from hnh import __version__ as version, resources  # noqa
@@ -105,6 +106,29 @@ def _one_page_share_path(bundle: SessionBundle, report_stage: str) -> Path:
     if report_stage.strip().lower() == "draft":
         return bundle.session_dir / "session_share_draft.pdf"
     return bundle.session_dir / "session_share.pdf"
+
+
+def _warning_ok(parent, title: str, text: str) -> None:
+    """Show warning dialog with Ok as default/focused so Enter dismisses."""
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Warning)
+    msg.setWindowTitle(title)
+    msg.setText(text)
+    msg.setStandardButtons(QMessageBox.Ok)
+    msg.setDefaultButton(QMessageBox.Ok)
+    msg.exec()
+
+
+def _info_ok(parent, title: str, text: str) -> None:
+    """Show information dialog with Ok as default/focused so Enter dismisses."""
+    msg = QMessageBox(parent)
+    msg.setIcon(QMessageBox.Information)
+    msg.setWindowTitle(title)
+    msg.setText(text)
+    msg.setStandardButtons(QMessageBox.Ok)
+    msg.setDefaultButton(QMessageBox.Ok)
+    msg.exec()
+
 
 def _save_last_sensor(name, address):
     try:
@@ -564,7 +588,7 @@ class ProfileSelectionDialog(QDialog):
             return
         name = text.strip()
         if not name:
-            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
+            _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
         idx = self._combo.findText(name, Qt.MatchFixedString)
         if idx < 0:
@@ -575,13 +599,13 @@ class ProfileSelectionDialog(QDialog):
     def _accept_selected(self):
         name = self._combo.currentText().strip()
         if not name:
-            QMessageBox.warning(self, "Profile Required", "Please select a profile.")
+            _warning_ok(self, "Profile Required", "Please select a profile.")
             return
         if self._profile_store and not _skip_password_check():
             if not self._profile_store.verify_profile_password(
                 name, self._pw_edit.text()
             ):
-                QMessageBox.warning(
+                _warning_ok(
                     self,
                     "Invalid Password",
                     "The password does not match this profile. Try again or use "
@@ -1187,13 +1211,13 @@ class ProfileManagerDialog(QDialog):
             birth = date(qd.year(), qd.month(), qd.day())
             today = date.today()
             if birth > today:
-                QMessageBox.warning(self, "Invalid DOB", "Date of birth cannot be in the future.")
+                _warning_ok(self, "Invalid DOB", "Date of birth cannot be in the future.")
                 return False
             age = today.year - birth.year
             if (today.month, today.day) < (birth.month, birth.day):
                 age -= 1
             if age < 1 or age > 130:
-                QMessageBox.warning(self, "Invalid DOB", "Computed age must be between 1 and 130.")
+                _warning_ok(self, "Invalid DOB", "Computed age must be between 1 and 130.")
                 return False
             dob = f"{birth.year:04d}-{birth.month:02d}-{birth.day:02d}"
         gender = self._gender_input.currentText().strip()
@@ -1208,7 +1232,7 @@ class ProfileManagerDialog(QDialog):
             if self._is_admin:
                 new_role = "admin" if self._role_combo.currentIndex() == 0 else "user"
                 if name.casefold() == self._active_profile.casefold() and new_role == "user":
-                    QMessageBox.warning(
+                    _warning_ok(
                         self,
                         "Cannot Demote",
                         "You cannot change your own role to User.",
@@ -1216,7 +1240,7 @@ class ProfileManagerDialog(QDialog):
                     return False
                 self._store.set_profile_role(name, new_role)
         except ValueError as exc:
-            QMessageBox.warning(self, "Save Failed", str(exc))
+            _warning_ok(self, "Save Failed", str(exc))
             return False
         self._refresh()
         if not target_name or target_name == self._selected_profile_name():
@@ -1233,7 +1257,7 @@ class ProfileManagerDialog(QDialog):
             return
         name = text.strip()
         if not name:
-            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
+            _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
         self._store.ensure_profile(name)
         self._refresh()
@@ -1249,12 +1273,12 @@ class ProfileManagerDialog(QDialog):
             return
         new_name = text.strip()
         if not new_name:
-            QMessageBox.warning(self, "Invalid Profile", "Profile name cannot be empty.")
+            _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
         try:
             renamed = self._store.rename_profile(current, new_name)
         except ValueError as exc:
-            QMessageBox.warning(self, "Rename Failed", str(exc))
+            _warning_ok(self, "Rename Failed", str(exc))
             return
         if current.casefold() == self._active_profile.casefold():
             self._active_profile = renamed
@@ -1267,7 +1291,7 @@ class ProfileManagerDialog(QDialog):
         try:
             self._store.archive_profile(current)
         except ValueError as exc:
-            QMessageBox.warning(self, "Archive Failed", str(exc))
+            _warning_ok(self, "Archive Failed", str(exc))
             return
         self._refresh()
 
@@ -1294,14 +1318,14 @@ class ProfileManagerDialog(QDialog):
         try:
             self._store.delete_profile(current)
         except ValueError as exc:
-            QMessageBox.warning(self, "Delete Failed", str(exc))
+            _warning_ok(self, "Delete Failed", str(exc))
             return
         self._refresh()
 
     def _set_reset_password(self):
         current = self._selected_profile_name()
         if not current:
-            QMessageBox.warning(
+            _warning_ok(
                 self,
                 "No Profile Selected",
                 "Please select a profile to set or reset its password.",
@@ -1360,7 +1384,7 @@ class SetPasswordDialog(QDialog):
             if not self._store.verify_profile_password(
                 self._profile_name, self._current.text()
             ):
-                QMessageBox.warning(
+                _warning_ok(
                     self,
                     "Invalid Password",
                     "Current password is incorrect.",
@@ -1368,7 +1392,7 @@ class SetPasswordDialog(QDialog):
                 return
         new_pw = self._new_pw.text()
         if new_pw != self._confirm.text():
-            QMessageBox.warning(
+            _warning_ok(
                 self,
                 "Mismatch",
                 "New password and confirmation do not match.",
@@ -1377,10 +1401,10 @@ class SetPasswordDialog(QDialog):
         try:
             self._store.set_profile_password(self._profile_name, new_pw)
         except ValueError as exc:
-            QMessageBox.warning(self, "Error", str(exc))
+            _warning_ok(self, "Error", str(exc))
             return
         msg = "Password cleared." if not new_pw else "Password has been updated successfully."
-        QMessageBox.information(self, "Password Set", msg)
+        _info_ok(self, "Password Set", msg)
         self.accept()
 
 
@@ -1461,6 +1485,7 @@ class XYSeriesWidget(QChartView):
 class EcgWindow(QMainWindow):
     closed = Signal()
     cursor_measurement_captured = Signal(object)
+    image_captured = Signal(object)  # QPixmap
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1631,10 +1656,19 @@ class EcgWindow(QMainWindow):
             "Select cursor B for keyboard nudge.\nShortcut: press B."
         )
         self._cursor_b_select_button.toggled.connect(lambda checked: self._select_active_cursor("B", checked))
-        self._cursor_capture_button = QPushButton("Capture")
+        self._cursor_interval_type_combo = QComboBox()
+        self._cursor_interval_type_combo.addItems(["R-R", "QRS", "QT", "PR", "Other"])
+        self._cursor_interval_type_combo.setMinimumWidth(90)
+        self._cursor_interval_type_combo.setMaximumWidth(95)
+        self._cursor_interval_type_combo.setToolTip("Context for the logged interval (what Δt represents).")
+        self._cursor_capture_button = QPushButton("Log Δt")
         self._cursor_capture_button.setFixedWidth(62)
-        self._cursor_capture_button.setToolTip("Capture cursor interval as session annotation.")
+        self._cursor_capture_button.setToolTip("Log cursor interval as session annotation with selected context.")
         self._cursor_capture_button.clicked.connect(self._capture_cursor_measurement)
+        self._capture_image_button = QPushButton("Capture Image")
+        self._capture_image_button.setFixedWidth(100)
+        self._capture_image_button.setToolTip("Save a snapshot of the plot (axes, cursors, Δt) to the session folder.")
+        self._capture_image_button.clicked.connect(self._capture_plot_image)
         controls_row.addWidget(zoom_label)
         controls_row.addWidget(self._zoom_out_button)
         controls_row.addWidget(self._zoom_in_button)
@@ -1643,6 +1677,8 @@ class EcgWindow(QMainWindow):
         controls_row.addWidget(self._cursor_label)
         controls_row.addWidget(self._cursor_a_select_button)
         controls_row.addWidget(self._cursor_b_select_button)
+        controls_row.addWidget(self._cursor_interval_type_combo)
+        controls_row.addWidget(self._capture_image_button)
         controls_row.addWidget(self._cursor_capture_button)
         controls_row.addStretch(1)
         controls_row.addWidget(self._relock_button)
@@ -1818,6 +1854,7 @@ class EcgWindow(QMainWindow):
         )
         self._cursor_a_select_button.setEnabled(enabled)
         self._cursor_b_select_button.setEnabled(enabled)
+        self._cursor_interval_type_combo.setEnabled(enabled)
         self._cursor_capture_button.setEnabled(enabled)
         self._set_active_cursor_visuals()
 
@@ -2075,13 +2112,26 @@ class EcgWindow(QMainWindow):
         a_t = float(self._cursor_a_line.value())
         b_t = float(self._cursor_b_line.value())
         dt_ms = abs(b_t - a_t) * 1000.0
+        interval_type = self._cursor_interval_type_combo.currentText().strip() or "R-R"
         payload = {
             "a_t_sec": a_t,
             "b_t_sec": b_t,
             "dt_ms": dt_ms,
+            "interval_type": interval_type,
         }
         self.cursor_measurement_captured.emit(payload)
-        self._statusbar.showMessage(f"Captured ECG cursor interval: Δt={dt_ms:.1f} ms")
+        self._statusbar.showMessage(f"Logged ECG cursor interval: Δt={dt_ms:.1f} ms ({interval_type})")
+
+    def _capture_plot_image(self):
+        """Grab plot widget (axes, waveform, cursors, Δt) and emit for saving to session folder."""
+        pixmap = self._plot_widget.grab()
+        if pixmap.isNull():
+            self._statusbar.showMessage("Image capture failed.")
+            return
+        self.image_captured.emit(pixmap)
+
+    def set_image_capture_enabled(self, enabled: bool) -> None:
+        self._capture_image_button.setEnabled(enabled)
 
     def _set_active_cursor_visuals(self):
         self._cursor_suppress_events = True
@@ -2503,6 +2553,7 @@ class QtcWindow(QMainWindow):
         )
         msg.setInformativeText("Trend context only; requires clinical review.")
         msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
         msg.setMinimumWidth(520)
         flags = msg.windowFlags()
         flags &= ~Qt.WindowMinimizeButtonHint
@@ -3377,6 +3428,7 @@ class View(QMainWindow):
         self.model.qtc_update.connect(lambda data: self.qtc_window.append_payload(data.value))
         self.sensor.ecg_update.connect(self.ecg_window.append_samples)
         self.ecg_window.cursor_measurement_captured.connect(self._on_ecg_cursor_measurement)
+        self.ecg_window.image_captured.connect(self._on_ecg_image_captured)
         self.sensor.ecg_ready.connect(self._on_ecg_ready)
         self.ecg_window.closed.connect(self._on_ecg_window_closed)
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
@@ -3562,17 +3614,13 @@ class View(QMainWindow):
         self.psd_button.setEnabled(False)
         self.psd_button.clicked.connect(self.toggle_psd_window)
 
-        self.start_recording_button = QPushButton("Start")
+        self.start_recording_button = QPushButton("Start New")
         self.start_recording_button.clicked.connect(self.start_session)
-        self.stop_recording_button = QPushButton("Stop")
-        self.stop_recording_button.clicked.connect(self.stop_session)
-        self.save_recording_button = QPushButton("Save")
-        self.save_recording_button.clicked.connect(self.finalize_session)
-        self.export_report_button = QPushButton("Report")
-        self.export_report_button.clicked.connect(self.export_report)
+        self.stop_save_button = QPushButton("Stop && Save")
+        self.stop_save_button.clicked.connect(self._stop_and_save)
         self.history_button = QPushButton("History")
         self.history_button.clicked.connect(self._open_history)
-        self.trends_button = QPushButton("Show Trends")
+        self.trends_button = QPushButton("Trends")
         self.trends_button.clicked.connect(self._open_trends)
         self.profile_manager_button = QPushButton("Profiles")
         self.profile_manager_button.clicked.connect(self._open_profile_manager)
@@ -3630,14 +3678,8 @@ class View(QMainWindow):
             "Open the PSD (Power Spectral Density) window showing Vagal Resonance at 0.1 Hz."
         )
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
-        self.stop_recording_button.setToolTip(
-            "Stop recording and save data to session folder. Use Save for full report and copy."
-        )
-        self.save_recording_button.setToolTip(
-            "Finalize the active session and choose where to save session files."
-        )
-        self.export_report_button.setToolTip(
-            "Export report files and choose an output folder (defaults to last used path)."
+        self.stop_save_button.setToolTip(
+            "Stop recording and save session (CSV, report, EDF+) to the path configured in Settings."
         )
         self.history_button.setToolTip("Show recent session history for the active user profile.")
         self.trends_button.setToolTip("Compare-plot session trends over day/week/month/year spans.")
@@ -3786,14 +3828,10 @@ class View(QMainWindow):
         self.poincare_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.psd_button.setMaximumWidth(130)
         self.psd_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.start_recording_button.setMaximumWidth(70)
+        self.start_recording_button.setMaximumWidth(90)
         self.start_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.stop_recording_button.setMaximumWidth(70)
-        self.stop_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.save_recording_button.setMaximumWidth(70)
-        self.save_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.export_report_button.setMaximumWidth(116)
-        self.export_report_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.stop_save_button.setMaximumWidth(110)
+        self.stop_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.history_button.setMaximumWidth(80)
         self.history_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.trends_button.setMaximumWidth(100)
@@ -3860,9 +3898,7 @@ class View(QMainWindow):
             "QPushButton:disabled { color: #7f8c8d; background-color: #e0e0e0; }"
         )
         toolbar.addWidget(self.start_recording_button)
-        toolbar.addWidget(self.stop_recording_button)
-        toolbar.addWidget(self.save_recording_button)
-        toolbar.addWidget(self.export_report_button)
+        toolbar.addWidget(self.stop_save_button)
         toolbar.addWidget(self.history_button)
         toolbar.addWidget(self.trends_button)
         toolbar.addWidget(self.annotation)
@@ -3970,6 +4006,7 @@ class View(QMainWindow):
                 "You can re-enable it at any time in Settings."
             )
             msg.setStandardButtons(QMessageBox.Ok)
+            msg.setDefaultButton(QMessageBox.Ok)
             flags = msg.windowFlags()
             flags &= ~Qt.WindowMinimizeButtonHint
             flags &= ~Qt.WindowCloseButtonHint
@@ -3979,7 +4016,9 @@ class View(QMainWindow):
         return True
 
     def _run_startup_flow(self):
-        selected_profile = self._prompt_for_session_profile(use_parent=False)
+        # Show main window first, then profile selection on top.
+        self._show_main_window_fullscreen()
+        selected_profile = self._prompt_for_session_profile(use_parent=True)
         if selected_profile is None:
             self.close()
             return
@@ -3991,9 +4030,6 @@ class View(QMainWindow):
         else:
             self._disclaimer_acknowledged_at = None
             self._disclaimer_ack_mode = "profile_skip_preference"
-        # Show main window with correct geometry (it was never shown, avoiding
-        # Windows parent-window corruption when a modal with parent closes).
-        self._show_main_window_fullscreen()
 
     def _show_maximized_fit(self):
         """Maximize and constrain to available screen (avoids Windows cutoff)."""
@@ -4114,8 +4150,7 @@ class View(QMainWindow):
         is_recording = self._session_state == "recording"
         annotation_available = is_recording
         self.start_recording_button.setEnabled(connected and not is_recording)
-        self.stop_recording_button.setEnabled(is_recording)
-        self.save_recording_button.setEnabled(is_recording)
+        self.stop_save_button.setEnabled(is_recording)
         self.annotation.setEnabled(annotation_available)
         self.annotation_button.setEnabled(annotation_available)
         annotation_placeholder = (
@@ -4128,8 +4163,6 @@ class View(QMainWindow):
             self.annotation.lineEdit().setPlaceholderText(annotation_placeholder)
         if not annotation_available:
             self.annotation.setCurrentText("")
-        self.export_report_button.setEnabled(self._session_bundle is not None)
-        self.export_report_button.setText("Report to Now" if is_recording else "Report")
         self.poincare_button.setEnabled(connected)
         self.psd_button.setEnabled(connected)
         if not connected:
@@ -4146,6 +4179,7 @@ class View(QMainWindow):
             self.qtc_button.setEnabled(True)
         self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
+        self.ecg_window.set_image_capture_enabled(self._session_bundle is not None)
 
     def _current_sensor_label(self) -> str:
         text = self.address_menu.currentText().strip()
@@ -4153,35 +4187,25 @@ class View(QMainWindow):
             return "--"
         return text
 
-    def _default_user_save_dir(self, pref_key: str) -> Path:
-        raw = self._profile_store.get_profile_pref(
-            self._session_profile_id,
-            pref_key,
-            default=str(self._session_root),
-        ).strip()
-        if not raw:
-            raw = self._profile_store.get_profile_pref(
-                self._session_profile_id,
-                "last_save_dir",
-                default=str(self._session_root),
-            ).strip()
-        candidate = Path(raw) if raw else self._session_root
-        if not candidate.exists():
-            return self._session_root
-        return candidate
+    def get_default_session_save_path(self) -> str:
+        """Return the default session save path (Sessions/{profile}) for display in Settings."""
+        profile_slug = _slugify_profile(getattr(self, "_session_profile_id", "") or "Admin")
+        return str(self._session_root / "Sessions" / profile_slug)
 
-    def _prompt_user_save_dir(self, title: str, pref_key: str) -> Path | None:
-        start_dir = self._default_user_save_dir(pref_key)
-        chosen = QFileDialog.getExistingDirectory(self, title, str(start_dir))
-        if not chosen:
-            return None
-        target = Path(chosen)
-        self._profile_store.set_profile_pref(
-            self._session_profile_id,
-            pref_key,
-            str(target),
-        )
-        return target
+    def _session_save_path_from_settings(self) -> Path:
+        """Return the configured session save path, or Sessions/{profile} if empty/invalid."""
+        raw = (getattr(self.settings, "SESSION_SAVE_PATH", "") or "").strip()
+        if not raw:
+            profile_slug = _slugify_profile(getattr(self, "_session_profile_id", "") or "Admin")
+            return self._session_root / "Sessions" / profile_slug
+        candidate = Path(raw)
+        if not candidate.exists():
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                profile_slug = _slugify_profile(getattr(self, "_session_profile_id", "") or "Admin")
+                return self._session_root / "Sessions" / profile_slug
+        return candidate
 
     def _copy_session_folder_to(self, destination_root: Path) -> Path | None:
         if self._session_bundle is None:
@@ -4427,20 +4451,16 @@ class View(QMainWindow):
         self._persist_manifest(state="abandoned", report_stage="draft")
         self._set_session_state("finalized")
 
+    def _stop_and_save(self):
+        """Stop recording and save session (CSV, report, EDF+) to Settings path."""
+        self.finalize_session(show_message=True, build_final_report=True)
+
     def finalize_session(self, show_message: bool = True, build_final_report: bool = True):
         if self._session_state != "recording":
             if show_message:
                 self.show_status("No active session to save.")
             return
-        destination_root: Path | None = None
-        if show_message:
-            destination_root = self._prompt_user_save_dir(
-                "Select folder to save this session",
-                pref_key="last_session_save_dir",
-            )
-            if destination_root is None:
-                self.show_status("Save canceled.")
-                return
+        destination_root = self._session_save_path_from_settings()
         self.signals.save_recording.emit()
         if build_final_report and self._session_bundle is not None:
             try:
@@ -4460,13 +4480,14 @@ class View(QMainWindow):
             )
         self._set_session_state("finalized")
         self._persist_manifest(state="finalized", report_stage="final")
-        if destination_root is not None:
-            try:
-                copied_dir = self._copy_session_folder_to(destination_root)
-                if copied_dir is not None:
-                    self.show_status(f"Saved session copy to: {copied_dir}")
-            except Exception as exc:
-                self.show_status(f"Session copy failed: {exc}")
+        try:
+            copied_dir = self._copy_session_folder_to(destination_root)
+            if copied_dir is not None:
+                self.show_status(f"Saved session copy to: {copied_dir}")
+                if getattr(self.settings, "OPEN_SESSION_FOLDER_ON_SAVE", True):
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(copied_dir)))
+        except Exception as exc:
+            self.show_status(f"Session copy failed: {exc}")
         if show_message and self._session_bundle is not None:
             self.show_status(f"Session finalized: {self._session_bundle.session_dir}")
 
@@ -4747,6 +4768,7 @@ class View(QMainWindow):
             "Motion artifact, poor strap contact, or dropouts can distort the plot."
         )
         msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
         msg.exec()
 
     def show_psd_info(self):
@@ -4764,10 +4786,16 @@ class View(QMainWindow):
             "high-amplitude peak here indicates optimal vagal tone and baroreflex "
             "resonance—often associated with pelvic floor relaxation and coherent "
             "breathing.<br><br>"
+            "<b>When will changes appear?</b><br>"
+            "The plot uses roughly the last minute of heartbeats. Expect 1–2 minutes "
+            "of steady breathing at a new rate before the peak shifts or stabilizes. "
+            "Contributors: breathing consistency, stillness (reduces motion artifact), "
+            "electrode contact, and physiological state (stress, relaxation, caffeine).<br><br>"
             "<b>Interaction</b><br>"
             "Drag to pan, mouse wheel or +/- buttons to zoom. Reset restores 0–0.5 Hz view."
         )
         msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
         msg.exec()
 
     def _update_poincare(self, data: NamedSignal):
@@ -4961,7 +4989,11 @@ class View(QMainWindow):
                 self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
 
     def _open_settings(self):
-        dlg = SettingsDialog(self.settings, parent=self)
+        dlg = SettingsDialog(
+            self.settings,
+            parent=self,
+            session_save_path_default=self.get_default_session_save_path(),
+        )
         if dlg.exec() == QDialog.Accepted:
             self._set_debug_mode(bool(self.settings.DEBUG), announce=False)
             pending_reset = dlg.get_pending_disclaimer_reset()
@@ -5099,43 +5131,6 @@ class View(QMainWindow):
     def get_filepath(self):
         self.start_session(auto=False)
 
-    def export_report(self):
-        """Create draft/final DOCX + one-page PDF share in session folder."""
-        if self._session_bundle is None:
-            self.show_status("No session bundle available for report export.")
-            return
-        destination_root = self._prompt_user_save_dir(
-            "Select folder for report export",
-            pref_key="last_report_export_dir",
-        )
-        if destination_root is None:
-            self.show_status("Report export canceled.")
-            return
-        report_stage = "draft" if self._session_state == "recording" else "final"
-        report_path = (
-            self._session_bundle.report_draft_path
-            if report_stage == "draft"
-            else self._session_bundle.report_final_path
-        )
-        share_path = _one_page_share_path(self._session_bundle, report_stage)
-        report_data = self._build_report_data(report_stage=report_stage)
-        try:
-            generate_session_report(str(report_path), report_data)
-            generate_session_share_pdf(str(share_path), report_data)
-            if report_stage == "final":
-                self._export_optional_edf_plus(report_data)
-            self._persist_manifest(state=self._session_state, report_stage=report_stage)
-            self.show_status(f"Saved report file: {report_path}")
-            self.show_status(f"Saved one-page share file: {share_path}")
-            export_paths = [report_path, share_path]
-            if report_stage == "final" and self._session_bundle.edf_path.exists():
-                export_paths.append(self._session_bundle.edf_path)
-            copied_to = self._copy_selected_artifacts_to(destination_root, export_paths)
-            if copied_to is not None:
-                self.show_status(f"Copied exported files to: {copied_to}")
-        except Exception as e:
-            self.show_status(f"Report export failed: {e}")
-
     def emit_annotation(self):
         if self._session_state != "recording":
             self.show_status(self._annotation_disabled_placeholder)
@@ -5160,12 +5155,33 @@ class View(QMainWindow):
             b_t = float(payload.get("b_t_sec"))
         except (TypeError, ValueError):
             return
-        text = f"ECG cursor Δt={dt_ms:.1f} ms (A={a_t:.3f}s, B={b_t:.3f}s)"
+        interval_type = payload.get("interval_type", "").strip() or "R-R"
+        text = f"ECG cursor Δt={dt_ms:.1f} ms ({interval_type}) (A={a_t:.3f}s, B={b_t:.3f}s)"
         if self._session_state == "recording":
             ts = datetime.now().strftime("%H:%M:%S")
             self._session_annotations.append((ts, text))
             self.signals.annotation.emit(NamedSignal("Annotation", text))
         self.show_status(text)
+
+    @Slot(object)
+    def _on_ecg_image_captured(self, pixmap: object):
+        """Save ECG plot snapshot to session folder."""
+        if self._session_bundle is None:
+            self.show_status("No active session — cannot save ECG image.")
+            return
+        if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
+            self.show_status("ECG image capture failed.")
+            return
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = self._session_bundle.session_dir / f"ecg_snapshot_{timestamp}.png"
+            ok = pixmap.save(str(path))
+            if ok:
+                self.show_status(f"ECG snapshot saved: {path.name}")
+            else:
+                self.show_status("Failed to save ECG snapshot.")
+        except Exception as exc:
+            self.show_status(f"ECG snapshot save failed: {exc}")
 
     def _refresh_annotation_list(self):
         self.annotation.clear()

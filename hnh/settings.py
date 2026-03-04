@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QPushButton, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel,
     QMessageBox, QScrollArea, QWidget, QLineEdit, QListWidget,
-    QInputDialog, QAbstractItemView,
+    QInputDialog, QAbstractItemView, QFileDialog,
 )
 from PySide6.QtCore import Qt
 
@@ -51,6 +51,24 @@ REGISTRY = OrderedDict([
         "tooltip": (
             "When enabled, saving/finalizing a session also writes a compact "
             "EDF+ file containing derived HR and RMSSD trend channels."
+        ),
+        "type": bool,
+        "section": "Session Timing",
+    }),
+    ("SESSION_SAVE_PATH", {
+        "display": "Session Save Path",
+        "tooltip": (
+            "Folder where finalized sessions (CSV, report, EDF+) are copied. "
+            "Leave empty to use Hertz-and-Hearts/Sessions/{profile} under your home folder."
+        ),
+        "type": str,
+        "section": "Session Timing",
+    }),
+    ("OPEN_SESSION_FOLDER_ON_SAVE", {
+        "display": "Open Session Folder After Save",
+        "tooltip": (
+            "When enabled, Stop & Save opens the session folder in your system "
+            "file manager so you can quickly access the saved files."
         ),
         "type": bool,
         "section": "Session Timing",
@@ -315,6 +333,36 @@ REGISTRY = OrderedDict([
 
 
 # ──────────────────────────────────────────────────────────────────────
+#  Path edit widget (line edit + browse button)
+# ──────────────────────────────────────────────────────────────────────
+class PathEditWidget(QWidget):
+    """Line edit with Browse button for directory selection."""
+
+    def __init__(self, current: str = "", parent=None):
+        super().__init__(parent)
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self._edit = QLineEdit()
+        self._edit.setText(current)
+        layout.addWidget(self._edit)
+        browse = QPushButton("Browse…")
+        browse.clicked.connect(self._browse)
+        layout.addWidget(browse)
+
+    def _browse(self):
+        start = self._edit.text().strip() or str(Path.home())
+        chosen = QFileDialog.getExistingDirectory(self, "Select folder", start)
+        if chosen:
+            self._edit.setText(chosen)
+
+    def value(self) -> str:
+        return self._edit.text().strip()
+
+    def setValue(self, val: str) -> None:
+        self._edit.setText(val or "")
+
+
+# ──────────────────────────────────────────────────────────────────────
 #  Settings singleton
 # ──────────────────────────────────────────────────────────────────────
 class Settings:
@@ -539,7 +587,13 @@ class AnnotationEditorDialog(QDialog):
             return
         valid, result = self._validate_new_text(text)
         if not valid:
-            QMessageBox.warning(self, "Invalid Annotation", result)
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Invalid Annotation")
+            msg.setText(result)
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.setDefaultButton(QMessageBox.Ok)
+            msg.exec()
             return
         self._custom_items.append(result)
         self._reload_custom()
@@ -556,7 +610,13 @@ class AnnotationEditorDialog(QDialog):
             return
         valid, result = self._validate_new_text(text, skip_index=idx)
         if not valid:
-            QMessageBox.warning(self, "Invalid Annotation", result)
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Invalid Annotation")
+            msg.setText(result)
+            msg.setStandardButtons(QMessageBox.Ok)
+            msg.setDefaultButton(QMessageBox.Ok)
+            msg.exec()
             return
         self._custom_items[idx] = result
         self._reload_custom()
@@ -622,10 +682,11 @@ class AnnotationEditorDialog(QDialog):
 class SettingsDialog(QDialog):
     _show_advanced = False
 
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings: Settings, parent=None, *, session_save_path_default: str = ""):
         super().__init__(parent)
         self._settings = settings
-        self._widgets: dict[str, QCheckBox | QSpinBox | QDoubleSpinBox] = {}
+        self._session_save_path_default = session_save_path_default or ""
+        self._widgets: dict[str, QCheckBox | QSpinBox | QDoubleSpinBox | PathEditWidget] = {}
         self._advanced_groups: list[QGroupBox] = []
         self._pending_disclaimer_reset = "none"
 
@@ -707,7 +768,7 @@ class SettingsDialog(QDialog):
     @staticmethod
     def _build_label(meta):
         text = meta["display"]
-        if meta["type"] is bool:
+        if meta["type"] is bool or meta["type"] is str:
             return text
         unit = meta.get("unit", "")
         lo = meta.get("min", "")
@@ -719,6 +780,11 @@ class SettingsDialog(QDialog):
         if meta["type"] is bool:
             w = QCheckBox()
             w.setChecked(current)
+        elif meta["type"] is str:
+            display_val = str(current) if current else ""
+            if key == "SESSION_SAVE_PATH" and not display_val and self._session_save_path_default:
+                display_val = self._session_save_path_default
+            w = PathEditWidget(display_val)
         elif meta["type"] is float:
             w = QDoubleSpinBox()
             w.setRange(meta["min"], meta["max"])
@@ -737,6 +803,8 @@ class SettingsDialog(QDialog):
         for key, widget in self._widgets.items():
             if REGISTRY[key]["type"] is bool:
                 values[key] = widget.isChecked()
+            elif REGISTRY[key]["type"] is str:
+                values[key] = widget.value()
             else:
                 values[key] = widget.value()
         return values
@@ -746,13 +814,22 @@ class SettingsDialog(QDialog):
             val = getattr(self._settings, key)
             if REGISTRY[key]["type"] is bool:
                 widget.setChecked(val)
+            elif REGISTRY[key]["type"] is str:
+                display_val = str(val) if val else ""
+                if key == "SESSION_SAVE_PATH" and not display_val and self._session_save_path_default:
+                    display_val = self._session_save_path_default
+                widget.setValue(display_val)
             else:
                 widget.setValue(val)
 
     # --- button handlers --------------------------------------------------
 
     def _save_and_close(self):
-        for key, val in self._read_widgets().items():
+        values = self._read_widgets()
+        for key, val in values.items():
+            if key == "SESSION_SAVE_PATH" and self._session_save_path_default:
+                if val == self._session_save_path_default:
+                    val = ""  # Store empty = use default
             setattr(self._settings, key, val)
         self._settings.save()
         self.accept()

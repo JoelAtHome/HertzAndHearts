@@ -81,8 +81,7 @@ def main():
     _emit_research_use_startup_warning()
     app = Application(sys.argv)
     app.aboutToQuit.connect(lambda: app._view._flush_signal_fault_log("app exit"))
-    # Main window is shown by _run_startup_flow after profile selection to avoid
-    # Windows geometry corruption when a modal dialog with parent closes.
+    # Main window opens first, then profile selection popup on top (_run_startup_flow).
     sys.exit(app.exec())
 
 if __name__ == "__main__":
