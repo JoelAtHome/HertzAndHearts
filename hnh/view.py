@@ -634,18 +634,26 @@ class ProfileSelectionDialog(QDialog):
 
 
 class SessionHistoryDialog(QDialog):
-    """Read-only session history list for the active profile."""
+    """Read-only session history list for the active profile, with Replay tab."""
 
     def __init__(self, profile_name: str, sessions: list[dict[str, str | None]], parent=None):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowTitle(f"Session History — {profile_name}")
-        self.resize(980, 520)
+        self.resize(980, 620)
+
+        self._profile_name = profile_name
+        self._sessions = sessions
 
         root = QVBoxLayout(self)
+        tabs = QTabWidget()
+
+        # ---- Tab 1: History ----
+        tab_history = QWidget()
+        tab_history_layout = QVBoxLayout(tab_history)
         self._summary = QLabel("")
         self._summary.setStyleSheet("font-size: 12px; color: #2c3e50;")
-        root.addWidget(self._summary)
+        tab_history_layout.addWidget(self._summary)
 
         self._table = QTableWidget()
         self._table.setColumnCount(5)
@@ -662,7 +670,92 @@ class SessionHistoryDialog(QDialog):
         self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
-        root.addWidget(self._table, stretch=1)
+        tab_history_layout.addWidget(self._table, stretch=1)
+
+        tabs.addTab(tab_history, "History")
+
+        # ---- Tab 2: Replay ----
+        tab_replay = QWidget()
+        tab_replay_layout = QVBoxLayout(tab_replay)
+
+        replay_controls = QHBoxLayout()
+        replay_controls.addWidget(QLabel("Session:"))
+        self._replay_session_combo = QComboBox()
+        self._replay_session_combo.setMinimumWidth(280)
+        self._replay_session_combo.currentIndexChanged.connect(self._on_replay_session_changed)
+        replay_controls.addWidget(self._replay_session_combo)
+
+        self._replay_load_btn = QPushButton("Load")
+        self._replay_load_btn.clicked.connect(self._replay_load_session)
+        replay_controls.addWidget(self._replay_load_btn)
+
+        replay_controls.addSpacing(16)
+        self._replay_play_btn = QPushButton("Play")
+        self._replay_play_btn.setEnabled(False)
+        self._replay_play_btn.clicked.connect(self._replay_toggle_play)
+        replay_controls.addWidget(self._replay_play_btn)
+
+        replay_controls.addWidget(QLabel("Speed:"))
+        self._replay_speed_combo = QComboBox()
+        for label, mult in [("1×", 1.0), ("2×", 2.0), ("4×", 4.0), ("0.5×", 0.5)]:
+            self._replay_speed_combo.addItem(label, mult)
+        self._replay_speed_combo.setCurrentIndex(0)
+        replay_controls.addWidget(self._replay_speed_combo)
+
+        replay_controls.addStretch()
+        tab_replay_layout.addLayout(replay_controls)
+
+        hint = QLabel(
+            "Use mouse to pan; mouse wheel on each axis to zoom. "
+            "Drag the timeline scrubber or use Play to scroll through time."
+        )
+        hint.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
+        tab_replay_layout.addWidget(hint)
+
+        self._replay_plot_stack = pg.GraphicsLayoutWidget()
+        self._replay_plot_stack.setBackground("w")
+        self._replay_hr_plot = self._replay_plot_stack.addPlot(row=0, col=0, title="HR (bpm)")
+        self._replay_hr_plot.setLabel("bottom", "Time (s)")
+        self._replay_hr_plot.setMouseEnabled(x=True, y=True)
+        self._replay_hr_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._replay_plot_stack.nextRow()
+        self._replay_rmssd_plot = self._replay_plot_stack.addPlot(row=1, col=0, title="RMSSD (ms)")
+        self._replay_rmssd_plot.setLabel("bottom", "Time (s)")
+        self._replay_rmssd_plot.setMouseEnabled(x=True, y=True)
+        self._replay_rmssd_plot.showGrid(x=True, y=True, alpha=0.3)
+        self._replay_plot_stack.nextRow()
+        self._replay_ecg_plot = self._replay_plot_stack.addPlot(row=2, col=0, title="ECG")
+        self._replay_ecg_plot.setLabel("bottom", "Time (s)")
+        self._replay_ecg_plot.setMouseEnabled(x=True, y=True)
+        self._replay_ecg_plot.showGrid(x=True, y=True, alpha=0.3)
+        tab_replay_layout.addWidget(self._replay_plot_stack, stretch=1)
+
+        timeline_layout = QHBoxLayout()
+        timeline_layout.addWidget(QLabel("Time:"))
+        self._replay_timeline_slider = QSlider(Qt.Horizontal)
+        self._replay_timeline_slider.setMinimum(0)
+        self._replay_timeline_slider.setMaximum(1000)
+        self._replay_timeline_slider.setValue(0)
+        self._replay_timeline_slider.valueChanged.connect(self._replay_on_timeline_moved)
+        self._replay_timeline_slider.sliderPressed.connect(self._replay_pause)
+        timeline_layout.addWidget(self._replay_timeline_slider, stretch=1)
+        self._replay_time_label = QLabel("0.0 s")
+        self._replay_time_label.setMinimumWidth(80)
+        timeline_layout.addWidget(self._replay_time_label)
+        tab_replay_layout.addLayout(timeline_layout)
+
+        ann_layout = QHBoxLayout()
+        ann_layout.addWidget(QLabel("Jump to:"))
+        self._replay_ann_combo = QComboBox()
+        self._replay_ann_combo.setMinimumWidth(200)
+        self._replay_ann_combo.currentIndexChanged.connect(self._replay_jump_to_annotation)
+        ann_layout.addWidget(self._replay_ann_combo)
+        ann_layout.addStretch()
+        tab_replay_layout.addLayout(ann_layout)
+
+        tabs.addTab(tab_replay, "Replay")
+
+        root.addWidget(tabs, stretch=1)
 
         actions = QHBoxLayout()
         actions.addStretch()
@@ -671,7 +764,17 @@ class SessionHistoryDialog(QDialog):
         actions.addWidget(close_btn)
         root.addLayout(actions)
 
+        self._replay_data: dict = {}
+        self._replay_playing = False
+        self._replay_timer = QTimer(self)
+        self._replay_timer.timeout.connect(self._replay_tick)
+        self._replay_playhead_sec = 0.0
+        self._replay_playhead_line_hr: pg.InfiniteLine | None = None
+        self._replay_playhead_line_rmssd: pg.InfiniteLine | None = None
+        self._replay_playhead_line_ecg: pg.InfiniteLine | None = None
+
         self.populate(profile_name=profile_name, sessions=sessions)
+        self._populate_replay_session_combo()
 
     @staticmethod
     def _format_started(value: str | None) -> str:
@@ -700,6 +803,176 @@ class SessionHistoryDialog(QDialog):
             for col_idx, val in enumerate(values):
                 self._table.setItem(row_idx, col_idx, QTableWidgetItem(val))
         self._table.resizeRowsToContents()
+
+    def _populate_replay_session_combo(self):
+        """Fill session combo for Replay tab."""
+        self._replay_session_combo.blockSignals(True)
+        self._replay_session_combo.clear()
+        self._replay_session_combo.addItem("— Select session —", None)
+        for s in self._sessions:
+            session_dir = s.get("session_dir") or ""
+            session_id = str(s.get("session_id") or "--")
+            started = self._format_started(s.get("started_at"))
+            label = f"{started}  ({session_id})"
+            self._replay_session_combo.addItem(label, session_dir)
+        self._replay_session_combo.blockSignals(False)
+
+    def _on_replay_session_changed(self, _idx: int):
+        """When session selection changes, enable Load if valid."""
+        session_dir = self._replay_session_combo.currentData()
+        self._replay_load_btn.setEnabled(bool(session_dir))
+
+    def _replay_load_session(self):
+        """Load selected session data and display plots."""
+        session_dir = self._replay_session_combo.currentData()
+        if not session_dir:
+            return
+        from hnh.replay_loader import load_session_replay_data
+        data = load_session_replay_data(Path(session_dir))
+        self._replay_data = data
+        duration = data.get("duration_seconds") or 0.0
+
+        # Clear plots
+        self._replay_hr_plot.clear()
+        self._replay_rmssd_plot.clear()
+        self._replay_ecg_plot.clear()
+
+        # Remove old playhead lines
+        for plot, line in [
+            (self._replay_hr_plot, self._replay_playhead_line_hr),
+            (self._replay_rmssd_plot, self._replay_playhead_line_rmssd),
+            (self._replay_ecg_plot, self._replay_playhead_line_ecg),
+        ]:
+            if line is not None:
+                try:
+                    plot.removeItem(line)
+                except Exception:
+                    pass
+        self._replay_playhead_line_hr = None
+        self._replay_playhead_line_rmssd = None
+        self._replay_playhead_line_ecg = None
+
+        hr_t = data.get("hr_times") or []
+        hr_v = data.get("hr_values") or []
+        rmssd_t = data.get("rmssd_times") or []
+        rmssd_v = data.get("rmssd_values") or []
+        ecg_samples = data.get("ecg_samples") or []
+        ecg_rate = data.get("ecg_sample_rate_hz") or 130
+
+        if hr_t and hr_v:
+            self._replay_hr_plot.plot(hr_t, hr_v, pen=pg.mkPen("r", width=1.5))
+        if rmssd_t and rmssd_v:
+            self._replay_rmssd_plot.plot(rmssd_t, rmssd_v, pen=pg.mkPen("b", width=1.5))
+
+        if ecg_samples:
+            ecg_t = [i / ecg_rate for i in range(len(ecg_samples))]
+            self._replay_ecg_plot.plot(ecg_t, ecg_samples, pen=pg.mkPen("k", width=1.0))
+        else:
+            self._replay_ecg_plot.addItem(pg.TextItem("No ECG data (load from EDF or CSV)", anchor=(0.5, 0.5)))
+
+        # Playhead lines
+        self._replay_playhead_line_hr = pg.InfiniteLine(
+            pos=0, angle=90, movable=False, pen=pg.mkPen((200, 80, 80, 200), width=1.5)
+        )
+        self._replay_playhead_line_rmssd = pg.InfiniteLine(
+            pos=0, angle=90, movable=False, pen=pg.mkPen((80, 80, 200, 200), width=1.5)
+        )
+        self._replay_playhead_line_ecg = pg.InfiniteLine(
+            pos=0, angle=90, movable=False, pen=pg.mkPen((80, 80, 80, 200), width=1.5)
+        )
+        self._replay_hr_plot.addItem(self._replay_playhead_line_hr)
+        self._replay_rmssd_plot.addItem(self._replay_playhead_line_rmssd)
+        self._replay_ecg_plot.addItem(self._replay_playhead_line_ecg)
+
+        # Timeline slider
+        max_val = max(1000, int(duration * 10)) if duration > 0 else 1000
+        self._replay_timeline_slider.setMaximum(max_val)
+        self._replay_timeline_slider.setValue(0)
+        self._replay_playhead_sec = 0.0
+        self._replay_time_label.setText("0.0 s")
+
+        # Annotations
+        self._replay_ann_combo.blockSignals(True)
+        self._replay_ann_combo.clear()
+        self._replay_ann_combo.addItem("— Select annotation —", -1.0)
+        for t, text in data.get("annotations") or []:
+            self._replay_ann_combo.addItem(f"{t:.1f}s: {text[:40]}…" if len(text) > 40 else f"{t:.1f}s: {text}", t)
+        self._replay_ann_combo.blockSignals(False)
+
+        self._replay_play_btn.setEnabled(duration > 0)
+        self._replay_playing = False
+        self._replay_play_btn.setText("Play")
+        self._replay_timer.stop()
+
+    def _replay_toggle_play(self):
+        """Play or pause replay."""
+        if not self._replay_data:
+            return
+        duration = self._replay_data.get("duration_seconds") or 0.0
+        if duration <= 0:
+            return
+        self._replay_playing = not self._replay_playing
+        self._replay_play_btn.setText("Pause" if self._replay_playing else "Play")
+        if self._replay_playing:
+            if self._replay_playhead_sec >= duration:
+                self._replay_playhead_sec = 0.0
+            self._replay_timer.start(50)
+        else:
+            self._replay_timer.stop()
+
+    def _replay_tick(self):
+        """Advance playhead during replay."""
+        if not self._replay_data:
+            return
+        duration = self._replay_data.get("duration_seconds") or 0.0
+        speed = self._replay_speed_combo.currentData() or 1.0
+        self._replay_playhead_sec += 0.05 * speed
+        if self._replay_playhead_sec >= duration:
+            self._replay_playhead_sec = duration
+            self._replay_playing = False
+            self._replay_play_btn.setText("Play")
+            self._replay_timer.stop()
+        self._replay_update_playhead()
+
+    def _replay_update_playhead(self):
+        """Update playhead position and timeline slider."""
+        sec = self._replay_playhead_sec
+        self._replay_time_label.setText(f"{sec:.1f} s")
+        duration = self._replay_data.get("duration_seconds") or 0.0
+        max_slider = self._replay_timeline_slider.maximum()
+        if duration > 0 and max_slider > 0:
+            val = int(sec / duration * max_slider)
+            self._replay_timeline_slider.blockSignals(True)
+            self._replay_timeline_slider.setValue(val)
+            self._replay_timeline_slider.blockSignals(False)
+        if self._replay_playhead_line_hr is not None:
+            self._replay_playhead_line_hr.setValue(sec)
+        if self._replay_playhead_line_rmssd is not None:
+            self._replay_playhead_line_rmssd.setValue(sec)
+        if self._replay_playhead_line_ecg is not None:
+            self._replay_playhead_line_ecg.setValue(sec)
+
+    def _replay_on_timeline_moved(self, val: int):
+        """User dragged timeline scrubber."""
+        max_slider = self._replay_timeline_slider.maximum()
+        duration = self._replay_data.get("duration_seconds") or 0.0
+        if max_slider > 0 and duration > 0:
+            self._replay_playhead_sec = val / max_slider * duration
+            self._replay_update_playhead()
+
+    def _replay_pause(self):
+        """Pause replay when user interacts with timeline."""
+        if self._replay_playing:
+            self._replay_playing = False
+            self._replay_play_btn.setText("Play")
+            self._replay_timer.stop()
+
+    def _replay_jump_to_annotation(self, idx: int):
+        """Jump playhead to selected annotation time."""
+        t = self._replay_ann_combo.currentData()
+        if t is not None and t >= 0:
+            self._replay_playhead_sec = float(t)
+            self._replay_update_playhead()
 
 
 class TrendsWindow(QMainWindow):

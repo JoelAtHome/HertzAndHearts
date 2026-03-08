@@ -190,16 +190,16 @@ Implementation checklist:
 - Proposed approach: Add a second tab ("Compare") under Trends with session checkbox selection, metric selection, and an aligned comparison table with deltas. Default tab remains Trend Plots.
 - Effort: M
 - Impact: High
-- Status: triaged
-- Notes: Design: [docs/F06_TRENDS_COMPARE_TAB_DESIGN.md](docs/F06_TRENDS_COMPARE_TAB_DESIGN.md). Prioritize QTc/RMSSD/HR; optional confidence overlays (F04).
+- Status: done
+- Notes: Implemented Compare tab under Trends with session selection, metric selection, and aligned comparison table with deltas. Design: [docs/F06_TRENDS_COMPARE_TAB_DESIGN.md](docs/F06_TRENDS_COMPARE_TAB_DESIGN.md).
 
 ### 9) [F13] Session replay mode
 - Problem: Post-session review lacks synchronized playback for metric changes and annotations.
 - Proposed approach: Add timeline replay for recorded sessions with marker navigation and synchronized chart state.
 - Effort: M
 - Impact: High
-- Status: triaged
-- Notes: Include variable playback speed and jump-to-annotation controls.
+- Status: done
+- Notes: Replay tab in Session History with HR/RMSSD/ECG plots (zoom/pan both axes), timeline scrubber, play/pause, variable speed, jump-to-annotation. Data from EDF or CSV.
 
 ### 10) [F24] Import connectors (common RR/ECG formats)
 - Problem: Historical/external recordings are hard to analyze in-app without native import paths.
@@ -410,6 +410,21 @@ Implementation checklist:
 ## Done
 
 Completed items. Include completion date and optional version reference.
+
+### [F13] Session replay mode
+- Completed: 2026-03-07
+- Outcome: Replay tab added to Session History with HR, RMSSD, and ECG plots (zoomable and pannable on both axes). Timeline scrubber scrolls time; play/pause with variable speed (0.5×, 1×, 2×, 4×); jump-to-annotation. Data loaded from EDF (if exported) or CSV.
+- Notes: `hnh/replay_loader.py`, `hnh/view.py` (SessionHistoryDialog Replay tab).
+
+### [F06] Serial session comparison view
+- Completed: 2026-03-07
+- Outcome: Compare tab added under Trends with session checkbox selection, metric selection, and aligned comparison table with deltas. Default tab remains Trend Plots. Prioritizes QTc/RMSSD/HR.
+- Notes: Design: [docs/F06_TRENDS_COMPARE_TAB_DESIGN.md](docs/F06_TRENDS_COMPARE_TAB_DESIGN.md).
+
+### [F13] Session replay mode
+- Completed: 2026-03-07
+- Outcome: Replay tab added to Session History window. Select a session, click Load, then use timeline scrubber or Play to scroll through time. HR, RMSSD, and ECG plots are zoomable and pannable on both axes. Variable playback speed (0.5×, 1×, 2×, 4×). Jump-to-annotation dropdown. Data loaded from EDF (if exported) or CSV.
+- Notes: `hnh/replay_loader.py`, `hnh/view.py` (SessionHistoryDialog Replay tab).
 
 ### CSV export: IBI, HRV, time, and elapsed_sec
 - Completed: 2026-03-02
