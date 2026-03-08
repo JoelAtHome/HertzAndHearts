@@ -326,8 +326,19 @@ Implementation checklist:
 - Proposed approach: Keep existing HR/RMSSD/SDNN traces visible, gray plots during disconnect with overlay copy, resume with a blank timeline gap (no deceptive bridge line), and auto-log system annotations for disconnect/reconnect with reason and duration.
 - Effort: M
 - Impact: High
-- Status: planned
-- Notes: Persist disconnect intervals/count/total duration in manifest and include generated annotations in CSV/report timelines.
+- Status: done
+- Notes: Full implementation: gray overlay during disconnect; explicit timeline gap via multi-series segments; disconnect intervals in manifest (disconnect_intervals, disconnect_total_seconds); system annotations in CSV/report; button-disconnect preserves plot history and shows gray overlay; parity with sensor-induced path.
+
+Implementation checklist:
+- [x] Preserve HR/RMSSD/SDNN traces during sensor-induced signal fault (timeout, dropout).
+- [x] Stop appending new points during fault; chart shows break until recovery.
+- [x] Resume plotting when good data returns.
+- [x] Log faults to signal_diag.log with type, reason, and counts.
+- [x] Gray plots during disconnect with overlay copy.
+- [x] Resume with explicit blank timeline gap (no deceptive bridge line).
+- [x] Persist disconnect intervals/count/total duration in manifest.
+- [x] Include auto annotations in CSV/report timelines.
+- [x] Button-driven disconnect: preserve history (parity with sensor-induced path).
 
 ### 27) [F33] EDF export implementation (native + CSV backfill path)
 - Problem: Session manifests include an EDF artifact path but EDF writing is still marked planned and not produced.
@@ -342,8 +353,8 @@ Implementation checklist:
 - Proposed approach: Normalize reconnect handling so both disconnect paths preserve history with an explicit blank gap (or clearly marked disconnect segment) and avoid deceptive line continuity.
 - Effort: M
 - Impact: Low
-- Status: triaged
-- Notes: Low-priority polish follow-up after higher-value plotting/performance tasks.
+- Status: done
+- Notes: Addressed by item #26: both disconnect paths preserve history with explicit gap and gray overlay.
 
 ## PlannedNext
 

@@ -3460,6 +3460,17 @@ class View(QMainWindow):
         self._suppress_comm_error_popups = False
         self._signal_fault_buffer: list[dict] = []
         self._signal_fault_counts: dict[str, int] = {}
+        # Disconnect intervals for manifest/CSV/report (start_ts, end_ts, reason, duration_sec)
+        self._disconnect_intervals: list[dict] = []
+        self._current_disconnect_start: float | None = None
+        self._disconnect_reason: str = ""
+        # Gray overlay during disconnect (separate from "no sensor" overlay)
+        self._disconnect_overlay_hr: QLabel | None = None
+        self._disconnect_overlay_hrv: QLabel | None = None
+        # Segment series for explicit timeline gaps (multi-series to avoid bridge lines)
+        self._hr_segments: list = []
+        self._rmssd_segments: list = []
+        self._sdnn_segments: list = []
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
@@ -3631,6 +3642,8 @@ class View(QMainWindow):
         self._hr_overlay.show()
         self._hrv_overlay = self._make_chart_overlay(self.hrv_widget)
         self._hrv_overlay.show()
+        self._disconnect_overlay_hr = self._make_disconnect_overlay(self.ibis_widget)
+        self._disconnect_overlay_hrv = self._make_disconnect_overlay(self.hrv_widget)
         self.ibis_widget.installEventFilter(self)
         self.hrv_widget.installEventFilter(self)
 
@@ -3645,6 +3658,7 @@ class View(QMainWindow):
         self._connect_pulse_active = False
         self._scan_pulse_active = False
         self._preserve_good_on_reset = False
+        self._resuming_after_button_disconnect = False
 
         self.recording_statusbar = StatusBanner()
 
@@ -4469,6 +4483,8 @@ class View(QMainWindow):
         bundle = self._session_bundle
         if bundle is None:
             return {"updated_at": now, "state": state}
+        disc_intervals = list(self._disconnect_intervals or [])
+        total_disc_sec = sum(r.get("duration_sec", 0) for r in disc_intervals)
         return {
             "schema_version": 1,
             "updated_at": now,
@@ -4494,6 +4510,8 @@ class View(QMainWindow):
                 "qtc": qtc_payload,
                 "annotation_count": len(self._session_annotations),
             },
+            "disconnect_intervals": disc_intervals,
+            "disconnect_total_seconds": total_disc_sec,
             "disclaimer": self._current_disclaimer_payload(),
             "artifacts": {
                 "csv": {"path": str(bundle.csv_path), "exists": bundle.csv_path.exists()},
@@ -4563,6 +4581,7 @@ class View(QMainWindow):
         self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._last_qtc_diag_logged = ()
+        self._disconnect_intervals = []
         self._profile_store.record_session_started(
             profile_name=self._session_profile_id,
             bundle=self._session_bundle,
@@ -4595,6 +4614,7 @@ class View(QMainWindow):
     def _abandon_active_session(self):
         if self._session_state != "recording":
             return
+        self._record_disconnect_end()  # Close any open interval before abandoning
         self.signals.save_recording.emit()
         if self._session_bundle is not None:
             self._record_session_trend_from_current_state()
@@ -4614,6 +4634,7 @@ class View(QMainWindow):
             if show_message:
                 self.show_status("No active session to save.")
             return
+        self._record_disconnect_end()  # Close any open disconnect interval for manifest
         destination_root = self._session_save_path_from_settings()
         self.signals.save_recording.emit()
         if build_final_report and self._session_bundle is not None:
@@ -4663,11 +4684,23 @@ class View(QMainWindow):
             device.setCoreConfigurations(QBluetoothDeviceInfo.LowEnergyCoreConfiguration)
             sensor = [device]
 
-        self.start_time = None
-        self.baseline_values = []
-        self.baseline_rmssd = None
-        self.baseline_hr_values = []
-        self.baseline_hr = None
+        # Preserve plot history on reconnect (parity with sensor-induced path)
+        preserve_plots = (
+            self.hr_trend_series.count() > 0
+            or self.hrv_widget.time_series.count() > 0
+            or self.sdnn_series.count() > 0
+        )
+        if preserve_plots:
+            self._resuming_after_button_disconnect = True
+        else:
+            self._resuming_after_button_disconnect = False
+            self.start_time = None
+
+        if not preserve_plots:
+            self.baseline_values = []
+            self.baseline_rmssd = None
+            self.baseline_hr_values = []
+            self.baseline_hr = None
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -4703,13 +4736,22 @@ class View(QMainWindow):
         self.ecg_window.clear()
         self.qtc_window.clear()
         self._set_session_state("idle")
-        self.hr_trend_series.clear()
-        self.sdnn_series.clear()
-
-        if hasattr(self, 'baseline_series'):
+        if not preserve_plots:
+            self.hr_trend_series.clear()
+            self.sdnn_series.clear()
+            self.hrv_widget.time_series.clear()
+            # Remove segment series from chart when doing full reset
+            for segments, chart in [
+                (self._hr_segments, self.ibis_widget.plot),
+                (self._rmssd_segments, self.hrv_widget.chart()),
+                (self._sdnn_segments, self.hrv_widget.chart()),
+            ]:
+                while segments:
+                    chart.removeSeries(segments.pop(0))
+        if not preserve_plots and hasattr(self, 'baseline_series'):
             self.hrv_widget.chart().removeSeries(self.baseline_series)
             del self.baseline_series
-        if hasattr(self, 'hr_baseline_series'):
+        if not preserve_plots and hasattr(self, 'hr_baseline_series'):
             self.ibis_widget.plot.removeSeries(self.hr_baseline_series)
             del self.hr_baseline_series
 
@@ -4749,6 +4791,9 @@ class View(QMainWindow):
                 self._abandon_active_session()
         self._data_watchdog.stop()
         self._connect_attempt_timer.stop()
+        # Complete any open sensor-fault interval
+        self._record_disconnect_end()
+        self._record_disconnect_start("User disconnect")
         if self.ecg_window.isVisible():
             self.ecg_window.stop()
         if self.qtc_window.isVisible():
@@ -4762,9 +4807,8 @@ class View(QMainWindow):
         if self.psd_window.isVisible():
             self.psd_window.hide()
         self.psd_window.clear()
-        self.hrv_widget.time_series.clear()
-        self.hr_trend_series.clear()
-        self.sdnn_series.clear()
+        # Preserve main plot history (parity with sensor-induced disconnect)
+        # self.hrv_widget.time_series, self.hr_trend_series, self.sdnn_series - NOT cleared
         self.model.reset_ibi_diagnostics()
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         if hasattr(self, 'baseline_series'):
@@ -5008,6 +5052,19 @@ class View(QMainWindow):
         lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
         return lbl
 
+    @staticmethod
+    def _make_disconnect_overlay(parent):
+        lbl = QLabel("Signal interrupted\nData preserved", parent)
+        lbl.setAlignment(Qt.AlignCenter)
+        lbl.setStyleSheet(
+            "background: rgba(128, 128, 128, 140); "
+            "color: #fff; font-size: 14px; font-weight: bold; "
+            "border-radius: 8px; padding: 16px;"
+        )
+        lbl.setAttribute(Qt.WA_TransparentForMouseEvents)
+        lbl.hide()
+        return lbl
+
     def eventFilter(self, obj, event):
         if obj in (self.annotation, self.annotation.lineEdit()) and event.type() == QEvent.Type.KeyPress:
             if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter):
@@ -5022,12 +5079,17 @@ class View(QMainWindow):
             QTimer.singleShot(0, self._refresh_popup_control_labels)
         if event.type() == QEvent.Type.Resize:
             overlay = None
+            disc_overlay = None
             if obj is self.ibis_widget:
                 overlay = self._hr_overlay
+                disc_overlay = self._disconnect_overlay_hr
             elif obj is self.hrv_widget:
                 overlay = self._hrv_overlay
+                disc_overlay = self._disconnect_overlay_hrv
             if overlay is not None:
                 overlay.resize(obj.size())
+            if disc_overlay is not None:
+                disc_overlay.resize(obj.size())
         if (
             obj in {
                 getattr(self, "_top_bar", None),
@@ -5058,8 +5120,26 @@ class View(QMainWindow):
             self.show_status("Unable to open disclaimer file.", print_to_terminal=False)
 
     def _start_connect_hints(self):
-        self._hr_overlay.show()
-        self._hrv_overlay.show()
+        has_plot_data = (
+            (self.hr_trend_series.count() > 0 if hasattr(self, "hr_trend_series") else False)
+            or (self.hrv_widget.time_series.count() > 0)
+        )
+        if has_plot_data:
+            self._hr_overlay.hide()
+            self._hrv_overlay.hide()
+            if self._disconnect_overlay_hr:
+                self._disconnect_overlay_hr.show()
+                self._disconnect_overlay_hr.resize(self.ibis_widget.size())
+            if self._disconnect_overlay_hrv:
+                self._disconnect_overlay_hrv.show()
+                self._disconnect_overlay_hrv.resize(self.hrv_widget.size())
+        else:
+            if self._disconnect_overlay_hr:
+                self._disconnect_overlay_hr.hide()
+            if self._disconnect_overlay_hrv:
+                self._disconnect_overlay_hrv.hide()
+            self._hr_overlay.show()
+            self._hrv_overlay.show()
         has_sensors = self._has_sensor_choices()
         self._connect_pulse_active = has_sensors
         self._scan_pulse_active = not has_sensors
@@ -5077,6 +5157,10 @@ class View(QMainWindow):
     def _stop_connect_hints(self):
         self._hr_overlay.hide()
         self._hrv_overlay.hide()
+        if self._disconnect_overlay_hr:
+            self._disconnect_overlay_hr.hide()
+        if self._disconnect_overlay_hrv:
+            self._disconnect_overlay_hrv.hide()
         self._connect_pulse_timer.stop()
         self._connect_pulse_on = False
         self._connect_pulse_active = False
@@ -5434,6 +5518,17 @@ class View(QMainWindow):
         self._prune_series_before(self.hr_trend_series, prune_before)
         self._prune_series_before(self.hrv_widget.time_series, prune_before)
         self._prune_series_before(self.sdnn_series, prune_before)
+        # Remove segments fully outside visible window
+        for segments, chart in [
+            (self._hr_segments, self.ibis_widget.plot),
+            (self._rmssd_segments, self.hrv_widget.chart()),
+            (self._sdnn_segments, self.hrv_widget.chart()),
+        ]:
+            while segments and segments[0].count() > 0:
+                last_x = float(segments[0].at(segments[0].count() - 1).x())
+                if last_x >= prune_before:
+                    break
+                chart.removeSeries(segments.pop(0))
 
     def reset_y_axes(self):
         x_min = float(self.ibis_widget.x_axis.min())
@@ -6097,6 +6192,8 @@ class View(QMainWindow):
         if silence >= self.settings.DATA_TIMEOUT_SECONDS and not self._fault_active:
             self._fault_active = True
             self._consecutive_good = 0
+            self._record_disconnect_start("No data (timeout)")
+            self._update_disconnect_overlay(True)
             self._set_signal_indicator("LOST (No data)", "red")
             self._log_signal_fault(
                 "WATCHDOG_LOST", "No data received",
@@ -6113,6 +6210,83 @@ class View(QMainWindow):
     def _set_signal_indicator(self, text: str, color: str):
         self.health_indicator.setStyleSheet("color: %s; font-size: 18px;" % color)
         self.health_label.setText("Signal: %s" % text)
+
+    def _update_disconnect_overlay(self, show: bool):
+        """Show or hide gray disconnect overlay when we have plot data."""
+        has_data = (
+            self.hr_trend_series.count() > 0
+            or self.hrv_widget.time_series.count() > 0
+        )
+        if not has_data or not show:
+            if self._disconnect_overlay_hr:
+                self._disconnect_overlay_hr.hide()
+            if self._disconnect_overlay_hrv:
+                self._disconnect_overlay_hrv.hide()
+            return
+        if self._disconnect_overlay_hr and self.ibis_widget.isVisible():
+            self._disconnect_overlay_hr.show()
+            self._disconnect_overlay_hr.resize(self.ibis_widget.size())
+        if self._disconnect_overlay_hrv and self.hrv_widget.isVisible():
+            self._disconnect_overlay_hrv.show()
+            self._disconnect_overlay_hrv.resize(self.hrv_widget.size())
+
+    def _start_new_plot_segment(self):
+        """Create explicit timeline gap: freeze current series as segment, continue with cleared active series."""
+        def freeze_segment(series: QLineSeries, segments: list, chart, x_axis, y_axis):
+            if series.count() == 0:
+                return
+            seg = QLineSeries()
+            seg.setPen(series.pen())
+            seg.setName(series.name())
+            for i in range(series.count()):
+                p = series.at(i)
+                seg.append(p.x(), p.y())
+            chart.addSeries(seg)
+            seg.attachAxis(x_axis)
+            seg.attachAxis(y_axis)
+            segments.append(seg)
+            series.clear()
+
+        freeze_segment(
+            self.hr_trend_series, self._hr_segments, self.ibis_widget.plot,
+            self.ibis_widget.x_axis, self.ibis_widget.y_axis,
+        )
+        freeze_segment(
+            self.hrv_widget.time_series, self._rmssd_segments, self.hrv_widget.chart(),
+            self.hrv_widget.x_axis, self.hrv_widget.y_axis,
+        )
+        freeze_segment(
+            self.sdnn_series, self._sdnn_segments, self.hrv_widget.chart(),
+            self.hrv_widget.x_axis, self.hrv_y_axis_right,
+        )
+
+    def _record_disconnect_start(self, reason: str):
+        """Record start of disconnect interval; used for manifest/CSV/report."""
+        if self._current_disconnect_start is not None:
+            return  # already recording
+        self._current_disconnect_start = time.time()
+        self._disconnect_reason = reason
+
+    def _record_disconnect_end(self):
+        """Complete current disconnect interval, emit annotation, add to manifest data."""
+        if self._current_disconnect_start is None:
+            return
+        end_ts = time.time()
+        duration_sec = round(end_ts - self._current_disconnect_start, 1)
+        rec = {
+            "start_ts": self._current_disconnect_start,
+            "end_ts": end_ts,
+            "reason": self._disconnect_reason,
+            "duration_sec": duration_sec,
+        }
+        self._disconnect_intervals.append(rec)
+        self._current_disconnect_start = None
+        # Emit as session annotation for CSV and include in report (only when recording)
+        if self._session_state == "recording":
+            ts_str = datetime.fromtimestamp(end_ts).strftime("%H:%M:%S")
+            text = f"[System] {self._disconnect_reason} ({duration_sec}s)"
+            self._session_annotations.append((ts_str, text))
+            self.signals.annotation.emit(NamedSignal("Annotation", text))
 
     @Slot(int)
     def _update_battery_display(self, level: int):
@@ -6261,6 +6435,11 @@ class View(QMainWindow):
     def update_ui_labels(self, data: NamedSignal):
         # 1. RAW BEAT DATA (Heart Rate & Instant Faults)
         if data.name == "ibis":
+            # First data after button-disconnect reconnect: complete interval, create gap
+            if self._resuming_after_button_disconnect:
+                self._resuming_after_button_disconnect = False
+                self._record_disconnect_end()
+                self._start_new_plot_segment()
             self._last_data_time = time.time()
             if not self._data_watchdog.isActive():
                 self._data_watchdog.start()
@@ -6286,6 +6465,8 @@ class View(QMainWindow):
                 if last_ibi_ms > self.settings.DROPOUT_IBI_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
+                    self._record_disconnect_start("Signal dropout")
+                    self._update_disconnect_overlay(True)
                     self._set_signal_indicator("FAULT: Bad comm", "red")
                     recent = list(data.value[1])[-10:]
                     self._log_signal_fault(
@@ -6302,6 +6483,8 @@ class View(QMainWindow):
                 if last_ibi_ms > self.settings.NOISE_IBI_HIGH_MS or last_ibi_ms < self.settings.NOISE_IBI_LOW_MS:
                     self._fault_active = True
                     self._consecutive_good = 0
+                    self._record_disconnect_start("Signal noise")
+                    self._update_disconnect_overlay(True)
                     self._set_signal_indicator("DROP/NOISE", "red")
                     fault_sub = "L2_NOISE_HIGH" if last_ibi_ms > self.settings.NOISE_IBI_HIGH_MS else "L2_NOISE_LOW"
                     recent = list(data.value[1])[-10:]
@@ -6324,6 +6507,8 @@ class View(QMainWindow):
                         if deviation > self.settings.DEVIATION_THRESHOLD:
                             self._fault_active = True
                             self._consecutive_good = 0
+                            self._record_disconnect_start("Erratic signal")
+                            self._update_disconnect_overlay(True)
                             self._set_signal_indicator("ERRATIC \u2014 irregular beat", "red")
                             recent = list(data.value[1])[-10:]
                             self._log_signal_fault(
@@ -6342,6 +6527,9 @@ class View(QMainWindow):
                     self._consecutive_good += 1
                     if self._consecutive_good >= self.settings.RECOVERY_BEATS:
                         self._fault_active = False
+                        self._record_disconnect_end()
+                        self._start_new_plot_segment()
+                        self._update_disconnect_overlay(False)
                         self._reset_signal_popup()
                         self._handle_stream_reset(clear_series=False)
                         self._set_signal_indicator("GOOD", "#00FF00")
