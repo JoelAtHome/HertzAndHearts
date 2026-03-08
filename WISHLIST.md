@@ -106,6 +106,14 @@ Complexity review checklist:
 - Status: idea
 - Notes: Start with local config storage; no cloud sync required.
 
+### [F04] Confidence badges on all outputs (deferred, low priority)
+- Problem: Metric labels can appear equally trustworthy even when underlying signal quality differs.
+- Proposed approach: Add High/Moderate/Low confidence badges for key outputs and reports.
+- Effort: M
+- Impact: Low
+- Status: idea
+- Notes: **Deferred; priority: low.** Moved from Prioritized. Depends on SQI and quality-rule definitions; align wording with non-diagnostic guardrails. Design for B&W printing (text-first, color optional).
+
 ## Prioritized
 
 Top candidates after triage. Keep this list focused and ordered by value.
@@ -169,15 +177,7 @@ Implementation checklist:
 - Status: done
 - Notes: Implemented in profile store schema and Profile Manager details form.
 
-### 7) [F04] Confidence badges on all outputs
-- Problem: Metric labels can appear equally trustworthy even when underlying signal quality differs.
-- Proposed approach: Add High/Moderate/Low confidence badges for key outputs and reports.
-- Effort: M
-- Impact: High
-- Status: triaged
-- Notes: Depends on SQI and quality-rule definitions; align wording with non-diagnostic guardrails.
-
-### 8) [F12] One-page clinical summary PDF
+### 7) [F12] One-page clinical summary PDF
 - Problem: Current reports are comprehensive but may be too long for fast handoff contexts.
 - Proposed approach: Add a concise one-page summary export focused on key pre/post values, quality, and notable events.
 - Effort: M
@@ -185,15 +185,15 @@ Implementation checklist:
 - Status: done
 - Notes: Implemented as a companion one-page share PDF with layout/formatting polish and one-page guardrails.
 
-### 9) [F06] Serial session comparison view
+### 8) [F06] Serial session comparison view
 - Problem: It is difficult to compare current session outcomes against recent personal history at a glance.
-- Proposed approach: Add a dedicated serial comparison view for selected sessions with aligned metrics and deltas.
+- Proposed approach: Add a second tab ("Compare") under Trends with session checkbox selection, metric selection, and an aligned comparison table with deltas. Default tab remains Trend Plots.
 - Effort: M
 - Impact: High
 - Status: triaged
-- Notes: Prioritize QTc/RMSSD/HR plus confidence overlays.
+- Notes: Design: [docs/F06_TRENDS_COMPARE_TAB_DESIGN.md](docs/F06_TRENDS_COMPARE_TAB_DESIGN.md). Prioritize QTc/RMSSD/HR; optional confidence overlays (F04).
 
-### 10) [F13] Session replay mode
+### 9) [F13] Session replay mode
 - Problem: Post-session review lacks synchronized playback for metric changes and annotations.
 - Proposed approach: Add timeline replay for recorded sessions with marker navigation and synchronized chart state.
 - Effort: M
@@ -201,7 +201,7 @@ Implementation checklist:
 - Status: triaged
 - Notes: Include variable playback speed and jump-to-annotation controls.
 
-### 11) [F24] Import connectors (common RR/ECG formats)
+### 10) [F24] Import connectors (common RR/ECG formats)
 - Problem: Historical/external recordings are hard to analyze in-app without native import paths.
 - Proposed approach: Add import support for common formats and selected ecosystem exports, then run the same analysis pipeline.
 - Effort: M

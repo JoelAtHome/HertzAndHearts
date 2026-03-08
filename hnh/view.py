@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QGraphicsView,
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit,
+    QTabWidget, QListWidget, QListWidgetItem, QSplitter,
 )
 from collections import deque
 from typing import Iterable
@@ -710,12 +711,14 @@ class TrendsWindow(QMainWindow):
         self._active_profile = active_profile
         self._is_admin = is_admin
         self.setWindowTitle("Hertz & Hearts — Session Trends")
-        self.resize(900, 520)
+        self.resize(960, 560)
 
-        central = QWidget()
-        layout = QVBoxLayout(central)
+        tabs = QTabWidget()
 
-        # Controls row: profile selector, span selector
+        # ---- Tab 1: Trend Plots (existing) ----
+        tab1 = QWidget()
+        tab1_layout = QVBoxLayout(tab1)
+
         controls = QHBoxLayout()
         controls.addWidget(QLabel("Profile:"))
         self._profile_combo = QComboBox()
@@ -741,21 +744,19 @@ class TrendsWindow(QMainWindow):
         controls.addWidget(hint)
 
         controls.addStretch()
-        layout.addLayout(controls)
+        tab1_layout.addLayout(controls)
 
-        # Plot
         date_axis = pg.DateAxisItem(orientation="bottom")
         self._plot_widget = pg.PlotWidget(axisItems={"bottom": date_axis})
         self._plot_widget.setLabel("left", "Value")
         self._plot_widget.setLabel("bottom", "Date & Time")
         self._plot_widget.addLegend(
-            offset=(-20, 20),  # top-right corner to avoid overlapping plot data
-            brush=(30, 30, 35, 200),  # semi-opaque dark background for readability
+            offset=(-20, 20),
+            brush=(30, 30, 35, 200),
         )
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
-        layout.addWidget(self._plot_widget)
+        tab1_layout.addWidget(self._plot_widget)
 
-        # Value overlay (time + values when cursor is over a point)
         self._hover_label = QLabel(self._plot_widget)
         self._hover_label.setStyleSheet(
             "background: rgba(255,255,255,0.92); padding: 6px 8px; "
@@ -766,8 +767,86 @@ class TrendsWindow(QMainWindow):
         self._trend_data: dict = {}
         self._cursor_line: pg.InfiniteLine | None = None
 
-        self.setCentralWidget(central)
+        tabs.addTab(tab1, "Trend Plots")
+
+        # ---- Tab 2: Compare (UI shell, no backend) ----
+        tab2 = QWidget()
+        tab2_layout = QVBoxLayout(tab2)
+
+        compare_controls = QHBoxLayout()
+        compare_controls.addWidget(QLabel("Profile:"))
+        self._compare_profile_combo = QComboBox()
+        self._compare_profile_combo.setMinimumWidth(140)
+        for name in profile_store.list_profiles():
+            self._compare_profile_combo.addItem(name)
+        idx = self._compare_profile_combo.findText(active_profile, Qt.MatchFixedString)
+        if idx >= 0:
+            self._compare_profile_combo.setCurrentIndex(idx)
+        self._compare_profile_combo.setEnabled(is_admin)
+        self._compare_profile_combo.currentTextChanged.connect(self._refresh_compare_session_list)
+        compare_controls.addWidget(self._compare_profile_combo)
+
+        compare_controls.addSpacing(16)
+        compare_controls.addWidget(QLabel("Metrics:"))
+        self._metric_hr = QCheckBox("HR")
+        self._metric_hr.setChecked(True)
+        self._metric_rmssd = QCheckBox("RMSSD")
+        self._metric_rmssd.setChecked(True)
+        self._metric_sdnn = QCheckBox("SDNN")
+        self._metric_sdnn.setChecked(True)
+        self._metric_qtc = QCheckBox("QTc")
+        self._metric_qtc.setChecked(True)
+        self._metric_lfhf = QCheckBox("LF/HF")
+        self._metric_lfhf.setChecked(False)
+        for cb in (self._metric_hr, self._metric_rmssd, self._metric_sdnn, self._metric_qtc, self._metric_lfhf):
+            compare_controls.addWidget(cb)
+            cb.stateChanged.connect(self._compare_selection_changed)
+        compare_controls.addSpacing(16)
+        self._clear_compare_btn = QPushButton("Clear selection")
+        self._clear_compare_btn.clicked.connect(self._compare_clear_selection)
+        compare_controls.addWidget(self._clear_compare_btn)
+        compare_controls.addStretch()
+        tab2_layout.addLayout(compare_controls)
+
+        splitter = QSplitter(Qt.Horizontal)
+
+        # Left: session list (loaded from profile_store)
+        session_list_container = QWidget()
+        session_list_layout = QVBoxLayout(session_list_container)
+        session_list_layout.addWidget(QLabel("Sessions (select 2+ to compare)"))
+        self._session_list = QListWidget()
+        self._session_list.setMinimumWidth(220)
+        self._session_list.setMaximumWidth(320)
+        self._compare_trends_lookup: dict[str, dict] = {}
+        self._session_list.itemChanged.connect(self._compare_selection_changed)
+        session_list_layout.addWidget(self._session_list)
+        splitter.addWidget(session_list_container)
+
+        # Right: table or placeholder
+        self._compare_table_stack = QWidget()
+        self._compare_table_stack_layout = QVBoxLayout(self._compare_table_stack)
+        self._compare_placeholder = QLabel("Select 2 or more sessions from the list to compare.")
+        self._compare_placeholder.setAlignment(Qt.AlignCenter)
+        self._compare_placeholder.setStyleSheet("font-size: 13px; color: #666; padding: 40px;")
+        self._compare_table = QTableWidget()
+        self._compare_table.setAlternatingRowColors(True)
+        self._compare_table.hide()
+        self._compare_table_stack_layout.addWidget(self._compare_placeholder)
+        self._compare_table_stack_layout.addWidget(self._compare_table)
+        splitter.addWidget(self._compare_table_stack)
+
+        splitter.setSizes([280, 600])
+        tab2_layout.addWidget(splitter)
+
+        hint2 = QLabel("Use Trend Plots tab for time-series view.")
+        hint2.setStyleSheet("font-size: 11px; color: #888; font-style: italic;")
+        tab2_layout.addWidget(hint2)
+
+        tabs.addTab(tab2, "Compare")
+
+        self.setCentralWidget(tabs)
         self._refresh_plot()
+        self._refresh_compare_session_list()
 
     def _refresh_plot(self):
         profile = self._profile_combo.currentText().strip() or self._active_profile
@@ -908,13 +987,147 @@ class TrendsWindow(QMainWindow):
         self._hover_label.move(12, 12)
         self._hover_label.show()
 
+    def _refresh_compare_session_list(self):
+        """Load session list from profile_store. Build trends lookup for table data."""
+        profile = self._compare_profile_combo.currentText().strip() or self._active_profile
+        sessions = self._profile_store.list_sessions(profile, limit=100)
+        trends_rows = self._profile_store.list_session_trends(profile, span="year")
+        self._compare_trends_lookup = {r["session_id"]: r for r in trends_rows}
+
+        self._session_list.blockSignals(True)
+        self._session_list.clear()
+        for s in sessions:
+            ended_at = s.get("ended_at")
+            started_at = s.get("started_at")
+            session_id = s.get("session_id", "")
+            try:
+                end_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00")) if ended_at else None
+            except (ValueError, TypeError):
+                end_dt = None
+            try:
+                start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00")) if started_at else None
+            except (ValueError, TypeError):
+                start_dt = None
+            if end_dt:
+                date_str = end_dt.strftime("%b %d, %Y  %H:%M")
+            else:
+                date_str = session_id[:15] if session_id else "—"
+            if end_dt and start_dt:
+                delta = end_dt - start_dt
+                mins = int(delta.total_seconds() / 60)
+                dur_str = f"  —  {mins} min"
+            else:
+                dur_str = "  —  —"
+            label = date_str + dur_str
+            item = QListWidgetItem(label)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Unchecked)
+            item.setData(Qt.UserRole, session_id)
+            self._session_list.addItem(item)
+        self._session_list.blockSignals(False)
+        self._compare_selection_changed()
+
+    def _compare_clear_selection(self):
+        """Uncheck all sessions in the Compare tab list."""
+        for i in range(self._session_list.count()):
+            item = self._session_list.item(i)
+            item.setCheckState(Qt.Unchecked)
+        self._compare_placeholder.show()
+        self._compare_table.hide()
+
+    def _compare_selection_changed(self):
+        """Show table with real session data when 2+ sessions selected; else show placeholder."""
+        checked = [
+            self._session_list.item(i)
+            for i in range(self._session_list.count())
+            if self._session_list.item(i).checkState() == Qt.Checked
+        ]
+        if len(checked) < 2:
+            self._compare_placeholder.show()
+            self._compare_table.hide()
+            return
+        session_ids = [item.data(Qt.UserRole) or "" for item in checked]
+        session_ids = list(reversed(session_ids))  # oldest first: past → present for table
+        lookup = getattr(self, "_compare_trends_lookup", {}) or {}
+
+        # Build column labels: short date/time per session, then delta columns
+        col_labels = []
+        for sid in session_ids:
+            row = lookup.get(sid, {})
+            ended = row.get("ended_at")
+            try:
+                dt = datetime.fromisoformat(str(ended).replace("Z", "+00:00")) if ended else None
+                col_labels.append(dt.strftime("%b %d %H:%M") if dt else sid[:12])
+            except (ValueError, TypeError):
+                col_labels.append(sid[:12] if sid else "—")
+        for i in range(len(session_ids) - 1):
+            col_labels.append(f"Δ ({i + 1}→{i + 2})")
+
+        # Build rows from real trend data
+        rows = []
+        for metric_key, label, fmt in [
+            ("hr", "HR (bpm)", lambda v: f"{v:.0f}" if v is not None else "—"),
+            ("rmssd", "RMSSD (ms)", lambda v: f"{v:.1f}" if v is not None else "—"),
+            ("sdnn", "SDNN (ms)", lambda v: f"{v:.1f}" if v is not None else "—"),
+            ("qtc", "QTc (ms)", lambda v: f"{v:.0f}" if v is not None else "—"),
+        ]:
+            key_map = {"hr": "avg_hr", "rmssd": "avg_rmssd", "sdnn": "avg_sdnn", "qtc": "qtc_ms"}
+            store_key = key_map.get(metric_key, metric_key)
+            if (metric_key == "hr" and not self._metric_hr.isChecked()) or \
+               (metric_key == "rmssd" and not self._metric_rmssd.isChecked()) or \
+               (metric_key == "sdnn" and not self._metric_sdnn.isChecked()) or \
+               (metric_key == "qtc" and not self._metric_qtc.isChecked()):
+                continue
+            vals = []
+            for sid in session_ids:
+                r = lookup.get(sid, {})
+                v = r.get(store_key) if isinstance(r, dict) else None
+                vals.append(fmt(v))
+            deltas = []
+            for i in range(len(vals) - 1):
+                r1, r2 = lookup.get(session_ids[i], {}), lookup.get(session_ids[i + 1], {})
+                v1 = r1.get(store_key) if isinstance(r1, dict) else None
+                v2 = r2.get(store_key) if isinstance(r2, dict) else None
+                if v1 is not None and v2 is not None:
+                    d = v2 - v1
+                    deltas.append(f"{d:+.1f}" if "ms" in label else f"{d:+.0f}")
+                else:
+                    deltas.append("—")
+            rows.append((label, vals, deltas))
+
+        if self._metric_lfhf.isChecked():
+            rows.append(("LF/HF", ["—"] * len(session_ids), ["—"] * (len(session_ids) - 1)))
+
+        if not rows:
+            self._compare_placeholder.show()
+            self._compare_table.hide()
+            return
+        self._compare_placeholder.hide()
+        self._compare_table.show()
+        self._compare_table.setColumnCount(len(col_labels))
+        self._compare_table.setRowCount(len(rows))
+        self._compare_table.setHorizontalHeaderLabels(col_labels)
+        self._compare_table.setVerticalHeaderLabels([m for m, _, _ in rows])
+        for r, (_, vals, deltas) in enumerate(rows):
+            for c, v in enumerate(vals):
+                self._compare_table.setItem(r, c, QTableWidgetItem(str(v)))
+            for c, d in enumerate(deltas):
+                self._compare_table.setItem(r, len(vals) + c, QTableWidgetItem(str(d)))
+        self._compare_table.resizeColumnsToContents()
+        self._compare_table.resizeRowsToContents()
+
     def set_active_profile(self, profile: str):
         self._active_profile = profile
         idx = self._profile_combo.findText(profile, Qt.MatchFixedString)
         if idx >= 0:
             self._profile_combo.setCurrentIndex(idx)
+        idx_compare = self._compare_profile_combo.findText(profile, Qt.MatchFixedString)
+        if idx_compare >= 0:
+            self._compare_profile_combo.setCurrentIndex(idx_compare)
         self._is_admin = self._profile_store.profile_is_admin(profile)
         self._profile_combo.setEnabled(self._is_admin)
+        self._compare_profile_combo.setEnabled(self._is_admin)
+        self._refresh_compare_session_list()
 
 
 class ProfileManagerDialog(QDialog):
