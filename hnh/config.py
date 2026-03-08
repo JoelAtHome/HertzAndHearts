@@ -146,7 +146,7 @@ ECG_REFRESH_MS: Final[int] = 33
 # ──────────────────────────────────────────────────────────────────────
 # Seconds of silence before declaring "Signal: LOST".
 # Shorter = faster detection but may false-trigger during brief dropouts.
-DATA_TIMEOUT_SECONDS: Final[float] = 5.0
+DATA_TIMEOUT_SECONDS: Final[float] = 10.0
 
 # Level 1 fault: IBI exceeding this (ms) indicates total signal dropout
 # (>3 seconds between beats is not physiologically possible).
@@ -169,8 +169,8 @@ SIGNAL_DEGRADE_POPUP_COUNT: Final[int] = 12  # consecutive RMSSD breaches before
 SIGNAL_POPUP_AUTO_DISMISS_MS: Final[int] = 5500  # ~5.5 s for readable transient notices
 
 # Level 3 fault (adaptive): percentage deviation from the rolling
-# average that triggers an "ERRATIC" warning.  0.30 = 30%.
-DEVIATION_THRESHOLD: Final[float] = 0.30
+# average that triggers an "ERRATIC" warning.  0.35 = 35%.
+DEVIATION_THRESHOLD: Final[float] = 0.35
 
 # Number of recent IBIs used to compute the Level 3 rolling average.
 DEVIATION_WINDOW: Final[int] = 30
