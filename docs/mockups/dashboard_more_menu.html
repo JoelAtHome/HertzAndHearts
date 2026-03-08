@@ -1,0 +1,380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hertz &amp; Hearts — Dashboard (More menu mockup)</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 12px;
+      color: #2c3e50;
+      background: #e8ebed;
+    }
+    .app {
+      max-width: 1280px;
+      margin: 0 auto;
+      background: #fff;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 12px;
+      background: #fff;
+      border-bottom: 1px solid #dee2e6;
+    }
+    .profile-zone {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .profile-label {
+      font-size: 14px;
+      font-weight: 600;
+      color: #2c3e50;
+    }
+    .btn {
+      padding: 2px 8px;
+      font-size: 11px;
+      border: 1px solid #bdc3c7;
+      border-radius: 3px;
+      background: #f8f9fa;
+      cursor: pointer;
+      font-family: inherit;
+    }
+    .btn:hover { background: #e9ecef; }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    .disclaimer-link {
+      font-size: 11px;
+      color: #1b6ec2;
+      text-decoration: underline;
+      cursor: pointer;
+    }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 6px 12px;
+      background: #fff;
+      border-bottom: 1px solid #dee2e6;
+      flex-wrap: wrap;
+    }
+    .toolbar-sep {
+      width: 1px;
+      height: 18px;
+      background: #bdc3c7;
+      margin: 0 6px;
+    }
+    .toolbar .btn { min-width: 70px; }
+    .toolbar select {
+      padding: 2px 6px;
+      font-size: 11px;
+      border: 1px solid #bdc3c7;
+      border-radius: 3px;
+      min-width: 200px;
+      background: #fff;
+    }
+    .battery {
+      font-size: 10px;
+      color: #666;
+      background: #e0e0e0;
+      padding: 1px 6px;
+      border-radius: 3px;
+      min-width: 28px;
+      text-align: center;
+    }
+    .toolbar-spacer { flex: 1; min-width: 16px; }
+
+    /* Annotation block — dropdown with Annotate to the right */
+    .annotation-block {
+      display: flex;
+      flex-direction: row;
+      gap: 4px;
+      align-items: center;
+    }
+    .annotation-block select {
+      padding: 2px 6px;
+      font-size: 11px;
+      border: 1px solid #bdc3c7;
+      border-radius: 3px;
+      min-width: 180px;
+      background: #fff;
+    }
+    .annotation-block .btn { min-width: 64px; }
+
+    /* More dropdown — pure CSS */
+    .more-dropdown {
+      position: relative;
+      display: inline-block;
+    }
+    .more-btn {
+      padding: 2px 8px;
+      font-size: 11px;
+      border: 1px solid #bdc3c7;
+      border-radius: 3px;
+      background: #f8f9fa;
+      cursor: pointer;
+      font-family: inherit;
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+    }
+    .more-btn:hover { background: #e9ecef; }
+    .more-btn::after {
+      content: '▼';
+      font-size: 7px;
+      opacity: 0.7;
+      margin-left: 2px;
+    }
+    .more-menu {
+      position: absolute;
+      top: 100%;
+      right: 0;
+      margin-top: 2px;
+      min-width: 170px;
+      background: #fff;
+      border: 1px solid #bdc3c7;
+      border-radius: 4px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.12);
+      padding: 4px 0;
+      opacity: 0;
+      visibility: hidden;
+      transition: opacity 0.15s, visibility 0.15s;
+      z-index: 100;
+    }
+    .more-dropdown:hover .more-menu {
+      opacity: 1;
+      visibility: visible;
+    }
+    .more-menu-item {
+      display: block;
+      width: 100%;
+      padding: 6px 14px;
+      font-size: 11px;
+      text-align: left;
+      border: none;
+      background: none;
+      cursor: pointer;
+      font-family: inherit;
+      color: #2c3e50;
+    }
+    .more-menu-item:hover {
+      background: #f0f4f8;
+    }
+    .more-menu-item.import {
+      border-top: 1px solid #dee2e6;
+      margin-top: 2px;
+      padding-top: 8px;
+    }
+    .more-menu-item.import::before { content: '→ '; color: #1b6ec2; }
+
+    /* Content area — plots left, sidebar right */
+    .content {
+      display: flex;
+      flex: 1;
+      min-height: 420px;
+    }
+    .plots-col {
+      flex: 1;
+      padding: 8px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .plot-placeholder {
+      flex: 1;
+      min-height: 140px;
+      background: #f8fafc;
+      border: 1px solid #e2e8f0;
+      border-radius: 3px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #94a3b8;
+      font-size: 11px;
+    }
+    .freeze-row {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      padding: 4px 0;
+    }
+    .freeze-row .btn {
+      padding: 2px 8px;
+      font-size: 11px;
+    }
+
+    /* Right sidebar — pacer + metrics */
+    .sidebar {
+      width: 200px;
+      padding: 8px 10px;
+      background: #f8f9fa;
+      border-left: 1px solid #dee2e6;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+    .pacer-card {
+      background: #fff;
+      border: 1px solid #dee2e6;
+      border-radius: 4px;
+      padding: 12px;
+      text-align: center;
+    }
+    .pacer-card .pacer-title {
+      font-size: 10px;
+      color: #666;
+      margin-bottom: 6px;
+    }
+    .pacer-dot {
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #1b6ec2;
+      margin: 4px auto;
+    }
+    .pacer-rate {
+      font-size: 12px;
+      color: #2c3e50;
+    }
+    .metrics-group {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .metric-row {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      font-size: 11px;
+    }
+    .metric-label {
+      color: #666;
+      min-width: 72px;
+    }
+    .metric-value {
+      font-weight: 600;
+      color: #2c3e50;
+    }
+
+    /* Status bar */
+    .status-row {
+      padding: 4px 12px;
+      background: #f8f9fa;
+      border-top: 1px solid #dee2e6;
+      font-size: 11px;
+      color: #6c757d;
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="profile-zone">
+        <span class="profile-label">User: Admin</span>
+        <button class="btn">Switch User</button>
+      </div>
+      <div>
+        <span class="disclaimer-link">Legal Disclaimer</span>
+      </div>
+    </header>
+
+    <!-- Toolbar — matches screenshot layout -->
+    <div class="toolbar">
+      <button class="btn">Scan</button>
+      <select><option>Polar H10, AA:BB:CC:DD:EE:FF</option></select>
+      <button class="btn">Connect</button>
+      <button class="btn" disabled>Disconnect</button>
+      <span class="battery">—</span>
+
+      <button class="btn">Start New</button>
+      <button class="btn">Stop &amp; Save</button>
+
+      <div class="more-dropdown">
+        <button class="more-btn">More</button>
+        <div class="more-menu">
+          <button class="more-menu-item">History</button>
+          <button class="more-menu-item">Trends</button>
+          <button class="more-menu-item">Profiles</button>
+          <button class="more-menu-item">Switch User</button>
+          <button class="more-menu-item">Settings</button>
+          <button class="more-menu-item import">Import session…</button>
+        </div>
+      </div>
+
+      <span class="toolbar-sep"></span>
+
+      <button class="btn" disabled style="min-width:140px">ECG (no sensor)</button>
+      <button class="btn" disabled style="min-width:140px">QTc (no sensor)</button>
+      <button class="btn" style="min-width:90px">Poincare</button>
+      <button class="btn" style="min-width:80px">PSD</button>
+
+      <span class="toolbar-spacer"></span>
+
+      <span class="toolbar-sep"></span>
+
+      <div class="annotation-block">
+        <select><option>Choose from list or enter new</option></select>
+        <button class="btn">Annotate</button>
+      </div>
+    </div>
+
+    <!-- Content -->
+    <div class="content">
+      <div class="plots-col">
+        <div class="plot-placeholder">HR / RMSSD main plots</div>
+        <div class="freeze-row">
+          <button class="btn">Freeze Two Main Plots</button>
+          <button class="btn">Freeze All</button>
+          <button class="btn">Reset Y Axes</button>
+          <button class="btn">Reset Baseline</button>
+        </div>
+        <div class="plot-placeholder">HRV trend chart</div>
+      </div>
+      <div class="sidebar">
+        <div class="pacer-card">
+          <div class="pacer-title">Breathing Pacer</div>
+          <div class="pacer-dot"></div>
+          <div class="pacer-rate">6 bpm</div>
+        </div>
+        <div class="metrics-group">
+          <div class="metric-row">
+            <span class="metric-label">Current HR</span>
+            <span class="metric-value">— bpm</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">RMSSD</span>
+            <span class="metric-value">— ms</span>
+          </div>
+          <div class="metric-row">
+            <span class="metric-label">SDNN</span>
+            <span class="metric-value">— ms</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="status-row">
+      No sensor connected. Press Connect to begin.
+    </div>
+  </div>
+
+  <p style="text-align:center; font-size:10px; color:#94a3b8; margin:8px;">
+    Hover over <strong>More</strong> to see the dropdown. Static HTML/CSS mockup — no JavaScript.
+  </p>
+</body>
+</html>

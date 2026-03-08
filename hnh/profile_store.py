@@ -115,10 +115,17 @@ class ProfileStore:
                     ended_at TEXT,
                     state TEXT NOT NULL,
                     session_dir TEXT NOT NULL,
-                    csv_path TEXT NOT NULL
+                    csv_path TEXT NOT NULL,
+                    is_hidden INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
+            session_history_columns = {
+                str(row["name"]).casefold()
+                for row in conn.execute("PRAGMA table_info(session_history)").fetchall()
+            }
+            if "is_hidden" not in session_history_columns:
+                conn.execute("ALTER TABLE session_history ADD COLUMN is_hidden INTEGER NOT NULL DEFAULT 0")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS session_trends (
@@ -917,11 +924,12 @@ class ProfileStore:
         profile_name: str | None = None,
         *,
         state: str | None = None,
+        include_hidden: bool = False,
         limit: int = 100,
     ) -> list[dict[str, str | None]]:
         max_rows = max(1, int(limit))
         sql = [
-            "SELECT session_id, profile_name, started_at, ended_at, state, session_dir, csv_path",
+            "SELECT session_id, profile_name, started_at, ended_at, state, session_dir, csv_path, is_hidden",
             "FROM session_history",
         ]
         params: list[str | int] = []
@@ -932,6 +940,8 @@ class ProfileStore:
         if state:
             where.append("state = ?")
             params.append(str(state).strip())
+        if not include_hidden:
+            where.append("is_hidden = 0")
         if where:
             sql.append("WHERE " + " AND ".join(where))
         sql.append("ORDER BY started_at DESC, session_id DESC")
@@ -951,9 +961,25 @@ class ProfileStore:
                     "state": str(row["state"]),
                     "session_dir": str(row["session_dir"]),
                     "csv_path": str(row["csv_path"]),
+                    "is_hidden": "1" if int(row["is_hidden"] or 0) else "0",
                 }
             )
         return out
+
+    def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
+        sid = str(session_id).strip()
+        if not sid:
+            return False
+        with self._db() as conn:
+            cur = conn.execute(
+                """
+                UPDATE session_history
+                SET is_hidden = ?
+                WHERE session_id = ?
+                """,
+                (1 if hidden else 0, sid),
+            )
+        return cur.rowcount > 0
 
     def count_sessions(self, profile_name: str | None = None) -> int:
         with self._db() as conn:

@@ -206,8 +206,8 @@ Implementation checklist:
 - Proposed approach: Add import support for common formats and selected ecosystem exports, then run the same analysis pipeline.
 - Effort: M
 - Impact: High
-- Status: triaged
-- Notes: Start with CSV/EDF plus one high-value vendor export profile.
+- Status: done
+- Notes: Implemented Phase 1 import in More menu (`Import session...`) with session normalization into native history/replay/report pipeline. Current supported inputs: native CSV (`event,value,timestamp,elapsed_sec`), EDF+, and RR-only text (Kubios/Elite HRV style). Import is disabled during active recording.
 
 ### 12) [F08] Tag correlation analytics
 - Problem: Tagged events are captured but not leveraged to explain metric changes.
@@ -410,6 +410,16 @@ Implementation checklist:
 ## Done
 
 Completed items. Include completion date and optional version reference.
+
+### [F24] Import connectors (common RR/ECG formats)
+- Completed: 2026-03-08
+- Outcome: Added import flow under More menu (`Import session...`) that creates native session artifacts and indexes imported sessions into history/trends so they can be replayed, reported, and compared like recorded sessions.
+- Notes: Supported inputs in this phase: native CSV (`event,value,timestamp,elapsed_sec`), EDF+, and RR-only line-separated text (Kubios/Elite HRV style). Includes sample generator script: `scripts/create_import_samples.py`.
+
+### Session History hide/unhide (soft delete)
+- Completed: 2026-03-08
+- Outcome: Added reversible session hiding in Session History with `Show hidden` toggle plus `Hide selected` / `Unhide selected` actions; hidden sessions are excluded by default.
+- Notes: Backed by `session_history.is_hidden`; includes status messaging and selection-preservation polish for hide/unhide/toggle flows.
 
 ### [F13] Session replay mode
 - Completed: 2026-03-07

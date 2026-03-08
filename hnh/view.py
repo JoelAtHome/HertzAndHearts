@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit,
     QTabWidget, QListWidget, QListWidgetItem, QSplitter,
+    QToolButton, QMenu,
 )
 from collections import deque
 from typing import Iterable
@@ -634,16 +635,25 @@ class ProfileSelectionDialog(QDialog):
 
 
 class SessionHistoryDialog(QDialog):
-    """Read-only session history list for the active profile, with Replay tab."""
+    """Session history list for the active profile, with Replay tab."""
 
-    def __init__(self, profile_name: str, sessions: list[dict[str, str | None]], parent=None):
+    def __init__(
+        self,
+        profile_name: str,
+        sessions: list[dict[str, str | None]],
+        profile_store: ProfileStore | None = None,
+        parent=None,
+    ):
         super().__init__(parent)
         self.setModal(True)
         self.setWindowTitle(f"Session History — {profile_name}")
         self.resize(980, 620)
 
         self._profile_name = profile_name
-        self._sessions = sessions
+        self._all_sessions = list(sessions)
+        self._sessions: list[dict[str, str | None]] = []
+        self._profile_store = profile_store
+        self._show_hidden = False
 
         root = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -654,6 +664,18 @@ class SessionHistoryDialog(QDialog):
         self._summary = QLabel("")
         self._summary.setStyleSheet("font-size: 12px; color: #2c3e50;")
         tab_history_layout.addWidget(self._summary)
+        history_actions = QHBoxLayout()
+        self._show_hidden_cb = QCheckBox("Show hidden")
+        self._show_hidden_cb.toggled.connect(self._on_show_hidden_toggled)
+        history_actions.addWidget(self._show_hidden_cb)
+        history_actions.addStretch()
+        self._hide_btn = QPushButton("Hide selected")
+        self._hide_btn.clicked.connect(self._on_hide_selected)
+        history_actions.addWidget(self._hide_btn)
+        self._unhide_btn = QPushButton("Unhide selected")
+        self._unhide_btn.clicked.connect(self._on_unhide_selected)
+        history_actions.addWidget(self._unhide_btn)
+        tab_history_layout.addLayout(history_actions)
 
         self._table = QTableWidget()
         self._table.setColumnCount(5)
@@ -663,6 +685,7 @@ class SessionHistoryDialog(QDialog):
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.itemSelectionChanged.connect(self._sync_history_buttons)
         self._table.setAlternatingRowColors(True)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
@@ -697,9 +720,9 @@ class SessionHistoryDialog(QDialog):
 
         replay_controls.addWidget(QLabel("Speed:"))
         self._replay_speed_combo = QComboBox()
-        for label, mult in [("1×", 1.0), ("2×", 2.0), ("4×", 4.0), ("0.5×", 0.5)]:
+        for label, mult in [("0.25×", 0.25), ("0.5×", 0.5), ("1×", 1.0), ("2×", 2.0), ("4×", 4.0)]:
             self._replay_speed_combo.addItem(label, mult)
-        self._replay_speed_combo.setCurrentIndex(0)
+        self._replay_speed_combo.setCurrentIndex(2)
         replay_controls.addWidget(self._replay_speed_combo)
 
         replay_controls.addStretch()
@@ -763,6 +786,9 @@ class SessionHistoryDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         actions.addWidget(close_btn)
         root.addLayout(actions)
+        self._history_status = QLabel("")
+        self._history_status.setStyleSheet("font-size: 11px; color: #666;")
+        root.addWidget(self._history_status)
 
         self._replay_data: dict = {}
         self._replay_playing = False
@@ -775,6 +801,7 @@ class SessionHistoryDialog(QDialog):
 
         self.populate(profile_name=profile_name, sessions=sessions)
         self._populate_replay_session_combo()
+        self._sync_history_buttons()
 
     @staticmethod
     def _format_started(value: str | None) -> str:
@@ -789,20 +816,60 @@ class SessionHistoryDialog(QDialog):
         except ValueError:
             return raw
 
-    def populate(self, profile_name: str, sessions: list[dict[str, str | None]]):
+    def populate(
+        self,
+        profile_name: str,
+        sessions: list[dict[str, str | None]],
+        selected_session_id: str | None = None,
+    ):
+        self._all_sessions = list(sessions)
+        if self._show_hidden:
+            self._sessions = list(self._all_sessions)
+        else:
+            self._sessions = [
+                s for s in self._all_sessions if str(s.get("is_hidden") or "0") != "1"
+            ]
         self.setWindowTitle(f"Session History — {profile_name}")
-        self._summary.setText(f"{len(sessions)} session(s) for profile: {profile_name}")
-        self._table.setRowCount(len(sessions))
-        for row_idx, row in enumerate(sessions):
+        hidden_count = sum(1 for s in self._all_sessions if str(s.get("is_hidden") or "0") == "1")
+        self._update_history_summary(hidden_count)
+        self._table.setRowCount(len(self._sessions))
+        selected_row_idx: int | None = None
+        for row_idx, row in enumerate(self._sessions):
             started = self._format_started(row.get("started_at"))
             session_id = str(row.get("session_id") or "--")
+            is_hidden = str(row.get("is_hidden") or "0") == "1"
             state = str(row.get("state") or "--")
+            if is_hidden:
+                state = f"{state} (hidden)"
             session_dir = str(row.get("session_dir") or "--")
             csv_path = str(row.get("csv_path") or "--")
             values = [started, session_id, state, session_dir, csv_path]
             for col_idx, val in enumerate(values):
                 self._table.setItem(row_idx, col_idx, QTableWidgetItem(val))
+            if selected_session_id and session_id == selected_session_id:
+                selected_row_idx = row_idx
         self._table.resizeRowsToContents()
+        if selected_row_idx is not None:
+            self._table.selectRow(selected_row_idx)
+            self._table.setCurrentCell(selected_row_idx, 0)
+            self._table.setFocus(Qt.FocusReason.OtherFocusReason)
+        self._sync_history_buttons()
+
+    def _update_history_summary(self, hidden_count: int | None = None):
+        if hidden_count is None:
+            hidden_count = sum(
+                1 for s in self._all_sessions if str(s.get("is_hidden") or "0") == "1"
+            )
+        summary = f"{len(self._sessions)} session(s) for profile: {self._profile_name}"
+        summary += " | showing hidden: ON" if self._show_hidden else " | showing hidden: OFF"
+        if hidden_count:
+            summary += f" | hidden total: {hidden_count}"
+        self._summary.setText(summary)
+
+    def _set_history_status(self, message: str, *, clear_after_ms: int = 0):
+        self._history_status.setText(str(message))
+        if clear_after_ms > 0:
+            QTimer.singleShot(clear_after_ms, lambda: self._history_status.setText(""))
 
     def _populate_replay_session_combo(self):
         """Fill session combo for Replay tab."""
@@ -816,6 +883,98 @@ class SessionHistoryDialog(QDialog):
             label = f"{started}  ({session_id})"
             self._replay_session_combo.addItem(label, session_dir)
         self._replay_session_combo.blockSignals(False)
+
+    def _selected_session(self) -> dict[str, str | None] | None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._sessions):
+            return None
+        return self._sessions[row]
+
+    def _sync_history_buttons(self):
+        selected = self._selected_session()
+        if selected is None:
+            self._hide_btn.setEnabled(False)
+            self._unhide_btn.setEnabled(False)
+            return
+        hidden = str(selected.get("is_hidden") or "0") == "1"
+        self._hide_btn.setEnabled(not hidden)
+        self._unhide_btn.setEnabled(hidden)
+
+    def _reload_history(self):
+        if self._profile_store is None:
+            return
+        sessions = self._profile_store.list_sessions(
+            profile_name=self._profile_name,
+            include_hidden=True,
+            limit=200,
+        )
+        self.populate(profile_name=self._profile_name, sessions=sessions)
+        self._populate_replay_session_combo()
+
+    def _set_selected_hidden(self, hidden: bool):
+        selected = self._selected_session()
+        if selected is None or self._profile_store is None:
+            return
+        session_id = str(selected.get("session_id") or "").strip()
+        if not session_id:
+            return
+        self.setEnabled(False)
+        self._set_history_status(
+            "Hiding session..." if hidden else "Unhiding session..."
+        )
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            if not self._profile_store.set_session_hidden(session_id, hidden):
+                QMessageBox.warning(self, "Session History", "Could not update selected session.")
+                self._set_history_status("Update failed.", clear_after_ms=2500)
+                return
+            # Update cached rows in-place to avoid a full DB reload.
+            for row in self._all_sessions:
+                if str(row.get("session_id") or "") == session_id:
+                    row["is_hidden"] = "1" if hidden else "0"
+                    break
+            self.populate(
+                profile_name=self._profile_name,
+                sessions=self._all_sessions,
+                selected_session_id=session_id,
+            )
+            self._populate_replay_session_combo()
+            self._set_history_status(
+                "Session hidden." if hidden else "Session unhidden.",
+                clear_after_ms=1800,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
+
+    def _on_hide_selected(self):
+        self._set_selected_hidden(True)
+
+    def _on_unhide_selected(self):
+        self._set_selected_hidden(False)
+
+    def _on_show_hidden_toggled(self, checked: bool):
+        selected = self._selected_session()
+        selected_session_id = (
+            str(selected.get("session_id") or "").strip() if selected is not None else None
+        )
+        self._show_hidden = bool(checked)
+        hidden_count = sum(1 for s in self._all_sessions if str(s.get("is_hidden") or "0") == "1")
+        if hidden_count == 0:
+            # No hidden rows means no filter impact; avoid expensive widget rebuilds.
+            self._update_history_summary(hidden_count=0)
+            self._sync_history_buttons()
+            self._set_history_status("No hidden sessions.", clear_after_ms=1200)
+            return
+        self._set_history_status("Refreshing history view...")
+        self.populate(
+            profile_name=self._profile_name,
+            sessions=self._all_sessions,
+            selected_session_id=selected_session_id,
+        )
+        self._populate_replay_session_combo()
+        self._set_history_status("History view updated.", clear_after_ms=1200)
 
     def _on_replay_session_changed(self, _idx: int):
         """When session selection changes, enable Load if valid."""
@@ -4245,15 +4404,26 @@ class View(QMainWindow):
         self.start_recording_button.clicked.connect(self.start_session)
         self.stop_save_button = QPushButton("Stop && Save")
         self.stop_save_button.clicked.connect(self._stop_and_save)
-        self.history_button = QPushButton("History")
-        self.history_button.clicked.connect(self._open_history)
-        self.trends_button = QPushButton("Trends")
-        self.trends_button.clicked.connect(self._open_trends)
-        self.profile_manager_button = QPushButton("Profiles")
-        self.profile_manager_button.clicked.connect(self._open_profile_manager)
         self.logout_button = QPushButton("Switch User")
         self.logout_button.setToolTip("Switch user profile (same popup as startup).")
         self.logout_button.clicked.connect(self._on_logout_clicked)
+
+        # More menu — History, Trends, Profiles, Switch User, Settings, Import
+        self._more_button = QToolButton()
+        self._more_button.setText("More")
+        self._more_button.setToolTip("Additional actions: History, Trends, Profiles, Settings, Import.")
+        self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._more_menu = QMenu()
+        self._more_menu.addAction("History / Session Replay", self._open_history)
+        self._more_menu.addAction("Plot Trends / Compare", self._open_trends)
+        self._more_menu.addAction("Profiles", self._open_profile_manager)
+        self._more_menu.addAction("Switch User", self._on_logout_clicked)
+        self._more_menu.addAction("Settings…", self._open_settings)
+        self._more_menu.addSeparator()
+        self._import_action = self._more_menu.addAction("Import session…", self._on_import_session)
+        self._more_button.setMenu(self._more_menu)
+
+        # History, Trends, Profiles moved to More menu
 
         self._annotation_enabled_placeholder = "Choose from list or enter new text"
         self._annotation_disabled_placeholder = "Recording only"
@@ -4278,14 +4448,7 @@ class View(QMainWindow):
             self.annotation.lineEdit().installEventFilter(self)
         self._apply_freeze_button_states()
 
-        # Settings button
-        self._settings_button = QPushButton("\u2699")
-        self._settings_button.setToolTip(
-            "Settings (sampling, thresholds, display, annotations) [Ctrl+,]"
-        )
-        self._settings_button.setFixedWidth(28)
-        self._settings_button.setStyleSheet("font-size: 14px; padding: 2px;")
-        self._settings_button.clicked.connect(self._open_settings)
+        # Settings moved to More menu; keep Ctrl+, shortcut
         self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
         self._settings_shortcut.activated.connect(self._open_settings)
 
@@ -4308,9 +4471,6 @@ class View(QMainWindow):
         self.stop_save_button.setToolTip(
             "Stop recording and save session (CSV, report, EDF+) to the path configured in Settings."
         )
-        self.history_button.setToolTip("Show recent session history for the active user profile.")
-        self.trends_button.setToolTip("Compare-plot session trends over day/week/month/year spans.")
-        self.profile_manager_button.setToolTip("Manage user profiles (create, rename, archive, delete).")
         self.annotation.setToolTip("Choose or type a session annotation.")
         self.annotation_button.setToolTip("Add the current annotation to the session log.")
         self.pacer_rate.setToolTip("Breathing pacer rate in breaths per minute.")
@@ -4367,8 +4527,6 @@ class View(QMainWindow):
         controls_zone_layout.setContentsMargins(0, 0, 0, 0)
         controls_zone_layout.setSpacing(8)
         controls_zone_layout.addWidget(self._disclaimer_link, alignment=Qt.AlignVCenter)
-        controls_zone_layout.addWidget(self.profile_manager_button)
-        controls_zone_layout.addWidget(self._settings_button)
         controls_zone_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         header_row.addWidget(profile_zone, stretch=1)
         header_row.addWidget(controls_zone)
@@ -4382,7 +4540,7 @@ class View(QMainWindow):
             self.profile_header_label,
             self._disclaimer_link,
             self._debug_mode_badge,
-            self._settings_button,
+            self._more_button,
         ):
             _w.installEventFilter(self)
         self._refresh_debug_mode_ui()
@@ -4459,13 +4617,7 @@ class View(QMainWindow):
         self.start_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.stop_save_button.setMaximumWidth(110)
         self.stop_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.history_button.setMaximumWidth(80)
-        self.history_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.trends_button.setMaximumWidth(100)
-        self.trends_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
-        self.profile_manager_button.setMinimumWidth(70)
-        self.profile_manager_button.setMaximumWidth(80)
-        self.profile_manager_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._more_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._disclaimer_link.setStyleSheet(
             "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
         )
@@ -4478,12 +4630,15 @@ class View(QMainWindow):
         toolbar.addWidget(self.disconnect_button)
         toolbar.addWidget(self.battery_label)
 
+        toolbar.addWidget(self.start_recording_button)
+        toolbar.addWidget(self.stop_save_button)
+        toolbar.addWidget(self._more_button)
+
         _sep1 = QFrame()
         _sep1.setFixedSize(1, 18)
         _sep1.setStyleSheet("background: #bdc3c7;")
         toolbar.addWidget(_sep1)
 
-        toolbar.addStretch()
         toolbar.addWidget(self.ecg_button)
         toolbar.addWidget(self.qtc_button)
         toolbar.addWidget(self.poincare_button)
@@ -4525,10 +4680,6 @@ class View(QMainWindow):
             "QPushButton { font-size: 11px; padding: 2px 6px; }"
             "QPushButton:disabled { color: #7f8c8d; background-color: #e0e0e0; }"
         )
-        toolbar.addWidget(self.start_recording_button)
-        toolbar.addWidget(self.stop_save_button)
-        toolbar.addWidget(self.history_button)
-        toolbar.addWidget(self.trends_button)
         toolbar.addWidget(self.annotation)
         toolbar.addWidget(self.annotation_button)
 
@@ -4804,6 +4955,7 @@ class View(QMainWindow):
         annotation_available = is_recording
         self.start_recording_button.setEnabled(connected and not is_recording)
         self.stop_save_button.setEnabled(is_recording)
+        self._import_action.setEnabled(not is_recording)
         self.annotation.setEnabled(annotation_available)
         self.annotation_button.setEnabled(annotation_available)
         annotation_placeholder = (
@@ -5747,11 +5899,13 @@ class View(QMainWindow):
     def _open_history(self):
         sessions = self._profile_store.list_sessions(
             profile_name=self._session_profile_id,
+            include_hidden=True,
             limit=200,
         )
         dlg = SessionHistoryDialog(
             profile_name=self._session_profile_id,
             sessions=sessions,
+            profile_store=self._profile_store,
             parent=self,
         )
         dlg.exec()
@@ -5835,9 +5989,46 @@ class View(QMainWindow):
             QTimer.singleShot(150, self._refocus_after_profile_dialog)
         except Exception as exc:
             self.show_status(f"Profile Manager error: {exc}")
-            if self.settings.DEBUG:
-                import traceback
-                traceback.print_exc()
+
+    def _on_import_session(self):
+        """Import external CSV or EDF file as a session. Disabled during recording."""
+        if self._session_state == "recording":
+            self.show_status("Import is not available during an active recording.")
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Session",
+            str(Path.home()),
+            "CSV/EDF/Text (*.csv *.edf *.txt);;CSV (*.csv);;EDF (*.edf);;Text (*.txt);;All (*)",
+        )
+        if not path:
+            return
+        from hnh.import_session import import_file_as_session
+
+        bundle = import_file_as_session(
+            Path(path),
+            self._session_root,
+            self._session_profile_id,
+            self._profile_store,
+        )
+        if bundle:
+            self.show_status(f"Imported session: {bundle.session_dir}")
+            QMessageBox.information(
+                self,
+                "Import Complete",
+                f"Session imported successfully.\n\n"
+                f"Location: {bundle.session_dir}\n\n"
+                f"You can replay, generate reports, and compare it in History and Trends.",
+            )
+        else:
+            QMessageBox.warning(
+                self,
+                "Import Failed",
+                "Could not parse the file. Supported formats:\n\n"
+                "• Hertz & Hearts CSV (event, value, timestamp, elapsed_sec)\n"
+                "• EDF+ with HR and RMSSD channels\n"
+                "• Line-separated RR intervals in ms (Kubios/Elite HRV style)",
+            )
 
     def _refocus_after_profile_dialog(self):
         self.setEnabled(True)
