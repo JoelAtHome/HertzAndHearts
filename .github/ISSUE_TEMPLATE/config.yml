@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Security or sensitive issue
+    url: https://github.com/JoelAtHome
+    about: Please contact the maintainer privately for sensitive/security concerns.

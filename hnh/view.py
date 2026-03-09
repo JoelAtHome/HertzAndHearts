@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 import hashlib
 import os
 import json
@@ -49,7 +49,13 @@ from hnh.config import (
     SIGNAL_POPUP_AUTO_DISMISS_MS,
     PSD_VAGAL_BAND,
 )
-from hnh.settings import Settings, SettingsDialog, REGISTRY
+from hnh.settings import (
+    Settings,
+    SettingsDialog,
+    REGISTRY,
+    profile_scoped_keys,
+    setting_scope,
+)
 from hnh.report import (
     format_datetime_for_display,
     generate_session_report,
@@ -68,6 +74,11 @@ from hnh.profile_store import ProfileStore
 from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correlations
 from hnh import __version__ as version, resources  # noqa
 import warnings
+
+try:
+    import qrcode
+except Exception:
+    qrcode = None
 
 warnings.filterwarnings("ignore", category=UserWarning)
 pg.setConfigOptions(antialias=True)
@@ -89,6 +100,9 @@ _SIGNAL_POPUP_AUTO_DISMISS_REASONS = frozenset({
 
 _CARD0_DISCLAIMER_PATH = Path(__file__).with_name("disclaimer.md")
 _RESEARCH_USE_WARNING = "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT."
+_SUPPORT_SPONSORS_URL = "https://github.com/sponsors/JoelAtHome"
+_SUPPORT_BMAC_URL = "https://buymeacoffee.com/JoelAtHome"
+_SUPPORT_BRAND_NAME = "J. Kobe Labs"
 _CARD0_DISCLAIMER_FALLBACK = (
     "# Research Use Disclaimer\n\n"
     "This software is intended only for investigational and research use under\n"
@@ -4355,6 +4369,9 @@ class View(QMainWindow):
 
         # 1. TRACKERS & STATE
         self.settings = Settings()
+        self._profile_scoped_setting_defaults: dict[str, object] = {
+            key: getattr(self.settings, key) for key in profile_scoped_keys()
+        }
         self.model = model
         self.baseline_values = []
         self.baseline_rmssd = None
@@ -4701,7 +4718,10 @@ class View(QMainWindow):
         # More menu — History, Trends, Profiles, Switch User, Settings, Import
         self._more_button = QToolButton()
         self._more_button.setText("More")
-        self._more_button.setToolTip("Additional actions: History, Trends, Profiles, Settings, Import.")
+        self._more_button.setToolTip(
+            "Additional actions: History, Trends, Profiles, Settings, "
+            "Support Development, Import."
+        )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
         self._more_menu.addAction("History / Session Replay", self._open_history)
@@ -4709,6 +4729,7 @@ class View(QMainWindow):
         self._more_menu.addAction("Profiles", self._open_profile_manager)
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
         self._more_menu.addAction("Settings…", self._open_settings)
+        self._more_menu.addAction("Support Development…", self._open_support_options)
         self._more_menu.addSeparator()
         self._import_action = self._more_menu.addAction("Import session…", self._on_import_session)
         self._more_button.setMenu(self._more_menu)
@@ -5021,9 +5042,55 @@ class View(QMainWindow):
             self._profile_store.set_profile_password(profile_id, pw)
         return profile_id
 
+    def _profile_setting_pref_key(self, key: str) -> str:
+        return f"setting:{key}"
+
+    def _parse_setting_value_from_pref(self, key: str, raw: str, fallback):
+        kind = REGISTRY[key]["type"]
+        try:
+            if kind is bool:
+                normalized = str(raw).strip().lower()
+                if normalized in {"1", "true", "yes", "on"}:
+                    return True
+                if normalized in {"0", "false", "no", "off"}:
+                    return False
+                return bool(fallback)
+            if kind is int:
+                return int(raw)
+            if kind is float:
+                return float(raw)
+            return str(raw)
+        except (TypeError, ValueError):
+            return fallback
+
+    def _apply_profile_scoped_settings(self, profile_id: str) -> None:
+        for key in profile_scoped_keys():
+            fallback = self._profile_scoped_setting_defaults.get(
+                key, getattr(self.settings, key)
+            )
+            raw = self._profile_store.get_profile_pref(
+                profile_id,
+                self._profile_setting_pref_key(key),
+                default="",
+            )
+            if key == "DEBUG" and str(raw).strip() == "":
+                # Legacy key migration fallback.
+                raw = self._profile_store.get_profile_pref(
+                    profile_id,
+                    "debug_mode",
+                    default="",
+                )
+            value = (
+                fallback
+                if str(raw).strip() == ""
+                else self._parse_setting_value_from_pref(key, raw, fallback)
+            )
+            setattr(self.settings, key, value)
+
     def _set_active_profile(self, profile_id: str, announce: bool = False):
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
         self.profile_header_label.setText(f"User: {self._session_profile_id}")
+        self._apply_profile_scoped_settings(self._session_profile_id)
         saved_rate = self._profile_store.get_profile_pref(
             self._session_profile_id, "breathing_rate", "7"
         )
@@ -5035,12 +5102,7 @@ class View(QMainWindow):
                 self.pacer_label.setText(f"Rate: {rate}")
         except (ValueError, TypeError):
             pass
-        debug_pref = self._profile_store.get_profile_pref(
-            self._session_profile_id,
-            "debug_mode",
-            default=("1" if self.settings.DEBUG else "0"),
-        )
-        self._set_debug_mode(debug_pref == "1", announce=False)
+        self._set_debug_mode(bool(self.settings.DEBUG), announce=False, persist=False)
         if announce:
             self.show_status(f"Active user: {self._session_profile_id}")
         if getattr(self, "_trends_window", None) is not None:
@@ -5640,6 +5702,7 @@ class View(QMainWindow):
             self.show_status(f"Session copy failed: {exc}")
         if show_message and self._session_bundle is not None:
             self.show_status(f"Session finalized: {self._session_bundle.session_dir}")
+            self._show_post_session_support_prompt()
 
     def connect_sensor(self):
         if not self.address_menu.currentText():
@@ -6094,6 +6157,226 @@ class View(QMainWindow):
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(_CARD0_DISCLAIMER_PATH))):
             self.show_status("Unable to open disclaimer file.", print_to_terminal=False)
 
+    def _open_support_page(self, url: str) -> bool:
+        if QDesktopServices.openUrl(QUrl(url)):
+            self.show_status(
+                "Opening support page in your browser...",
+                print_to_terminal=False,
+            )
+            return True
+        self.show_status(
+            "Unable to open support link. Internet connection may be required.",
+            print_to_terminal=False,
+        )
+        return False
+
+    def _build_qr_pixmap(self, url: str, size: int = 170) -> QPixmap | None:
+        if qrcode is None:
+            return None
+        try:
+            qr = qrcode.QRCode(
+                version=None,
+                error_correction=qrcode.constants.ERROR_CORRECT_M,
+                box_size=8,
+                border=2,
+            )
+            qr.add_data(url)
+            qr.make(fit=True)
+            matrix = qr.get_matrix()
+            dim = len(matrix)
+            if dim <= 0:
+                return None
+            image = QImage(dim, dim, QImage.Format.Format_RGB32)
+            image.fill(Qt.GlobalColor.white)
+            for y, row in enumerate(matrix):
+                for x, is_dark in enumerate(row):
+                    if is_dark:
+                        image.setPixelColor(x, y, Qt.GlobalColor.black)
+            return QPixmap.fromImage(image).scaled(
+                size,
+                size,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.FastTransformation,
+            )
+        except Exception:
+            return None
+
+    def _open_support_options(self) -> None:
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Support Development")
+        dlg.setMinimumWidth(780)
+
+        root = QVBoxLayout(dlg)
+        intro = QLabel(
+            f"Hertz & Hearts is maintained by {_SUPPORT_BRAND_NAME}. "
+            "If this project helps your work, optional donations support "
+            "maintenance, testing, documentation, and new features."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        cards = QHBoxLayout()
+        cards.setSpacing(12)
+
+        def _build_card(title: str, url: str, button_text: str) -> QFrame:
+            frame = QFrame()
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
+            frame.setStyleSheet("QFrame { padding: 8px; }")
+            layout = QVBoxLayout(frame)
+            layout.setSpacing(8)
+
+            title_lbl = QLabel(f"<b>{title}</b>")
+            title_lbl.setWordWrap(True)
+            layout.addWidget(title_lbl)
+
+            qr_lbl = QLabel()
+            qr_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            pix = self._build_qr_pixmap(url)
+            if pix is not None:
+                qr_lbl.setPixmap(pix)
+            else:
+                qr_lbl.setText(
+                    "QR preview unavailable in this build.\n"
+                    "Use the link or button below to open this page."
+                )
+                qr_lbl.setWordWrap(True)
+            layout.addWidget(qr_lbl, stretch=1)
+
+            link_lbl = QLabel(f"<a href='{url}'>{url}</a>")
+            link_lbl.setOpenExternalLinks(True)
+            link_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            link_lbl.setWordWrap(True)
+            layout.addWidget(link_lbl)
+
+            open_btn = QPushButton(button_text)
+            open_btn.clicked.connect(lambda _checked=False, target=url: self._open_support_page(target))
+            layout.addWidget(open_btn)
+            return frame
+
+        cards.addWidget(
+            _build_card(
+                "GitHub Sponsors",
+                _SUPPORT_SPONSORS_URL,
+                "Open GitHub Sponsors",
+            )
+        )
+        cards.addWidget(
+            _build_card(
+                "Buy Me a Coffee (no GitHub login)",
+                _SUPPORT_BMAC_URL,
+                "Open Buy Me a Coffee",
+            )
+        )
+        root.addLayout(cards)
+
+        note = QLabel("Tip: scan a QR code with your phone. Internet connection is required to donate.")
+        note.setWordWrap(True)
+        root.addWidget(note)
+
+        actions = QHBoxLayout()
+        actions.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        actions.addWidget(close_btn)
+        root.addLayout(actions)
+
+        dlg.exec()
+
+    def _should_show_post_session_support_prompt(self) -> bool:
+        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
+        if not profile_id:
+            return False
+        if profile_id.casefold() == "guest":
+            # Guest sessions are intentionally non-persistent for this reminder.
+            return True
+        never = self._profile_store.get_profile_pref(
+            profile_id, "support_prompt_never", default="0"
+        )
+        if str(never).strip() == "1":
+            return False
+        hide_until_raw = self._profile_store.get_profile_pref(
+            profile_id, "support_prompt_hide_until", default=""
+        )
+        hide_until_text = str(hide_until_raw).strip()
+        if not hide_until_text:
+            return True
+        try:
+            hide_until = datetime.fromisoformat(hide_until_text)
+        except ValueError:
+            return True
+        return datetime.now() >= hide_until
+
+    def _set_support_prompt_hide_for_days(self, days: int) -> None:
+        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
+        if not profile_id:
+            return
+        if profile_id.casefold() == "guest":
+            return
+        hide_until = datetime.now() + timedelta(days=max(1, int(days)))
+        self._profile_store.set_profile_pref(
+            profile_id, "support_prompt_hide_until", hide_until.isoformat()
+        )
+        self._profile_store.set_profile_pref(profile_id, "support_prompt_never", "0")
+
+    def _set_support_prompt_never(self) -> None:
+        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
+        if not profile_id:
+            return
+        if profile_id.casefold() == "guest":
+            return
+        self._profile_store.set_profile_pref(profile_id, "support_prompt_never", "1")
+        self._profile_store.clear_profile_pref(profile_id, "support_prompt_hide_until")
+
+    def _show_post_session_support_prompt(self) -> None:
+        if not self._should_show_post_session_support_prompt():
+            return
+        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
+        is_guest = profile_id.casefold() == "guest"
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Support Hertz & Hearts")
+        msg.setText(
+            f"Hertz & Hearts is maintained by {_SUPPORT_BRAND_NAME}. "
+            "If this project helped this session, optional donations support "
+            "ongoing maintenance and improvements."
+        )
+        if is_guest:
+            msg.setInformativeText(
+                "Guest sessions do not store reminder preferences."
+            )
+        else:
+            msg.setInformativeText(
+                "Choose how often you want to see this reminder for this user profile."
+            )
+        gh_btn = msg.addButton("Donate via GitHub Sponsors", QMessageBox.AcceptRole)
+        bmac_btn = msg.addButton(
+            "Donate via Buy Me a Coffee (no GitHub login)",
+            QMessageBox.ActionRole,
+        )
+        hide_week_btn = None
+        never_btn = None
+        if not is_guest:
+            hide_week_btn = msg.addButton("Hide for 1 week", QMessageBox.ActionRole)
+            never_btn = msg.addButton("Never show again", QMessageBox.DestructiveRole)
+        not_now_btn = msg.addButton("Not now", QMessageBox.RejectRole)
+        msg.setDefaultButton(not_now_btn)
+        msg.exec()
+
+        clicked = msg.clickedButton()
+        if clicked == gh_btn:
+            self._open_support_page(_SUPPORT_SPONSORS_URL)
+            return
+        if clicked == bmac_btn:
+            self._open_support_page(_SUPPORT_BMAC_URL)
+            return
+        if hide_week_btn is not None and clicked == hide_week_btn:
+            self._set_support_prompt_hide_for_days(7)
+            self.show_status("Support reminder hidden for 1 week.")
+            return
+        if never_btn is not None and clicked == never_btn:
+            self._set_support_prompt_never()
+            self.show_status("Support reminder disabled for this profile.")
+
     def _start_connect_hints(self):
         has_plot_data = (
             (self.hr_trend_series.count() > 0 if hasattr(self, "hr_trend_series") else False)
@@ -6225,6 +6508,8 @@ class View(QMainWindow):
             self.settings,
             parent=self,
             session_save_path_default=self.get_default_session_save_path(),
+            profile_store=self._profile_store,
+            profile_id=self._session_profile_id,
         )
         if dlg.exec() == QDialog.Accepted:
             self._set_debug_mode(bool(self.settings.DEBUG), announce=False)
@@ -6719,14 +7004,19 @@ class View(QMainWindow):
                 f"last10s beats={beats_inc} updates={updates_inc}"
             )
 
-    def _set_debug_mode(self, enabled: bool, *, announce: bool = False):
+    def _set_debug_mode(
+        self, enabled: bool, *, announce: bool = False, persist: bool = True
+    ):
         self.settings.DEBUG = bool(enabled)
-        self.settings.save()
-        self._profile_store.set_profile_pref(
-            self._session_profile_id,
-            "debug_mode",
-            "1" if self.settings.DEBUG else "0",
-        )
+        if persist:
+            if setting_scope("DEBUG") == "profile":
+                self._profile_store.set_profile_pref(
+                    self._session_profile_id,
+                    self._profile_setting_pref_key("DEBUG"),
+                    "1" if self.settings.DEBUG else "0",
+                )
+            else:
+                self.settings.save()
         self._refresh_debug_mode_ui()
         if self.settings.DEBUG:
             if not self._ibi_diag_timer.isActive():

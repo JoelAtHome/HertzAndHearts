@@ -11,6 +11,18 @@ License: GPL-3.0 (see `LICENSE`).
 
 See the full text in [`hnh/disclaimer.md`](hnh/disclaimer.md).
 
+## Support This Project
+
+Hertz & Hearts is built and maintained by **J. Kobe Labs**.
+
+If this project is useful to you, optional donations help fund maintenance,
+testing, documentation, and ongoing feature development.
+
+- GitHub Sponsors: https://github.com/sponsors/JoelAtHome
+- Buy Me a Coffee (no GitHub login): https://buymeacoffee.com/JoelAtHome
+
+Thank you for supporting independent open-source work.
+
 ## Project Wishlist
 
 Track feature ideas and planned improvements in [WISHLIST.md](WISHLIST.md).
@@ -100,3 +112,20 @@ an HRV of 500 msec". Try to increase HRV relative to what you have achieved befo
 and be aware that it can take a fair bit of practice to improve.
 
 ![biofeedback_demo](https://github.com/JanCBrammer/OpenHRV/raw/main/docs/biofeedback_demo.gif)
+
+## Contributing and Support
+
+Contributions are welcome (issues, code, docs, testing).
+If you prefer to support financially, optional donations are available via:
+
+- GitHub Sponsors: https://github.com/sponsors/JoelAtHome
+- Buy Me a Coffee (no GitHub login): https://buymeacoffee.com/JoelAtHome
+
+Thank you for helping sustain ongoing maintenance, testing, and documentation.
+
+## Report Bugs and Request Features
+
+- Bug reports: https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=bug_report.yml
+- Feature requests: https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=feature_request.yml
+
+Please search existing issues first to avoid duplicates.

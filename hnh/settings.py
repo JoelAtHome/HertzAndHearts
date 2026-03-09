@@ -36,6 +36,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 5, "max": 120, "unit": "seconds",
         "section": "Session Timing",
+        "scope": "global",
     }),
     ("BASELINE_DURATION", {
         "display": "Baseline Duration",
@@ -45,6 +46,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 10, "max": 180, "unit": "seconds",
         "section": "Session Timing",
+        "scope": "global",
     }),
     ("EXPORT_EDF_PLUS_D", {
         "display": "Export EDF+ on Finalize",
@@ -54,6 +56,7 @@ REGISTRY = OrderedDict([
         ),
         "type": bool,
         "section": "Session Timing",
+        "scope": "profile",
     }),
     ("SESSION_SAVE_PATH", {
         "display": "Session Save Path",
@@ -63,6 +66,7 @@ REGISTRY = OrderedDict([
         ),
         "type": str,
         "section": "Session Timing",
+        "scope": "profile",
     }),
     ("OPEN_SESSION_FOLDER_ON_SAVE", {
         "display": "Open Session Folder After Save",
@@ -72,6 +76,7 @@ REGISTRY = OrderedDict([
         ),
         "type": bool,
         "section": "Session Timing",
+        "scope": "profile",
     }),
 
     # --- HRV Calculation ---
@@ -85,6 +90,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 10, "max": 300, "unit": "beats",
         "section": "HRV Calculation",
+        "scope": "global",
     }),
     ("SMOOTH_SECONDS", {
         "display": "Chart Smoothing",
@@ -95,6 +101,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 3, "max": 60, "unit": "seconds",
         "section": "HRV Calculation",
+        "scope": "global",
     }),
     ("FREQUENCY_WINDOW_SIZE", {
         "display": "Stress Ratio Min Beats",
@@ -105,6 +112,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 10, "max": 120, "unit": "beats",
         "section": "HRV Calculation",
+        "scope": "global",
     }),
 
     # --- Signal Quality ---
@@ -117,6 +125,7 @@ REGISTRY = OrderedDict([
         ),
         "type": float, "min": 1.0, "max": 30.0, "step": 0.5,
         "unit": "seconds", "section": "Signal Quality",
+        "scope": "global",
     }),
     ("DEVIATION_THRESHOLD", {
         "display": "Deviation Threshold",
@@ -127,6 +136,7 @@ REGISTRY = OrderedDict([
         ),
         "type": float, "min": 0.10, "max": 1.00, "step": 0.05,
         "decimals": 2, "unit": "(ratio)", "section": "Signal Quality",
+        "scope": "global",
     }),
     ("DEVIATION_WINDOW", {
         "display": "Deviation Window",
@@ -136,6 +146,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 5, "max": 120, "unit": "beats",
         "section": "Signal Quality",
+        "scope": "global",
     }),
     ("DEVIATION_MIN_SAMPLES", {
         "display": "Min Samples for Check",
@@ -146,6 +157,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 3, "max": 60, "unit": "beats",
         "section": "Signal Quality",
+        "scope": "global",
     }),
     ("RECOVERY_BEATS", {
         "display": "Recovery Beats",
@@ -157,6 +169,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 3, "max": 60, "unit": "beats",
         "section": "Signal Quality",
+        "scope": "global",
     }),
 
     # --- ECG Monitor ---
@@ -168,6 +181,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 2, "max": 15, "unit": "seconds",
         "section": "ECG Monitor",
+        "scope": "profile",
     }),
 
     # --- QTc Estimation ---
@@ -179,6 +193,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 10, "max": 120, "unit": "seconds",
         "section": "QTc Estimation",
+        "scope": "global",
     }),
     ("QTC_MIN_VALID_BEATS", {
         "display": "QTc Min Valid Beats",
@@ -188,6 +203,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 3, "max": 60, "unit": "beats",
         "section": "QTc Estimation",
+        "scope": "global",
     }),
 
     # --- Developer ---
@@ -199,6 +215,7 @@ REGISTRY = OrderedDict([
             "Useful for troubleshooting.  Leave off for normal use."
         ),
         "type": bool, "section": "Developer",
+        "scope": "profile",
     }),
 
     # ─── Advanced / Engineering ───────────────────────────────────────
@@ -212,6 +229,7 @@ REGISTRY = OrderedDict([
         ),
         "type": float, "min": 0.01, "max": 1.00, "step": 0.05,
         "decimals": 2, "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("HR_EWMA_WEIGHT", {
@@ -223,6 +241,7 @@ REGISTRY = OrderedDict([
         ),
         "type": float, "min": 0.01, "max": 0.50, "step": 0.01,
         "decimals": 2, "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("IBI_MEDIAN_WINDOW", {
@@ -234,6 +253,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 3, "max": 31, "unit": "samples",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("DROPOUT_IBI_MS", {
@@ -245,6 +265,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 2000, "max": 10000, "unit": "ms",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("NOISE_IBI_LOW_MS", {
@@ -255,6 +276,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 150, "max": 500, "unit": "ms",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("NOISE_IBI_HIGH_MS", {
@@ -265,6 +287,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 1500, "max": 5000, "unit": "ms",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("ECG_REFRESH_MS", {
@@ -276,6 +299,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 16, "max": 100, "unit": "ms",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("QTC_FRIDERICIA_HR_LOW_THRESHOLD", {
@@ -286,6 +310,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 35, "max": 80, "unit": "bpm",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("QTC_FRIDERICIA_HR_HIGH_THRESHOLD", {
@@ -296,6 +321,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 80, "max": 160, "unit": "bpm",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("QTC_FRIDERICIA_HYSTERESIS_BPM", {
@@ -306,6 +332,7 @@ REGISTRY = OrderedDict([
         ),
         "type": int, "min": 0, "max": 20, "unit": "bpm",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("QTC_MAX_RR_GAP_SECONDS", {
@@ -317,6 +344,7 @@ REGISTRY = OrderedDict([
         "type": float, "min": 1.0, "max": 5.0, "step": 0.1,
         "decimals": 1, "unit": "seconds",
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
     ("QTC_TREND_ENABLED", {
@@ -327,9 +355,20 @@ REGISTRY = OrderedDict([
         ),
         "type": bool,
         "section": "Advanced",
+        "scope": "global",
         "advanced": True,
     }),
 ])
+
+
+def setting_scope(key: str) -> str:
+    meta = REGISTRY.get(key, {})
+    scope = str(meta.get("scope", "global")).strip().lower()
+    return scope if scope in {"global", "profile"} else "global"
+
+
+def profile_scoped_keys() -> set[str]:
+    return {k for k in REGISTRY if setting_scope(k) == "profile"}
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -395,9 +434,12 @@ class Settings:
         except (FileNotFoundError, json.JSONDecodeError, ValueError):
             pass
 
-    def save(self):
+    def save(self, *, exclude_keys: set[str] | None = None):
+        excluded = set(exclude_keys or set())
         overrides = {}
         for key in REGISTRY:
+            if key in excluded:
+                continue
             current = getattr(self, key)
             if current != self._defaults[key]:
                 overrides[key] = current
@@ -682,13 +724,26 @@ class AnnotationEditorDialog(QDialog):
 class SettingsDialog(QDialog):
     _show_advanced = False
 
-    def __init__(self, settings: Settings, parent=None, *, session_save_path_default: str = ""):
+    def __init__(
+        self,
+        settings: Settings,
+        parent=None,
+        *,
+        session_save_path_default: str = "",
+        profile_store=None,
+        profile_id: str | None = None,
+    ):
         super().__init__(parent)
         self._settings = settings
         self._session_save_path_default = session_save_path_default or ""
+        self._profile_store = profile_store
+        self._profile_id = str(profile_id or "").strip()
         self._widgets: dict[str, QCheckBox | QSpinBox | QDoubleSpinBox | PathEditWidget] = {}
+        self._labels: dict[str, QLabel] = {}
         self._advanced_groups: list[QGroupBox] = []
+        self._section_groups: list[tuple[QGroupBox, list[str], bool]] = []
         self._pending_disclaimer_reset = "none"
+        self._advanced_prev_checked = SettingsDialog._show_advanced
 
         self.setWindowTitle("Hertz & Hearts \u2014 Settings")
         self.setMinimumWidth(500)
@@ -711,6 +766,7 @@ class SettingsDialog(QDialog):
             group = QGroupBox(section_name)
             form = QFormLayout(group)
             form.setLabelAlignment(Qt.AlignRight)
+            section_keys: list[str] = []
             for key, meta in items:
                 widget = self._create_widget(key, meta)
                 label = QLabel(self._build_label(meta))
@@ -718,10 +774,13 @@ class SettingsDialog(QDialog):
                 widget.setToolTip(meta["tooltip"])
                 form.addRow(label, widget)
                 self._widgets[key] = widget
+                self._labels[key] = label
+                section_keys.append(key)
             self._form_layout.addWidget(group)
             if is_advanced:
                 group.setVisible(False)
                 self._advanced_groups.append(group)
+            self._section_groups.append((group, section_keys, is_advanced))
 
         scroll.setWidget(scroll_content)
         root.addWidget(scroll, stretch=1)
@@ -729,9 +788,26 @@ class SettingsDialog(QDialog):
         # Advanced toggle
         self._advanced_toggle = QCheckBox("Show Advanced / Engineering Settings")
         self._advanced_toggle.setChecked(SettingsDialog._show_advanced)
-        self._toggle_advanced(SettingsDialog._show_advanced)
         self._advanced_toggle.toggled.connect(self._toggle_advanced)
         root.addWidget(self._advanced_toggle)
+
+        self._scope_filter_toggle = QCheckBox("Show only this profile settings")
+        has_profile_context = bool(self._profile_store is not None and self._profile_id)
+        self._scope_filter_toggle.setEnabled(has_profile_context)
+        self._scope_filter_toggle.setChecked(False)
+        if has_profile_context:
+            self._scope_filter_toggle.setToolTip(
+                "Hide global settings and show only settings stored per profile."
+            )
+        else:
+            self._scope_filter_toggle.setToolTip(
+                "Profile-only filter is available when a profile context is active."
+            )
+        self._scope_filter_toggle.toggled.connect(self._apply_scope_filter)
+        root.addWidget(self._scope_filter_toggle)
+
+        self._toggle_advanced(SettingsDialog._show_advanced)
+        self._apply_scope_filter(self._scope_filter_toggle.isChecked())
 
         # Buttons
         btn_row = QHBoxLayout()
@@ -768,12 +844,14 @@ class SettingsDialog(QDialog):
     @staticmethod
     def _build_label(meta):
         text = meta["display"]
+        scope = str(meta.get("scope", "global")).strip().lower()
+        scope_suffix = " [Profile]" if scope == "profile" else " [Global]"
         if meta["type"] is bool or meta["type"] is str:
-            return text
+            return f"{text}{scope_suffix}"
         unit = meta.get("unit", "")
         lo = meta.get("min", "")
         hi = meta.get("max", "")
-        return f"{text}  ({lo}\u2013{hi} {unit})".rstrip()
+        return f"{text}{scope_suffix}  ({lo}\u2013{hi} {unit})".rstrip()
 
     def _create_widget(self, key, meta):
         current = getattr(self._settings, key)
@@ -826,12 +904,23 @@ class SettingsDialog(QDialog):
 
     def _save_and_close(self):
         values = self._read_widgets()
+        scoped_profile = profile_scoped_keys()
         for key, val in values.items():
             if key == "SESSION_SAVE_PATH" and self._session_save_path_default:
                 if val == self._session_save_path_default:
                     val = ""  # Store empty = use default
             setattr(self._settings, key, val)
-        self._settings.save()
+            if (
+                key in scoped_profile
+                and self._profile_store is not None
+                and self._profile_id
+            ):
+                self._profile_store.set_profile_pref(
+                    self._profile_id,
+                    f"setting:{key}",
+                    str(val),
+                )
+        self._settings.save(exclude_keys=scoped_profile)
         self.accept()
 
     def _restore_defaults(self):
@@ -847,8 +936,45 @@ class SettingsDialog(QDialog):
 
     def _toggle_advanced(self, show: bool):
         SettingsDialog._show_advanced = show
-        for group in self._advanced_groups:
-            group.setVisible(show)
+        self._refresh_section_visibility()
+
+    def _apply_scope_filter(self, profile_only: bool):
+        if profile_only:
+            self._advanced_prev_checked = bool(self._advanced_toggle.isChecked())
+            self._advanced_toggle.blockSignals(True)
+            self._advanced_toggle.setChecked(False)
+            self._advanced_toggle.blockSignals(False)
+            self._advanced_toggle.setEnabled(False)
+            self._advanced_toggle.setToolTip(
+                "Engineering settings are global. Turn off "
+                "'Show only this profile settings' to view them."
+            )
+        else:
+            self._advanced_toggle.setEnabled(True)
+            self._advanced_toggle.setToolTip("Show or hide advanced engineering settings.")
+            self._advanced_toggle.blockSignals(True)
+            self._advanced_toggle.setChecked(bool(self._advanced_prev_checked))
+            self._advanced_toggle.blockSignals(False)
+            self._toggle_advanced(self._advanced_toggle.isChecked())
+        for key, widget in self._widgets.items():
+            label = self._labels.get(key)
+            visible = (not profile_only) or (setting_scope(key) == "profile")
+            widget.setVisible(visible)
+            if label is not None:
+                label.setVisible(visible)
+        self._refresh_section_visibility()
+
+    def _refresh_section_visibility(self):
+        show_advanced = bool(self._advanced_toggle.isChecked())
+        profile_only = bool(self._scope_filter_toggle.isChecked())
+        for group, keys, is_advanced in self._section_groups:
+            if is_advanced and not show_advanced:
+                group.setVisible(False)
+                continue
+            if profile_only and not any(setting_scope(k) == "profile" for k in keys):
+                group.setVisible(False)
+                continue
+            group.setVisible(True)
 
     def _open_annotation_manager(self):
         dlg = AnnotationEditorDialog(self._settings, parent=self)
