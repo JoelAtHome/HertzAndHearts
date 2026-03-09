@@ -10,3 +10,5 @@ installer_output/
 .DS_Store
 uv.lock
 Sessions/
+*.db
+*.log
