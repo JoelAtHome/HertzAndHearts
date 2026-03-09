@@ -214,8 +214,8 @@ Implementation checklist:
 - Proposed approach: Compute and visualize correlations between tags and metric shifts over time.
 - Effort: M
 - Impact: Med
-- Status: triaged
-- Notes: Show association confidence and sample-size caveats to avoid over-interpretation.
+- Status: done
+- Notes: Phase 1+2 implemented: Trends now includes `Tag Insights` tab with annotation-level ΔHR/ΔRMSSD/ΔSDNN/ΔLFHF, confidence tiers, caveats, and controls for range/min events/system annotations, plus per-tag drilldown details. Full DOCX report includes an exploratory `Annotation Associations` section with method text. Remaining follow-up (future phase): deeper statistical confidence intervals/permutation checks.
 
 ### 13) [F09] Circadian heatmap (hour/day patterns)
 - Problem: Time-of-day patterns in stress/recovery signals are not easily visible.
@@ -286,7 +286,7 @@ Implementation checklist:
 - Proposed approach: Run QTc pipeline in a worker thread/process with latest-only job policy and throttled UI publish.
 - Effort: M
 - Impact: High
-- Status: implemented
+- Status: done
 - Notes: Shipped single-worker QTc background compute with latest-only request coalescing and stale-result suppression; formulas/thresholds/payload schema were preserved. Optional follow-up: add queue-depth and compute-time telemetry for ongoing verification.
 
 ### 22) [PERF] Bound long-session chart series growth
@@ -294,7 +294,7 @@ Implementation checklist:
 - Proposed approach: Keep only a rolling time window plus small guard buffer in visual series.
 - Effort: M
 - Impact: High
-- Status: implemented
+- Status: done
 - Notes: Implemented rolling pruning for main HR/RMSSD/SDNN chart series (visible window + guard) with periodic trim checks to keep long-session UI memory and append cost bounded.
 
 ### 23) [PERF] Reduce ECG redraw allocation churn
@@ -302,7 +302,7 @@ Implementation checklist:
 - Proposed approach: Reuse buffers and minimize per-frame allocations/range resets.
 - Effort: M
 - Impact: High
-- Status: implemented
+- Status: done
 - Notes: Reduced redraw churn by avoiding redundant numpy conversions for range math and suppressing no-op X/Y range resets in the ECG refresh path.
 
 ### 24) [PERF] Refresh profiling harness for current package
@@ -310,7 +310,7 @@ Implementation checklist:
 - Proposed approach: Update profiling scripts to current module paths and standardize capture commands.
 - Effort: S
 - Impact: Med
-- Status: implemented
+- Status: done
 - Notes: Updated profiling helpers to current `hnh` package paths and added standardized capture/viewer options (`--output`, `--no-view`) for repeatable hot-path analysis.
 
 ### 25) [PERF] Optimize BLE ECG packet decode path
@@ -419,7 +419,7 @@ Completed items. Include completion date and optional version reference.
 ### Session History hide/unhide (soft delete)
 - Completed: 2026-03-08
 - Outcome: Added reversible session hiding in Session History with `Show hidden` toggle plus `Hide selected` / `Unhide selected` actions; hidden sessions are excluded by default.
-- Notes: Backed by `session_history.is_hidden`; includes status messaging and selection-preservation polish for hide/unhide/toggle flows.
+- Notes: Backed by `session_history.is_hidden`; includes status messaging and selection-preservation polish for hide/unhide/toggle flows. Extended with `Purge abandoned...` action in History, Trends-side `Show hidden sessions` parity toggle, non-modal History window behavior matching Trends, and startup auto-purge of stale `recording` sessions for primary instance only.
 
 ### [F13] Session replay mode
 - Completed: 2026-03-07

@@ -2,7 +2,7 @@ import sys
 from importlib import metadata
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
 from hnh.view import View
 from hnh.model import Model
@@ -70,17 +70,48 @@ def _emit_research_use_startup_warning() -> None:
 class Application(QApplication):
     def __init__(self, sys_argv):
         super(Application, self).__init__(sys_argv)
+        lock_root = Path.home() / "Hertz-and-Hearts"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        self._instance_lock = QLockFile(str(lock_root / ".app-startup.lock"))
+        self._instance_lock.setStaleLockTime(0)
+        self._is_primary_instance = bool(self._instance_lock.tryLock(1))
         self._model = Model()
         self._view = View(self._model)
+        self._run_startup_recording_purge_if_primary()
         
         # 1. The "Handshake" connection (Fast & Simple)
         self._view.sensor.ibi_update.connect(self._model.hr_handler)
+
+    def _run_startup_recording_purge_if_primary(self) -> None:
+        if not self._is_primary_instance:
+            return
+        try:
+            result = self._view._profile_store.purge_recording_sessions()
+        except Exception as exc:
+            print(f"[startup] Recording-session purge failed: {exc}", file=sys.stderr)
+            return
+        removed = int(result.get("removed_rows", 0))
+        if removed > 0:
+            print(
+                "[startup] Purged stale recording sessions: "
+                f"rows={removed}, deleted_dirs={int(result.get('deleted_dirs', 0))}, "
+                f"missing_dirs={int(result.get('missing_dirs', 0))}.",
+                file=sys.stderr,
+            )
+
+    def release_instance_lock(self) -> None:
+        try:
+            if self._is_primary_instance:
+                self._instance_lock.unlock()
+        except Exception:
+            pass
 
 def main():
     _warn_if_pandas_neurokit_combo_is_risky()
     _emit_research_use_startup_warning()
     app = Application(sys.argv)
     app.aboutToQuit.connect(lambda: app._view._flush_signal_fault_log("app exit"))
+    app.aboutToQuit.connect(app.release_instance_lock)
     # Main window opens first, then profile selection popup on top (_run_startup_flow).
     sys.exit(app.exec())
 

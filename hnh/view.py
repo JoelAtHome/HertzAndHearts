@@ -65,6 +65,7 @@ from hnh.session_artifacts import (
 from hnh.session_artifacts import _slugify as _slugify_profile
 from hnh.edf_export import export_session_edf_plus
 from hnh.profile_store import ProfileStore
+from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correlations
 from hnh import __version__ as version, resources  # noqa
 import warnings
 
@@ -645,7 +646,8 @@ class SessionHistoryDialog(QDialog):
         parent=None,
     ):
         super().__init__(parent)
-        self.setModal(True)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
         self.setWindowTitle(f"Session History — {profile_name}")
         self.resize(980, 620)
 
@@ -675,6 +677,9 @@ class SessionHistoryDialog(QDialog):
         self._unhide_btn = QPushButton("Unhide selected")
         self._unhide_btn.clicked.connect(self._on_unhide_selected)
         history_actions.addWidget(self._unhide_btn)
+        self._purge_abandoned_btn = QPushButton("Purge abandoned…")
+        self._purge_abandoned_btn.clicked.connect(self._on_purge_abandoned)
+        history_actions.addWidget(self._purge_abandoned_btn)
         tab_history_layout.addLayout(history_actions)
 
         self._table = QTableWidget()
@@ -911,6 +916,12 @@ class SessionHistoryDialog(QDialog):
         self.populate(profile_name=self._profile_name, sessions=sessions)
         self._populate_replay_session_combo()
 
+    def set_context(self, profile_name: str, sessions: list[dict[str, str | None]]):
+        self._profile_name = str(profile_name or "").strip() or self._profile_name
+        self.populate(profile_name=self._profile_name, sessions=sessions)
+        self._populate_replay_session_combo()
+        self._sync_history_buttons()
+
     def _set_selected_hidden(self, hidden: bool):
         selected = self._selected_session()
         if selected is None or self._profile_store is None:
@@ -975,6 +986,46 @@ class SessionHistoryDialog(QDialog):
         )
         self._populate_replay_session_combo()
         self._set_history_status("History view updated.", clear_after_ms=1200)
+
+    def _on_purge_abandoned(self):
+        if self._profile_store is None:
+            return
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Purge Abandoned Sessions")
+        msg.setText(
+            "Delete all abandoned sessions for this profile from history and disk?\n"
+            "This cannot be undone."
+        )
+        msg.setInformativeText(f"Profile: {self._profile_name}")
+        msg.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        msg.setDefaultButton(QMessageBox.No)
+        if msg.exec() != QMessageBox.Yes:
+            return
+        self.setEnabled(False)
+        self._set_history_status("Purging abandoned sessions...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            result = self._profile_store.purge_abandoned_sessions(self._profile_name)
+            self._reload_history()
+            self._populate_replay_session_combo()
+            self._set_history_status(
+                f"Purged {int(result.get('removed_rows', 0))} abandoned session(s).",
+                clear_after_ms=2500,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
+        _info_ok(
+            self,
+            "Purge complete",
+            (
+                f"Removed {int(result.get('removed_rows', 0))} abandoned session(s).\n"
+                f"Deleted folders: {int(result.get('deleted_dirs', 0))}\n"
+                f"Missing folders: {int(result.get('missing_dirs', 0))}"
+            ),
+        )
 
     def _on_replay_session_changed(self, _idx: int):
         """When session selection changes, enable Load if valid."""
@@ -1142,6 +1193,7 @@ class TrendsWindow(QMainWindow):
         self._profile_store = profile_store
         self._active_profile = active_profile
         self._is_admin = is_admin
+        self._show_hidden_sessions = False
         self.setWindowTitle("Hertz & Hearts — Session Trends")
         self.resize(960, 560)
 
@@ -1163,6 +1215,10 @@ class TrendsWindow(QMainWindow):
         self._profile_combo.currentTextChanged.connect(self._refresh_plot)
         self._profile_combo.setEnabled(is_admin)
         controls.addWidget(self._profile_combo)
+        self._show_hidden_cb = QCheckBox("Show hidden sessions")
+        self._show_hidden_cb.setChecked(False)
+        self._show_hidden_cb.toggled.connect(self._on_show_hidden_sessions_toggled)
+        controls.addWidget(self._show_hidden_cb)
 
         controls.addSpacing(24)
         hint = QLabel(
@@ -1276,13 +1332,133 @@ class TrendsWindow(QMainWindow):
 
         tabs.addTab(tab2, "Compare")
 
+        # ---- Tab 3: Tag Insights (annotation association summary) ----
+        tab3 = QWidget()
+        tab3_layout = QVBoxLayout(tab3)
+
+        tag_controls = QHBoxLayout()
+        tag_controls.addWidget(QLabel("Profile:"))
+        self._tag_profile_combo = QComboBox()
+        self._tag_profile_combo.setMinimumWidth(140)
+        for name in profile_store.list_profiles():
+            self._tag_profile_combo.addItem(name)
+        idx = self._tag_profile_combo.findText(active_profile, Qt.MatchFixedString)
+        if idx >= 0:
+            self._tag_profile_combo.setCurrentIndex(idx)
+        self._tag_profile_combo.setEnabled(is_admin)
+        self._tag_profile_combo.currentTextChanged.connect(self._refresh_tag_insights)
+        tag_controls.addWidget(self._tag_profile_combo)
+        tag_controls.addSpacing(12)
+        tag_controls.addWidget(QLabel("Range:"))
+        self._tag_range_combo = QComboBox()
+        self._tag_range_combo.addItem("30 days", 30)
+        self._tag_range_combo.addItem("90 days", 90)
+        self._tag_range_combo.addItem("1 year", 365)
+        self._tag_range_combo.addItem("All", 0)
+        self._tag_range_combo.setCurrentIndex(2)
+        self._tag_range_combo.currentIndexChanged.connect(self._refresh_tag_insights)
+        tag_controls.addWidget(self._tag_range_combo)
+        tag_controls.addSpacing(12)
+        tag_controls.addWidget(QLabel("Min usable events:"))
+        self._tag_min_events_combo = QComboBox()
+        self._tag_min_events_combo.addItem("1", 1)
+        self._tag_min_events_combo.addItem("2", 2)
+        self._tag_min_events_combo.addItem("4", 4)
+        self._tag_min_events_combo.addItem("6", 6)
+        self._tag_min_events_combo.setCurrentIndex(1)
+        self._tag_min_events_combo.currentIndexChanged.connect(self._refresh_tag_insights)
+        tag_controls.addWidget(self._tag_min_events_combo)
+        self._tag_include_system_cb = QCheckBox("Include system annotations")
+        self._tag_include_system_cb.setChecked(False)
+        self._tag_include_system_cb.stateChanged.connect(self._refresh_tag_insights)
+        tag_controls.addWidget(self._tag_include_system_cb)
+        tag_controls.addSpacing(16)
+        self._tag_refresh_btn = QPushButton("Refresh")
+        self._tag_refresh_btn.clicked.connect(self._refresh_tag_insights)
+        tag_controls.addWidget(self._tag_refresh_btn)
+        tag_controls.addStretch()
+        tab3_layout.addLayout(tag_controls)
+
+        self._tag_method_label = QLabel("")
+        self._tag_method_label.setStyleSheet("font-size: 11px; color: #666;")
+        self._tag_method_label.setWordWrap(True)
+        tab3_layout.addWidget(self._tag_method_label)
+
+        self._tag_placeholder = QLabel(
+            "No annotation associations yet.\n"
+            "Record sessions with annotations, then reopen this tab."
+        )
+        self._tag_placeholder.setAlignment(Qt.AlignCenter)
+        self._tag_placeholder.setStyleSheet("font-size: 13px; color: #666; padding: 40px;")
+
+        self._tag_table = QTableWidget()
+        self._tag_table.setAlternatingRowColors(True)
+        self._tag_table.setColumnCount(9)
+        self._tag_table.setHorizontalHeaderLabels(
+            [
+                "Annotation",
+                "N events",
+                "N sessions",
+                "ΔHR (bpm)",
+                "ΔRMSSD (ms)",
+                "ΔSDNN (ms)",
+                "ΔLF/HF",
+                "Confidence",
+                "Caveat",
+            ]
+        )
+        self._tag_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._tag_table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._tag_table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._tag_table.currentCellChanged.connect(self._on_tag_row_changed)
+        self._tag_table.verticalHeader().setVisible(False)
+        self._tag_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._tag_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(5, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(6, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(7, QHeaderView.ResizeToContents)
+        self._tag_table.horizontalHeader().setSectionResizeMode(8, QHeaderView.Stretch)
+        self._tag_table.hide()
+        tab3_layout.addWidget(self._tag_placeholder)
+        tab3_layout.addWidget(self._tag_table)
+        self._tag_detail_label = QLabel("Select an annotation row to view details.")
+        self._tag_detail_label.setStyleSheet("font-size: 11px; color: #2c3e50;")
+        self._tag_detail_label.setWordWrap(True)
+        tab3_layout.addWidget(self._tag_detail_label)
+
+        tag_hint = QLabel(
+            "Association only; not causation or diagnosis. "
+            "Confidence reflects consistency in your own annotated sessions."
+        )
+        tag_hint.setStyleSheet("font-size: 11px; color: #888; font-style: italic;")
+        tag_hint.setWordWrap(True)
+        tab3_layout.addWidget(tag_hint)
+
+        tabs.addTab(tab3, "Tag Insights")
+
         self.setCentralWidget(tabs)
         self._refresh_plot()
         self._refresh_compare_session_list()
+        self._refresh_tag_insights()
 
     def _refresh_plot(self):
         profile = self._profile_combo.currentText().strip() or self._active_profile
         rows = self._profile_store.list_session_trends(profile, span="year")
+        if not self._show_hidden_sessions:
+            visible_sessions = self._profile_store.list_sessions(
+                profile_name=profile,
+                include_hidden=False,
+                limit=2000,
+            )
+            visible_ids = {
+                str(row.get("session_id") or "").strip()
+                for row in visible_sessions
+                if str(row.get("session_id") or "").strip()
+            }
+            rows = [r for r in rows if str(r.get("session_id") or "").strip() in visible_ids]
         self._plot_widget.clear()
         self._trend_data = {}
         if not rows:
@@ -1422,7 +1598,11 @@ class TrendsWindow(QMainWindow):
     def _refresh_compare_session_list(self):
         """Load session list from profile_store. Build trends lookup for table data."""
         profile = self._compare_profile_combo.currentText().strip() or self._active_profile
-        sessions = self._profile_store.list_sessions(profile, limit=100)
+        sessions = self._profile_store.list_sessions(
+            profile,
+            include_hidden=self._show_hidden_sessions,
+            limit=100,
+        )
         trends_rows = self._profile_store.list_session_trends(profile, span="year")
         self._compare_trends_lookup = {r["session_id"]: r for r in trends_rows}
 
@@ -1548,6 +1728,109 @@ class TrendsWindow(QMainWindow):
         self._compare_table.resizeColumnsToContents()
         self._compare_table.resizeRowsToContents()
 
+    def _refresh_tag_insights(self):
+        profile = self._tag_profile_combo.currentText().strip() or self._active_profile
+        include_system = self._tag_include_system_cb.isChecked()
+        since_days_raw = self._tag_range_combo.currentData()
+        since_days = int(since_days_raw) if since_days_raw else None
+        min_events_raw = self._tag_min_events_combo.currentData()
+        min_usable_events = int(min_events_raw) if min_events_raw else 1
+        self._tag_method_label.setText(
+            describe_tag_insights_method(
+                include_system_annotations=include_system,
+                since_days=since_days,
+                min_usable_events=min_usable_events,
+            )
+        )
+        rows = summarize_tag_correlations(
+            self._profile_store,
+            profile,
+            session_limit=400,
+            include_hidden_sessions=self._show_hidden_sessions,
+            include_system_annotations=include_system,
+            since_days=since_days,
+            min_usable_events=min_usable_events,
+        )
+        if not rows:
+            self._tag_placeholder.show()
+            self._tag_table.hide()
+            self._tag_table.setRowCount(0)
+            self._tag_detail_label.setText("Select an annotation row to view details.")
+            return
+
+        self._tag_placeholder.hide()
+        self._tag_table.show()
+        self._tag_table.setRowCount(len(rows))
+        for r, row in enumerate(rows):
+            annotation = str(row.get("annotation") or "—")
+            events = int(row.get("events") or 0)
+            sessions = int(row.get("sessions") or 0)
+            delta_hr = row.get("delta_hr_bpm")
+            delta_rmssd = row.get("delta_rmssd_ms")
+            delta_sdnn = row.get("delta_sdnn_ms")
+            delta_lfhf = row.get("delta_lfhf")
+            confidence = str(row.get("confidence") or "Low")
+            caveat = str(row.get("caveat") or "—")
+
+            self._tag_table.setItem(r, 0, QTableWidgetItem(annotation))
+            self._tag_table.setItem(r, 1, QTableWidgetItem(str(events)))
+            self._tag_table.setItem(r, 2, QTableWidgetItem(str(sessions)))
+            self._tag_table.setItem(
+                r, 3, QTableWidgetItem("—" if delta_hr is None else f"{float(delta_hr):+.1f}")
+            )
+            self._tag_table.setItem(
+                r, 4, QTableWidgetItem("—" if delta_rmssd is None else f"{float(delta_rmssd):+.1f}")
+            )
+            self._tag_table.setItem(
+                r, 5, QTableWidgetItem("—" if delta_sdnn is None else f"{float(delta_sdnn):+.1f}")
+            )
+            self._tag_table.setItem(
+                r, 6, QTableWidgetItem("—" if delta_lfhf is None else f"{float(delta_lfhf):+.2f}")
+            )
+            self._tag_table.setItem(r, 7, QTableWidgetItem(confidence))
+            self._tag_table.setItem(r, 8, QTableWidgetItem(caveat))
+        self._tag_table.resizeRowsToContents()
+        if self._tag_table.rowCount() > 0:
+            self._tag_table.selectRow(0)
+            self._on_tag_row_changed(0, 0, -1, -1)
+
+    def _on_tag_row_changed(self, current_row: int, _current_column: int, _prev_row: int, _prev_col: int):
+        if not hasattr(self, "_tag_detail_label"):
+            return
+        if current_row < 0 or current_row >= self._tag_table.rowCount():
+            self._tag_detail_label.setText("Select an annotation row to view details.")
+            return
+        annotation = self._tag_table.item(current_row, 0)
+        events = self._tag_table.item(current_row, 1)
+        sessions = self._tag_table.item(current_row, 2)
+        dhr = self._tag_table.item(current_row, 3)
+        drmssd = self._tag_table.item(current_row, 4)
+        dsdnn = self._tag_table.item(current_row, 5)
+        dlfhf = self._tag_table.item(current_row, 6)
+        confidence = self._tag_table.item(current_row, 7)
+        caveat = self._tag_table.item(current_row, 8)
+        self._tag_detail_label.setText(
+            "Annotation: {ann} | Events: {evt} | Sessions: {sess} | "
+            "Confidence: {conf} | ΔHR: {dhr} | ΔRMSSD: {drmssd} | "
+            "ΔSDNN: {dsdnn} | ΔLF/HF: {dlfhf} | Caveat: {cav}".format(
+                ann=annotation.text() if annotation else "—",
+                evt=events.text() if events else "0",
+                sess=sessions.text() if sessions else "0",
+                conf=confidence.text() if confidence else "Low",
+                dhr=dhr.text() if dhr else "—",
+                drmssd=drmssd.text() if drmssd else "—",
+                dsdnn=dsdnn.text() if dsdnn else "—",
+                dlfhf=dlfhf.text() if dlfhf else "—",
+                cav=caveat.text() if caveat else "—",
+            )
+        )
+
+    def _on_show_hidden_sessions_toggled(self, checked: bool):
+        self._show_hidden_sessions = bool(checked)
+        self._refresh_plot()
+        self._refresh_compare_session_list()
+        self._refresh_tag_insights()
+
     def set_active_profile(self, profile: str):
         self._active_profile = profile
         idx = self._profile_combo.findText(profile, Qt.MatchFixedString)
@@ -1556,10 +1839,15 @@ class TrendsWindow(QMainWindow):
         idx_compare = self._compare_profile_combo.findText(profile, Qt.MatchFixedString)
         if idx_compare >= 0:
             self._compare_profile_combo.setCurrentIndex(idx_compare)
+        idx_tag = self._tag_profile_combo.findText(profile, Qt.MatchFixedString)
+        if idx_tag >= 0:
+            self._tag_profile_combo.setCurrentIndex(idx_tag)
         self._is_admin = self._profile_store.profile_is_admin(profile)
         self._profile_combo.setEnabled(self._is_admin)
         self._compare_profile_combo.setEnabled(self._is_admin)
+        self._tag_profile_combo.setEnabled(self._is_admin)
         self._refresh_compare_session_list()
+        self._refresh_tag_insights()
 
 
 class ProfileManagerDialog(QDialog):
@@ -4197,6 +4485,7 @@ class View(QMainWindow):
         self.psd_window = PSDWindow()
         self.psd_window.closed.connect(self._on_psd_window_closed)
         self._trends_window: TrendsWindow | None = None
+        self._history_window: SessionHistoryDialog | None = None
         self.ecg_window.installEventFilter(self)
         self.qtc_window.installEventFilter(self)
         self.poincare_window.installEventFilter(self)
@@ -4217,6 +4506,7 @@ class View(QMainWindow):
         self.logger.status_update.connect(self.show_status)
         self.model.ibis_buffer_update.connect(self.logger.write_to_file)
         self.model.hrv_update.connect(self.logger.write_to_file)
+        self.model.stress_ratio_update.connect(self.logger.write_to_file)
 
         # 4. UI WIDGETS
         self.ibis_widget = XYSeriesWidget(self.model.ibis_seconds, self.model.ibis_buffer)
@@ -4415,7 +4705,7 @@ class View(QMainWindow):
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
         self._more_menu.addAction("History / Session Replay", self._open_history)
-        self._more_menu.addAction("Plot Trends / Compare", self._open_trends)
+        self._more_menu.addAction("Trend / Compare / Insight", self._open_trends)
         self._more_menu.addAction("Profiles", self._open_profile_manager)
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
         self._more_menu.addAction("Settings…", self._open_settings)
@@ -4755,6 +5045,13 @@ class View(QMainWindow):
             self.show_status(f"Active user: {self._session_profile_id}")
         if getattr(self, "_trends_window", None) is not None:
             self._trends_window.set_active_profile(self._session_profile_id)
+        if getattr(self, "_history_window", None) is not None:
+            sessions = self._profile_store.list_sessions(
+                profile_name=self._session_profile_id,
+                include_hidden=True,
+                limit=200,
+            )
+            self._history_window.set_context(self._session_profile_id, sessions)
 
     def _should_show_disclaimer_for_profile(self, profile_id: str) -> bool:
         hide_value = self._profile_store.get_profile_pref(
@@ -5058,6 +5355,44 @@ class View(QMainWindow):
             ecg_samples = ecg_samples[-max_samples:]
         qtc_payload = self._session_qtc_payload or self.model.latest_qtc_payload or default_qtc_payload()
         csv_path = str(self._session_bundle.csv_path) if self._session_bundle else ""
+        tag_associations: list[dict] = []
+        tag_method = describe_tag_insights_method(
+            include_system_annotations=False,
+            since_days=365,
+            min_usable_events=2,
+        )
+        profile_name = str(self._session_profile_id or "").strip()
+        if profile_name:
+            try:
+                rows = summarize_tag_correlations(
+                    self._profile_store,
+                    profile_name,
+                    session_limit=400,
+                    include_system_annotations=False,
+                    since_days=365,
+                    min_usable_events=2,
+                )
+                for row in rows:
+                    if int(row.get("confidence_rank") or 0) < 2:
+                        continue
+                    tag_associations.append(
+                        {
+                            "annotation": row.get("annotation"),
+                            "events": row.get("events"),
+                            "sessions": row.get("sessions"),
+                            "delta_hr_bpm": row.get("delta_hr_bpm"),
+                            "delta_rmssd_ms": row.get("delta_rmssd_ms"),
+                            "delta_sdnn_ms": row.get("delta_sdnn_ms"),
+                            "delta_lfhf": row.get("delta_lfhf"),
+                            "confidence": row.get("confidence"),
+                            "consistency_pct": row.get("consistency_pct"),
+                            "caveat": row.get("caveat"),
+                        }
+                    )
+                    if len(tag_associations) >= 5:
+                        break
+            except Exception:
+                tag_associations = []
         return {
             "session_id": self._session_bundle.session_id if self._session_bundle else "--",
             "profile_id": self._session_profile_id,
@@ -5084,6 +5419,8 @@ class View(QMainWindow):
             "csv_path": csv_path,
             "report_stage": report_stage,
             "qtc": qtc_payload,
+            "annotation_associations": tag_associations,
+            "annotation_associations_method": tag_method,
             "disclaimer": self._current_disclaimer_payload(),
             "settling_duration_seconds": getattr(
                 self.settings, "SETTLING_DURATION", 15
@@ -5902,13 +6239,22 @@ class View(QMainWindow):
             include_hidden=True,
             limit=200,
         )
-        dlg = SessionHistoryDialog(
-            profile_name=self._session_profile_id,
-            sessions=sessions,
-            profile_store=self._profile_store,
-            parent=self,
-        )
-        dlg.exec()
+        if self._history_window is None:
+            self._history_window = SessionHistoryDialog(
+                profile_name=self._session_profile_id,
+                sessions=sessions,
+                profile_store=self._profile_store,
+                parent=self,
+            )
+            self._history_window.destroyed.connect(
+                lambda *_args: setattr(self, "_history_window", None)
+            )
+        else:
+            self._history_window.set_context(self._session_profile_id, sessions)
+        self._history_window.show()
+        self._history_window.showNormal()
+        self._history_window.raise_()
+        self._history_window.activateWindow()
 
     def _open_trends(self):
         if self._trends_window is None:
@@ -6516,6 +6862,8 @@ class View(QMainWindow):
                     smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
                     self._session_hrv_values.append(smoothed_sdnn)
                     self._session_hrv_times.append(x)
+                    if self._session_state == "recording":
+                        self.signals.annotation.emit(NamedSignal("SDNN", float(smoothed_sdnn)))
                     self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
                     if not self._main_plots_frozen:
                         self.sdnn_series.append(x, smoothed_sdnn)

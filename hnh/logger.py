@@ -1,4 +1,5 @@
 from datetime import datetime
+import time
 from PySide6.QtCore import QObject, Signal
 from hnh.utils import NamedSignal
 
@@ -11,6 +12,7 @@ class Logger(QObject):
         super().__init__()
         self.file = None
         self.current_path: str | None = None
+        self._recording_started_perf: float | None = None
 
     def start_recording(self, file_path: str):
         if self.file:
@@ -24,6 +26,7 @@ class Logger(QObject):
             self.status_update.emit(f"Failed to start recording: {exc}")
             return
         self.current_path = file_path
+        self._recording_started_perf = time.perf_counter()
         self.file.write("event,value,timestamp,elapsed_sec\n")  # header
         self.file.flush()
         self.recording_status.emit(0)
@@ -42,12 +45,20 @@ class Logger(QObject):
         self.status_update.emit(f"Saved recording file: {saved_path}")
         self.file = None
         self.current_path = None
+        self._recording_started_perf = None
+
+    def _elapsed_ms(self) -> float:
+        started = self._recording_started_perf
+        if started is None:
+            return 0.0
+        return max(0.0, (time.perf_counter() - started) * 1000.0)
 
     def write_to_file(self, data: NamedSignal):
         if not self.file:
             return
         key, val = data
         timestamp = datetime.now().isoformat()
+        elapsed_ms = self._elapsed_ms()
 
         if key == "ibis":
             try:
@@ -55,10 +66,9 @@ class Logger(QObject):
                 if not buffer:
                     return
                 value = buffer[-1]  # IBI in ms
-                elapsed_sec = sum(buffer)  # seconds from first beat
             except (TypeError, ValueError, IndexError):
                 return
-            self.file.write(f"IBI,{value},{timestamp},{elapsed_sec}\n")
+            self.file.write(f"IBI,{value},{timestamp},{elapsed_ms:.3f}\n")
         else:
             try:
                 if isinstance(val, list):
@@ -69,5 +79,5 @@ class Logger(QObject):
                     value = val
             except (IndexError, TypeError):
                 return
-            self.file.write(f"{key},{value},{timestamp},\n")
+            self.file.write(f"{key},{value},{timestamp},{elapsed_ms:.3f}\n")
         self.file.flush()

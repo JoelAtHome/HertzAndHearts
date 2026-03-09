@@ -191,6 +191,16 @@ def _fmt(val, unit: str = "", precision: int = 1) -> str:
     return f"{val} {unit}".strip()
 
 
+def _fmt_signed(val, precision: int = 1) -> str:
+    if val is None:
+        return "—"
+    try:
+        num = float(val)
+    except (TypeError, ValueError):
+        return "—"
+    return f"{num:+.{precision}f}"
+
+
 def _fmt_qtc_session_value(qtc_data: dict) -> str:
     value = qtc_data.get("session_value_ms")
     if value is None:
@@ -874,7 +884,59 @@ def generate_session_report(path: str, data: dict) -> None:
             table.rows[r].cells[1].width = ann_text_w
         doc.add_paragraph("")
 
-    # Section 7: Notes
+    # Section 7: Annotation Associations (Exploratory)
+    associations = data.get("annotation_associations") or []
+    if associations:
+        _add_heading(doc, "Annotation Associations (Exploratory)")
+        method_text = str(data.get("annotation_associations_method") or "").strip()
+        explainer = doc.add_paragraph(
+            "These associations summarize how metrics tended to change after repeated annotations "
+            "across recent sessions. They are exploratory and should not be interpreted as causation "
+            "or diagnosis."
+        )
+        for run in explainer.runs:
+            run.font.size = Pt(8)
+            run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+        if method_text:
+            method_para = doc.add_paragraph(method_text)
+            for run in method_para.runs:
+                run.font.size = Pt(8)
+                run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+
+        rows = associations[:5]
+        table = doc.add_table(rows=1 + len(rows), cols=6)
+        table.style = "Table Grid"
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+        widths = [Inches(2.05), Inches(0.75), Inches(0.75), Inches(0.85), Inches(0.95), Inches(1.0)]
+        headers = ["Annotation", "Events", "Sessions", "ΔHR", "ΔRMSSD", "Confidence"]
+        for col, title in enumerate(headers):
+            cell = table.rows[0].cells[col]
+            cell.text = title
+            cell.width = widths[col]
+            for p in cell.paragraphs:
+                for run in p.runs:
+                    run.bold = True
+                    run.font.size = Pt(8)
+
+        for ridx, row in enumerate(rows, start=1):
+            ann = str(row.get("annotation") or "—")
+            events = str(int(row.get("events") or 0))
+            sessions = str(int(row.get("sessions") or 0))
+            dhr = _fmt_signed(row.get("delta_hr_bpm"), precision=1)
+            drmssd = _fmt_signed(row.get("delta_rmssd_ms"), precision=1)
+            conf = str(row.get("confidence") or "Low")
+            values = [ann, events, sessions, dhr, drmssd, conf]
+            for col, val in enumerate(values):
+                cell = table.rows[ridx].cells[col]
+                cell.text = val
+                cell.width = widths[col]
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        run.font.size = Pt(8)
+        doc.add_paragraph("")
+
+    # Section 8: Notes
     notes = data.get("notes", "").strip()
     _add_heading(doc, "Notes")
     doc.add_paragraph(notes if notes else "(No notes entered.)")
@@ -885,7 +947,7 @@ def generate_session_report(path: str, data: dict) -> None:
         for run in draft_note.runs:
             run.bold = True
 
-    # Section 8: Legal Disclaimer
+    # Section 9: Legal Disclaimer
     disclaimer = data.get("disclaimer", {}) or {}
     if disclaimer:
         _add_heading(doc, "Legal Disclaimer")

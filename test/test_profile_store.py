@@ -227,6 +227,66 @@ class ProfileStoreTests(unittest.TestCase):
             info = {str(row["name"]): row for row in store.list_profiles_info(include_archived=True)}
             self.assertEqual(info["Pat"]["gender"], "Non-binary")
 
+    def test_purge_abandoned_sessions_deletes_rows_and_dirs(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Admin")
+            store.ensure_profile("Other")
+
+            b1 = _bundle(root, "a1")
+            b2 = _bundle(root, "a2")
+            b3 = _bundle(root, "f1")
+            store.record_session_started("Admin", b1)
+            store.record_session_started("Other", b2)
+            store.record_session_started("Admin", b3)
+            store.record_session_finished("a1", "abandoned")
+            store.record_session_finished("a2", "abandoned")
+            store.record_session_finished("f1", "finalized")
+            store.record_session_trend("Admin", "a1", datetime.now(), avg_hr=70.0)
+            store.record_session_trend("Other", "a2", datetime.now(), avg_hr=72.0)
+
+            res_admin = store.purge_abandoned_sessions("Admin")
+            self.assertEqual(res_admin["removed_rows"], 1)
+            self.assertFalse(b1.session_dir.exists())
+            self.assertTrue(b2.session_dir.exists())
+            self.assertTrue(b3.session_dir.exists())
+
+            res_all = store.purge_abandoned_sessions()
+            self.assertEqual(res_all["removed_rows"], 1)
+            self.assertFalse(b2.session_dir.exists())
+            self.assertTrue(b3.session_dir.exists())
+            self.assertEqual(len(store.list_sessions(state="abandoned", include_hidden=True)), 0)
+
+    def test_purge_recording_sessions_deletes_rows_and_dirs(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Admin")
+            store.ensure_profile("Other")
+
+            b1 = _bundle(root, "r1")
+            b2 = _bundle(root, "r2")
+            b3 = _bundle(root, "f1")
+            store.record_session_started("Admin", b1)  # remains recording
+            store.record_session_started("Other", b2)  # remains recording
+            store.record_session_started("Admin", b3)
+            store.record_session_finished("f1", "finalized")
+            store.record_session_trend("Admin", "r1", datetime.now(), avg_hr=70.0)
+            store.record_session_trend("Other", "r2", datetime.now(), avg_hr=72.0)
+
+            res_admin = store.purge_recording_sessions("Admin")
+            self.assertEqual(res_admin["removed_rows"], 1)
+            self.assertFalse(b1.session_dir.exists())
+            self.assertTrue(b2.session_dir.exists())
+            self.assertTrue(b3.session_dir.exists())
+
+            res_all = store.purge_recording_sessions()
+            self.assertEqual(res_all["removed_rows"], 1)
+            self.assertFalse(b2.session_dir.exists())
+            self.assertTrue(b3.session_dir.exists())
+            self.assertEqual(len(store.list_sessions(state="recording", include_hidden=True)), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

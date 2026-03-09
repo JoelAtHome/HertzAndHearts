@@ -5,6 +5,7 @@ import json
 import secrets
 import re
 import sqlite3
+import shutil
 from contextlib import contextmanager
 from datetime import datetime, date, timedelta
 from pathlib import Path
@@ -997,3 +998,70 @@ class ProfileStore:
                     "SELECT COUNT(*) AS total FROM session_history"
                 ).fetchone()
         return 0 if row is None else int(row["total"])
+
+    def purge_abandoned_sessions(self, profile_name: str | None = None) -> dict[str, int]:
+        """Delete abandoned sessions from DB and remove their session folders."""
+        return self.purge_sessions_by_state("abandoned", profile_name=profile_name)
+
+    def purge_recording_sessions(self, profile_name: str | None = None) -> dict[str, int]:
+        """Delete stale recording sessions from DB and remove their session folders."""
+        return self.purge_sessions_by_state("recording", profile_name=profile_name)
+
+    def purge_sessions_by_state(
+        self,
+        state: str,
+        profile_name: str | None = None,
+    ) -> dict[str, int]:
+        """Delete sessions in a given state from DB and remove their session folders."""
+        target_state = str(state or "").strip().lower()
+        if not target_state:
+            return {"found": 0, "deleted_dirs": 0, "missing_dirs": 0, "removed_rows": 0}
+
+        sql = [
+            "SELECT session_id, session_dir",
+            "FROM session_history",
+            "WHERE lower(state) = ?",
+        ]
+        params: list[str] = [target_state]
+        if profile_name:
+            sql.append("AND profile_name = ? COLLATE NOCASE")
+            params.append(self._normalize_profile(profile_name))
+        query = "\n".join(sql)
+        with self._db() as conn:
+            rows = conn.execute(query, tuple(params)).fetchall()
+
+        session_ids: list[str] = []
+        deleted_dirs = 0
+        missing_dirs = 0
+        for row in rows:
+            sid = str(row["session_id"]).strip()
+            if not sid:
+                continue
+            session_ids.append(sid)
+            session_dir = Path(str(row["session_dir"] or "")).resolve()
+            if session_dir.exists():
+                shutil.rmtree(session_dir, ignore_errors=True)
+                deleted_dirs += 1
+            else:
+                missing_dirs += 1
+
+        removed_rows = 0
+        if session_ids:
+            qmarks = ",".join(["?"] * len(session_ids))
+            with self._db() as conn:
+                cur = conn.execute(
+                    f"DELETE FROM session_history WHERE session_id IN ({qmarks})",
+                    tuple(session_ids),
+                )
+                conn.execute(
+                    f"DELETE FROM session_trends WHERE session_id IN ({qmarks})",
+                    tuple(session_ids),
+                )
+                removed_rows = int(cur.rowcount or 0)
+
+        return {
+            "found": len(rows),
+            "deleted_dirs": deleted_dirs,
+            "missing_dirs": missing_dirs,
+            "removed_rows": removed_rows,
+        }
