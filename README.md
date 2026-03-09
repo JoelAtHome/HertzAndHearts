@@ -5,6 +5,7 @@
 A desktop application for heart rate variability (HRV) biofeedback training with ECG chest straps.
 RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT.
 This software is intended only for investigational and research use.
+License: GPL-3.0 (see `LICENSE`).
 
 ## Research Use Disclaimer (Full Text)
 
