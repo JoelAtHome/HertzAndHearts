@@ -12,3 +12,7 @@ uv.lock
 Sessions/
 *.db
 *.log
+
+# Local sample/test datasets
+/Import Samples/
+/test_data/
