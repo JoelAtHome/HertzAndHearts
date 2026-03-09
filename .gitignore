@@ -12,6 +12,7 @@ uv.lock
 Sessions/
 *.db
 *.log
+.app-startup.lock
 
 # Local sample/test datasets
 /Import Samples/

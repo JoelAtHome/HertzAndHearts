@@ -1,5 +1,13 @@
 # Changelog
 
+### Unreleased
++ enhancement: Added in-app Support Development flow under More menu with two donation methods (GitHub Sponsors and Buy Me a Coffee), including profile-aware post-session prompts and guest-safe behavior.
++ enhancement: Added a richer support dialog with clickable links and QR display support (with graceful fallback when QR generation is unavailable).
++ enhancement: Added settings scope controls (`[Global]` vs `[Profile]`) and profile-only settings filter in Settings UI.
++ enhancement: Added GitHub issue templates for bug reports and feature requests.
++ enhancement: Added funding configuration and README support/reporting links.
++ maintenance: Marked `.app-startup.lock` as ignored runtime lock artifact.
+
 ### Version 1.1.1 (December 19 2025)
 + enhancement: Bumped PySide6 to version 6.10.
 
