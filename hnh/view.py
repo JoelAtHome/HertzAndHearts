@@ -72,6 +72,7 @@ from hnh.session_artifacts import _slugify as _slugify_profile
 from hnh.edf_export import export_session_edf_plus
 from hnh.profile_store import ProfileStore
 from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correlations
+from hnh.perf_probe import get_perf_probe
 from hnh import __version__ as version, resources  # noqa
 import warnings
 
@@ -88,6 +89,7 @@ WHITE = QColor(255, 255, 255)
 GREEN = QColor(0, 255, 0)
 YELLOW = QColor(255, 255, 0)
 RED = QColor(255, 0, 0)
+PACER_WIDGET_SIZE = 134
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
 
@@ -2416,7 +2418,8 @@ class PacerWidget(QChartView):
     def sizeHint(self):
         height = self.size().height()
         return QSize(height, height)
-    
+
+
 class XYSeriesWidget(QChartView):
     def __init__(self, x_values, y_values, line_color=QColor(0, 0, 0)):
         super().__init__()
@@ -2483,6 +2486,7 @@ class EcgWindow(QMainWindow):
 
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
+        self._redraw_ms_ema = 0.0
 
         self._plot_widget = pg.PlotWidget(background='w')
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -2496,8 +2500,13 @@ class EcgWindow(QMainWindow):
         self._plot_widget.hideButtons()
 
         self._curve = self._plot_widget.plot(
-            pen=pg.mkPen(color='k', width=1.2)
+            pen=pg.mkPen(color='k', width=1.2),
+            antialias=True,
         )
+        self._curve.setClipToView(True)
+        self._yrange_recalc_stride = 3
+        self._yrange_frame_counter = 0
+        self._cached_y_bounds: tuple[float, float] | None = None
         self._cursor_active = "A"
         self._cursor_suppress_events = False
         self._cursor_a_line = pg.InfiniteLine(
@@ -2692,6 +2701,8 @@ class EcgWindow(QMainWindow):
         ))
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
+        self._yrange_frame_counter = 0
+        self._cached_y_bounds = None
         if len(self._pending) > buf_size:
             drop = len(self._pending) - buf_size
             for _ in range(drop):
@@ -2730,8 +2741,11 @@ class EcgWindow(QMainWindow):
         self._apply_interaction_mode()
         self._last_x_range = None
         self._last_y_range = None
+        self._yrange_frame_counter = 0
+        self._cached_y_bounds = None
         self._curve.setData([], [])
         self._statusbar.showMessage("Waiting for ECG data...")
+        self._redraw_ms_ema = 0.0
 
     def stop(self):
         self._refresh_timer.stop()
@@ -2740,6 +2754,7 @@ class EcgWindow(QMainWindow):
         self._freeze_button.setText("Freeze")
         self._apply_interaction_mode()
         self._statusbar.showMessage("ECG stopped.")
+        self._redraw_ms_ema = 0.0
 
     def _toggle_freeze(self):
         self.set_stream_frozen(not self._frozen)
@@ -3294,10 +3309,19 @@ class EcgWindow(QMainWindow):
         self._set_xrange_if_needed(t_lo, t_hi)
 
     def append_samples(self, samples: list):
+        added = len(samples)
         self._pending.extend(samples)
         max_pending = ECG_SAMPLE_RATE * 10
+        dropped = 0
         while len(self._pending) > max_pending:
             self._pending.popleft()
+            dropped += 1
+        if added:
+            get_perf_probe().note_ecg_enqueue(
+                added=added,
+                pending_size=len(self._pending),
+                dropped=dropped,
+            )
 
     def keyPressEvent(self, event):
         if self._frozen and event.key() in (Qt.Key_A, Qt.Key_B):
@@ -3376,22 +3400,42 @@ class EcgWindow(QMainWindow):
             drain = min(20, n_pending)
         else:
             drain = min(self._drain_rate + 2, n_pending)
+        redraw_start_ns = time.perf_counter_ns()
 
         inv_rate = 1.0 / ECG_SAMPLE_RATE
+        drained_min = float("inf")
+        drained_max = float("-inf")
         for _ in range(drain):
             val = self._pending.popleft()
             self._times.append(
                 (self._sample_count * inv_rate) + self._timeline_offset_sec
             )
             self._values.append(val)
+            fval = float(val)
+            if fval < drained_min:
+                drained_min = fval
+            if fval > drained_max:
+                drained_max = fval
             self._sample_count += 1
 
         n = len(self._times)
         if n < 2:
             return
 
-        y_lo = float(min(self._values))
-        y_hi = float(max(self._values))
+        self._yrange_frame_counter += 1
+        recalc_y = (
+            self._cached_y_bounds is None
+            or (self._yrange_frame_counter % self._yrange_recalc_stride) == 0
+        )
+        if recalc_y:
+            y_lo = float(min(self._values))
+            y_hi = float(max(self._values))
+        else:
+            y_lo, y_hi = self._cached_y_bounds
+            if drained_min != float("inf"):
+                y_lo = min(y_lo, drained_min)
+                y_hi = max(y_hi, drained_max)
+        self._cached_y_bounds = (y_lo, y_hi)
         margin = max(0.1, (y_hi - y_lo) * 0.15)
         target_lo = y_lo - margin
         target_hi = y_hi + margin
@@ -3410,11 +3454,21 @@ class EcgWindow(QMainWindow):
             self._set_xrange_if_needed(x_lo, x_hi)
 
         self._curve.setData(self._times, self._values)
+        redraw_elapsed_ms = (time.perf_counter_ns() - redraw_start_ns) / 1e6
+        if self._redraw_ms_ema <= 0.0:
+            self._redraw_ms_ema = redraw_elapsed_ms
+        else:
+            self._redraw_ms_ema = (0.15 * redraw_elapsed_ms) + (0.85 * self._redraw_ms_ema)
+        get_perf_probe().note_redraw(
+            drained=drain,
+            elapsed_ns=int(redraw_elapsed_ms * 1e6),
+        )
 
     def closeEvent(self, event):
         if self._pinned:
             self._pinned = False
             self._update_pin_button_visual()
+        get_perf_probe().flush()
         self.stop()
         self.closed.emit()
         super().closeEvent(event)
@@ -4369,6 +4423,7 @@ class View(QMainWindow):
 
         # 1. TRACKERS & STATE
         self.settings = Settings()
+        self._perf_probe = get_perf_probe()
         self._profile_scoped_setting_defaults: dict[str, object] = {
             key: getattr(self.settings, key) for key in profile_scoped_keys()
         }
@@ -4406,6 +4461,8 @@ class View(QMainWindow):
         self._main_plot_visible_sec = 60.0
         self._main_plot_guard_sec = 12.0
         self._series_prune_stride = 32
+        self._latest_hrv_for_chart: NamedSignal | None = None
+        self._chart_update_pending = False
         self._last_data_time = None
         self._suppress_comm_error_popups = False
         self._signal_fault_buffer: list[dict] = []
@@ -4455,7 +4512,7 @@ class View(QMainWindow):
         self.model.ibis_buffer_update.connect(self.update_ui_labels)
         self.model.stress_ratio_update.connect(self.update_ui_labels)
         self.model.hrv_update.connect(self.update_ui_labels)
-        self.model.hrv_update.connect(self.direct_chart_update)
+        self.model.hrv_update.connect(self._enqueue_direct_chart_update)
         self.model.qtc_update.connect(self.update_ui_labels)
 
         self.model.addresses_update.connect(self.list_addresses)
@@ -4466,9 +4523,17 @@ class View(QMainWindow):
         self.signals = ViewSignals()
         self.signals.request_buffer_reset.connect(self._handle_stream_reset)
         self.pacer = Pacer()
-        self.pacer_timer = QTimer()
-        self.pacer_timer.setInterval(int(1000 / 8))
+        self.pacer_timer = QTimer(self)
+        self._pacer_fps = 15
+        self.pacer_timer.setInterval(int(1000 / self._pacer_fps))
+        self.pacer_timer.setTimerType(Qt.PreciseTimer)
         self.pacer_timer.timeout.connect(self.plot_pacer_disk)
+        self._last_pacer_tune_sec = 0.0
+        self._chart_update_timer = QTimer(self)
+        self._chart_update_timer.setInterval(125)
+        self._chart_update_timer.setTimerType(Qt.PreciseTimer)
+        self._chart_update_timer.timeout.connect(self._drain_direct_chart_update)
+        self._chart_update_timer.start()
 
         self._data_watchdog = QTimer()
         self._data_watchdog.setInterval(5000)
@@ -4588,7 +4653,7 @@ class View(QMainWindow):
         self.sdnn_series.attachAxis(self.hrv_y_axis_right)
 
         self.pacer_widget = PacerWidget(self.pacer.lung_x, self.pacer.lung_y)
-        self.pacer_widget.setFixedSize(200, 200)
+        self.pacer_widget.setFixedSize(PACER_WIDGET_SIZE, PACER_WIDGET_SIZE)
 
         self._hr_overlay = self._make_chart_overlay(self.ibis_widget)
         self._hr_overlay.show()
@@ -4647,6 +4712,7 @@ class View(QMainWindow):
         self.pacer_toggle = QCheckBox("Show Pacer")
         self.pacer_toggle.setChecked(True)
         self.pacer_toggle.stateChanged.connect(self.toggle_pacer)
+        self._perf_probe.set_pacer_renderer("current_lungs")
 
         self.pacer_group = QGroupBox("Breathing Pacer")
         self.pacer_group.setStyleSheet(
@@ -4896,7 +4962,7 @@ class View(QMainWindow):
         pacer_column.addStretch()
 
         pacer_container = QWidget()
-        pacer_container.setFixedWidth(200)
+        pacer_container.setFixedWidth(150)
         pacer_container.setLayout(pacer_column)
         self.content_row.addWidget(pacer_container, stretch=0, alignment=Qt.AlignTop)
         self.vlayout0.addLayout(self.content_row, stretch=90)
@@ -7237,6 +7303,19 @@ class View(QMainWindow):
         except Exception as e:
             print(f"Direct Chart Error: {e}")
 
+    def _enqueue_direct_chart_update(self, hrv_data: NamedSignal):
+        # Keep only the latest HRV payload so chart backlog cannot starve other UI timers.
+        self._latest_hrv_for_chart = hrv_data
+        self._chart_update_pending = True
+
+    def _drain_direct_chart_update(self):
+        if not self._chart_update_pending or self._latest_hrv_for_chart is None:
+            return
+        payload = self._latest_hrv_for_chart
+        self._latest_hrv_for_chart = None
+        self._chart_update_pending = False
+        self.direct_chart_update(payload)
+
     def list_addresses(self, addresses: NamedSignal):
         self.address_menu.clear()
         self.address_menu.addItems(addresses.value)
@@ -7248,6 +7327,23 @@ class View(QMainWindow):
     def plot_pacer_disk(self):
         if not self.pacer_toggle.isChecked():
             return
+
+        now = time.perf_counter()
+        if (now - self._last_pacer_tune_sec) >= 0.5:
+            self._last_pacer_tune_sec = now
+            redraw_ms = float(getattr(self.ecg_window, "_redraw_ms_ema", 0.0))
+            if redraw_ms >= 14.0:
+                target_fps = 8
+            elif redraw_ms >= 8.0:
+                target_fps = 10
+            elif redraw_ms >= 5.0:
+                target_fps = 12
+            else:
+                target_fps = 15
+            if target_fps != self._pacer_fps:
+                self._pacer_fps = target_fps
+                self.pacer_timer.setInterval(max(10, int(round(1000.0 / float(target_fps)))))
+
         coordinates = self.pacer.update(self.model.breathing_rate)
         self.pacer_widget.update_series(*coordinates)
 

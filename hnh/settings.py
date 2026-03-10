@@ -217,6 +217,25 @@ REGISTRY = OrderedDict([
         "type": bool, "section": "Developer",
         "scope": "profile",
     }),
+    ("PERF_PROBE_ENABLED", {
+        "display": "Perf Probe Logging",
+        "tooltip": (
+            "Writes lightweight periodic JSONL metrics for BLE decode and ECG "
+            "plot redraw timing. Intended for before/after performance checks."
+        ),
+        "type": bool, "section": "Developer",
+        "scope": "global",
+    }),
+    ("PERF_PROBE_FLUSH_SECONDS", {
+        "display": "Perf Probe Flush Interval",
+        "tooltip": (
+            "Seconds between aggregated performance metric flushes. "
+            "Lower values give finer detail with slightly more disk activity."
+        ),
+        "type": float, "min": 1.0, "max": 30.0, "step": 0.5,
+        "decimals": 1, "unit": "seconds", "section": "Developer",
+        "scope": "global",
+    }),
 
     # ─── Advanced / Engineering ───────────────────────────────────────
     ("EWMA_WEIGHT_CURRENT_SAMPLE", {

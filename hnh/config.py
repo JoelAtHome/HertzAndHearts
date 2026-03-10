@@ -10,6 +10,12 @@ from math import ceil
 # Leave False for normal operation.
 DEBUG: Final[bool] = False
 
+# Lightweight performance probe logging for engineering comparisons.
+# Off by default to avoid noise/overhead in normal runs.
+PERF_PROBE_ENABLED: Final[bool] = False
+# Write one aggregated metrics row every N seconds when probe is enabled.
+PERF_PROBE_FLUSH_SECONDS: Final[float] = 5.0
+
 # ──────────────────────────────────────────────────────────────────────
 #  HEART RATE LIMITS
 # ──────────────────────────────────────────────────────────────────────

@@ -140,7 +140,12 @@ class Model(QObject):
         if not samples:
             return
         try:
-            self._ecg_buffer.extend(float(x) for x in samples)
+            if isinstance(samples, list):
+                # Sensor decode already emits numeric millivolt samples; avoid
+                # per-sample float conversion in the hot path.
+                self._ecg_buffer.extend(samples)
+            else:
+                self._ecg_buffer.extend(float(x) for x in samples)
         except Exception:
             return
         self._ecg_total_samples += len(samples)
