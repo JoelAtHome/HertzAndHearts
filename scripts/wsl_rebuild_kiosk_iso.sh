@@ -11,9 +11,9 @@ REPO_WIN_PATH="/mnt/c/Users/joelb/Hertz-and-Hearts"
 BUILD_ROOT="${HOME}/hnh-kiosk-build"
 DIST_OUT="${REPO_WIN_PATH}/dist"
 
-MIRROR_BOOTSTRAP="http://us.archive.ubuntu.com/ubuntu"
-MIRROR_BINARY="http://us.archive.ubuntu.com/ubuntu"
-MIRROR_SECURITY="http://security.ubuntu.com/ubuntu"
+MIRROR_BOOTSTRAP="https://archive.ubuntu.com/ubuntu"
+MIRROR_BINARY="https://archive.ubuntu.com/ubuntu"
+MIRROR_SECURITY="https://security.ubuntu.com/ubuntu"
 
 echo "[hnh-kiosk] Installing/updating required tools..."
 sudo apt update
@@ -42,7 +42,7 @@ lb config \
   --mirror-binary "${MIRROR_BINARY}" \
   --mirror-chroot-security "${MIRROR_SECURITY}" \
   --debian-installer false \
-  --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+  --apt-options "-o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
 
 # Apply optional kiosk customization overlay from repo.
 if [[ -d "${REPO_WIN_PATH}/kiosk/live-build" ]]; then

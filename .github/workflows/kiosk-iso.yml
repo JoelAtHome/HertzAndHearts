@@ -22,6 +22,7 @@ jobs:
         run: |
           mkdir -p "${RUNNER_TEMP}/hnh-kiosk-build"
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
+          mkdir -p _failure_logs
           sudo lb clean --purge || true
           lb config \
             --mode ubuntu \
@@ -30,11 +31,11 @@ jobs:
             --binary-images iso-hybrid \
             --archive-areas "main restricted universe multiverse" \
             --apt-source-archives false \
-            --mirror-bootstrap http://archive.ubuntu.com/ubuntu \
-            --mirror-binary http://archive.ubuntu.com/ubuntu \
-            --mirror-chroot-security http://security.ubuntu.com/ubuntu \
+            --mirror-bootstrap https://archive.ubuntu.com/ubuntu \
+            --mirror-binary https://archive.ubuntu.com/ubuntu \
+            --mirror-chroot-security https://security.ubuntu.com/ubuntu \
             --debian-installer false \
-            --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+            --apt-options "-o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
 
           # Apply kiosk customization overlay (autostart + writable path prep).
           if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
@@ -48,7 +49,7 @@ jobs:
           set -e
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
           build_once() {
-            sudo lb build
+            sudo lb build 2>&1 | tee _failure_logs/lb-build.log
           }
           if ! build_once; then
             echo "First build attempt failed; cleaning and retrying once..."
@@ -60,17 +61,17 @@ jobs:
               --binary-images iso-hybrid \
               --archive-areas "main restricted universe multiverse" \
               --apt-source-archives false \
-              --mirror-bootstrap http://archive.ubuntu.com/ubuntu \
-              --mirror-binary http://archive.ubuntu.com/ubuntu \
-              --mirror-chroot-security http://security.ubuntu.com/ubuntu \
+              --mirror-bootstrap https://archive.ubuntu.com/ubuntu \
+              --mirror-binary https://archive.ubuntu.com/ubuntu \
+              --mirror-chroot-security https://security.ubuntu.com/ubuntu \
               --debian-installer false \
-              --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+              --apt-options "-o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
             if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
               rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
               chmod +x config/hooks/normal/*.hook.chroot || true
               chmod +x config/includes.chroot/usr/local/bin/*.sh || true
             fi
-            build_once
+            sudo lb build 2>&1 | tee _failure_logs/lb-build-retry.log
           fi
 
       - name: Capture build logs on failure
