@@ -77,6 +77,10 @@ lb config \
   --apt-source-archives false \
   --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
 
+# Noble no longer ships legacy ubuntu-oneiric syslinux theme packages.
+# Clearing this keeps lb_binary_syslinux from failing.
+sed -i 's/^LB_SYSLINUX_THEME=.*/LB_SYSLINUX_THEME=""/' config/binary || true
+
 echo "[kiosk-iso] Starting build (this can take a while)..."
 sudo lb build
 

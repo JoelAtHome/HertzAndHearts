@@ -43,6 +43,9 @@ jobs:
             chmod +x config/hooks/normal/*.hook.chroot || true
             chmod +x config/includes.chroot/usr/local/bin/*.sh || true
           fi
+          # Noble no longer ships legacy ubuntu-oneiric syslinux theme packages.
+          # Clearing this avoids failing at lb_binary_syslinux.
+          sed -i 's/^LB_SYSLINUX_THEME=.*/LB_SYSLINUX_THEME=""/' config/binary || true
 
       - name: Build ISO (retry once on transient mirror issues)
         run: |
@@ -71,6 +74,7 @@ jobs:
               chmod +x config/hooks/normal/*.hook.chroot || true
               chmod +x config/includes.chroot/usr/local/bin/*.sh || true
             fi
+            sed -i 's/^LB_SYSLINUX_THEME=.*/LB_SYSLINUX_THEME=""/' config/binary || true
             sudo lb build 2>&1 | tee _failure_logs/lb-build-retry.log
           fi
 
@@ -86,9 +90,15 @@ jobs:
       - name: Stage ISO output
         run: |
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
-          ls -lh *.iso
+          find . -maxdepth 3 -type f -name "*.iso" | tee _failure_logs/iso-paths.txt
+          ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" | head -n 1)"
+          if [ -z "${ISO_PATH}" ]; then
+            echo "No ISO produced by live-build." >&2
+            exit 2
+          fi
+          ls -lh "${ISO_PATH}"
           mkdir -p dist
-          cp -f live-image-amd64.hybrid.iso dist/hnh-kiosk-base.iso
+          cp -f "${ISO_PATH}" dist/hnh-kiosk-base.iso
 
       - name: Upload ISO artifact
         uses: actions/upload-artifact@v4
