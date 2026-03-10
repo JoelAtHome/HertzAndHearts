@@ -1,11 +1,19 @@
-<img src="https://github.com/JanCBrammer/OpenHRV/raw/main/docs/logo.png" width="125" height="125" />
+<img src="docs/logo.png" width="125" height="125" />
 
-# VNS-TA
+# Hertz & Hearts
 
 A desktop application for heart rate variability (HRV) biofeedback training with ECG chest straps.
 RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT.
 This software is intended only for investigational and research use.
+Current beta: **1.0.0-beta**.
 License: GPL-3.0 (see `LICENSE`).
+
+## Upstream Acknowledgment
+
+Hertz & Hearts is built upon the OpenHRV project by Jan C. Brammer.
+
+- Upstream project: https://github.com/JanCBrammer/OpenHRV
+- This fork/continuation remains GPL-3.0 licensed.
 
 ## Research Use Disclaimer (Full Text)
 
@@ -46,8 +54,7 @@ Track feature ideas and planned improvements in [WISHLIST.md](WISHLIST.md).
 It is highly recommended to install the project in a virtual Python environment,
 e.g., using [conda](https://docs.python.org/3/library/venv.html) or
 [venv](https://docs.python.org/3/library/venv.html).
-The required Python version is specified in
-[pyproject.toml](https://github.com/JanCBrammer/OpenHRV/blob/main/pyproject.toml).
+The required Python version is specified in `pyproject.toml`.
 
 In your Python environment, clone the repository, and subsequently run
 
@@ -58,33 +65,37 @@ pip install .
 in the root of the repository. Alternatively, you can skip cloning by running
 
 ```
-pip install git+https://github.com/JanCBrammer/OpenHRV.git
+pip install git+https://github.com/JoelAtHome/Hertz-and-Hearts.git
 ```
 
 You can now start the application with
 
 ```
-python -m vns_ta.app
+python -m hnh.app
 ```
 
 or alternatively, with the shortcut
 
 ```
-vns-ta
+hnh
 ```
-I tested `VNS-TA` on Ubuntu 24.04. It _should_ run on Windows and macOS as well, however, I haven't confirmed that myself.
-If you have problems running `VNS-TA` have a look at [docs/troubleshooting.md](docs/troubleshooting.md).
+Hertz & Hearts has been tested on Ubuntu 24.04. It should run on Windows and macOS as well.
+If you have problems running Hertz & Hearts have a look at [docs/troubleshooting.md](docs/troubleshooting.md).
+
+## Packaging
+
+For cross-platform package generation (Windows/macOS/Linux), see [docs/PACKAGING.md](docs/PACKAGING.md).
 
 ## Ubuntu executable
 
-On Ubuntu, download and run [VNS-TA.bin](https://github.com/JanCBrammer/OpenHRV/releases/latest), no installation required.
+On Linux, download the latest packaged build from this repository's Releases.
 
 ## User Guide
 
 ### Connect your ECG sensor
 First make sure the sensor is paired with your computer
 (i.e., find and pair the sensor in your computer's Bluetooth settings).
-Then search the sensor in **VNS-TA** by clicking `Scan`. The addresses of all
+Then search the sensor in **Hertz & Hearts** by clicking `Scan`. The addresses of all
 paired sensors show up in the drop-down menu. Select your sensor from the
 drop-down menu and click `Connect` in order to establish a connection. You can
 disconnect the sensor anytime by clicking `Disconnect`. Disconnecting is useful

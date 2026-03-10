@@ -1,0 +1,94 @@
+name: kiosk-iso
+
+on:
+  workflow_dispatch:
+  release:
+    types:
+      - published
+
+jobs:
+  build-kiosk-iso:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install kiosk ISO build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y live-build xorriso squashfs-tools wget curl git rsync
+
+      - name: Configure live-build
+        run: |
+          mkdir -p "${RUNNER_TEMP}/hnh-kiosk-build"
+          cd "${RUNNER_TEMP}/hnh-kiosk-build"
+          sudo lb clean --purge || true
+          lb config \
+            --mode ubuntu \
+            --distribution noble \
+            --architectures amd64 \
+            --binary-images iso-hybrid \
+            --archive-areas "main restricted universe multiverse" \
+            --apt-source-archives false \
+            --mirror-bootstrap http://archive.ubuntu.com/ubuntu \
+            --mirror-binary http://archive.ubuntu.com/ubuntu \
+            --mirror-chroot-security http://security.ubuntu.com/ubuntu \
+            --debian-installer live \
+            --apt-options "--yes -o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+
+          # Apply kiosk customization overlay (autostart + writable path prep).
+          if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
+            rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
+            chmod +x config/hooks/normal/*.hook.chroot || true
+            chmod +x config/includes.chroot/usr/local/bin/*.sh || true
+          fi
+
+      - name: Build ISO (retry once on transient mirror issues)
+        run: |
+          set -e
+          cd "${RUNNER_TEMP}/hnh-kiosk-build"
+          build_once() {
+            sudo lb build
+          }
+          if ! build_once; then
+            echo "First build attempt failed; cleaning and retrying once..."
+            sudo lb clean --purge || true
+            lb config \
+              --mode ubuntu \
+              --distribution noble \
+              --architectures amd64 \
+              --binary-images iso-hybrid \
+              --archive-areas "main restricted universe multiverse" \
+              --apt-source-archives false \
+              --mirror-bootstrap http://archive.ubuntu.com/ubuntu \
+              --mirror-binary http://archive.ubuntu.com/ubuntu \
+              --mirror-chroot-security http://security.ubuntu.com/ubuntu \
+              --debian-installer live \
+              --apt-options "--yes -o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+            if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
+              rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
+              chmod +x config/hooks/normal/*.hook.chroot || true
+              chmod +x config/includes.chroot/usr/local/bin/*.sh || true
+            fi
+            build_once
+          fi
+
+      - name: Stage ISO output
+        run: |
+          cd "${RUNNER_TEMP}/hnh-kiosk-build"
+          ls -lh *.iso
+          mkdir -p dist
+          cp -f live-image-amd64.hybrid.iso dist/hnh-kiosk-base.iso
+
+      - name: Upload ISO artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hnh-kiosk-base.iso
+          path: ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso
+
+      - name: Upload ISO to release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.ref_name }}" "${RUNNER_TEMP}/hnh-kiosk-build/dist/hnh-kiosk-base.iso" --clobber

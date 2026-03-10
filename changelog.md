@@ -1,6 +1,7 @@
 # Changelog
 
 ### Unreleased
++ release: Set project pre-release version to `1.0.0b0` (public label: `1.0.0-beta`) and added beta launch collateral/templates.
 + enhancement: Added in-app Support Development flow under More menu with two donation methods (GitHub Sponsors and Buy Me a Coffee), including profile-aware post-session prompts and guest-safe behavior.
 + enhancement: Added a richer support dialog with clickable links and QR display support (with graceful fallback when QR generation is unavailable).
 + enhancement: Added settings scope controls (`[Global]` vs `[Profile]`) and profile-only settings filter in Settings UI.

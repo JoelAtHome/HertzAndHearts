@@ -219,6 +219,21 @@ def _fmt_qrs_session_value(qtc_data: dict) -> str:
     return f"{_fmt(value, 'ms', 1)} (±{ECG_QRS_UNCERTAINTY_PCT}%)"
 
 
+def _fmt_qtc_method_suggestion(qtc_data: dict) -> str:
+    suggestion = qtc_data.get("method_suggestion") if isinstance(qtc_data, dict) else None
+    if not isinstance(suggestion, dict):
+        return "--"
+    method = str(suggestion.get("suggested_method") or "").strip()
+    reasoning = " ".join(str(suggestion.get("reasoning") or "").split()).strip()
+    if not method and not reasoning:
+        return "--"
+    if method and reasoning:
+        return f"{method}: {reasoning} (non-diagnostic guidance)."
+    if method:
+        return f"{method} (non-diagnostic guidance)."
+    return f"{reasoning} (non-diagnostic guidance)."
+
+
 def _to_float(value) -> float | None:
     if value is None:
         return None
@@ -500,6 +515,7 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
         ["LF/HF (session avg)", lf_hf_avg],
         ["QTc (session median)", _fmt_qtc_session_value(qtc_data)],
         ["QRS (session average)", _fmt_qrs_session_value(qtc_data)],
+        ["QTc method guidance", _fmt_qtc_method_suggestion(qtc_data)],
     ]
     metrics_table = Table(
         metrics_rows,
@@ -738,6 +754,7 @@ def generate_session_report(path: str, data: dict) -> None:
         ("LF/HF (latest)", _fmt(last_lf_hf, "", 2) if last_lf_hf is not None else _fmt(None, "", 0)),
         ("QTc (session median)", _fmt_qtc_session_value(qtc_data)),
         ("QRS (session average)", _fmt_qrs_session_value(qtc_data)),
+        ("QTc method guidance", _fmt_qtc_method_suggestion(qtc_data)),
     ], label_width_in=1.92, value_width_in=3.04, compact=True)
     qtc_trend = qtc_data.get("trend", {})
     if qtc_trend.get("enabled"):

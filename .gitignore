@@ -17,3 +17,6 @@ Sessions/
 # Local sample/test datasets
 /Import Samples/
 /test_data/
+
+# Local live-build workspace artifacts
+/kiosk/iso/

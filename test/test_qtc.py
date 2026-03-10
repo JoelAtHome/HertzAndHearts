@@ -112,6 +112,45 @@ class QtcTests(unittest.TestCase):
         self.assertIn(suggestion["suggested_method"], {"adaptive_bazett_fridericia", "fridericia"})
         self.assertTrue(len(suggestion["reasoning"]) > 10)
 
+    def test_synthetic_qt_rr_vectors_cover_low_normal_high_hr_ranges(self):
+        # Synthetic vectors for quick numeric sanity checks across HR regimes.
+        low_hr_bazett = compute_qtc_ms(qt_ms=360.0, rr_ms=1200.0, formula="bazett")
+        normal_hr_bazett = compute_qtc_ms(qt_ms=360.0, rr_ms=900.0, formula="bazett")
+        high_hr_fridericia = compute_qtc_ms(qt_ms=360.0, rr_ms=550.0, formula="fridericia")
+        self.assertIsNotNone(low_hr_bazett)
+        self.assertIsNotNone(normal_hr_bazett)
+        self.assertIsNotNone(high_hr_fridericia)
+        self.assertTrue(320.0 <= float(low_hr_bazett) <= 340.0)
+        self.assertTrue(375.0 <= float(normal_hr_bazett) <= 385.0)
+        self.assertTrue(430.0 <= float(high_hr_fridericia) <= 450.0)
+
+    def test_noisy_candidates_keep_stable_summary_and_unavailable_fallback(self):
+        cfg = QtcConfig(sampling_rate=130, min_valid_beats=4, summary_window_seconds=30)
+        mostly_valid = [
+            _candidate(1.0, 360.0, 900.0, True),
+            _candidate(2.0, 361.0, 905.0, True),
+            _candidate(3.0, 359.0, 910.0, True),
+            _candidate(4.0, 360.0, 898.0, True),
+            _candidate(5.0, 620.0, 250.0, False),  # noisy outlier
+            _candidate(6.0, 180.0, 2600.0, False),  # noisy outlier
+        ]
+        payload_a = build_qtc_payload(mostly_valid, cfg)
+        payload_b = build_qtc_payload(mostly_valid, cfg)
+        self.assertEqual(payload_a["status"], "ok")
+        self.assertIsNotNone(payload_a["session_value_ms"])
+        self.assertAlmostEqual(float(payload_a["session_value_ms"]), float(payload_b["session_value_ms"]), places=6)
+
+        too_noisy = [
+            _candidate(1.0, 620.0, 250.0, False),
+            _candidate(2.0, 180.0, 2600.0, False),
+            _candidate(3.0, 190.0, 2800.0, False),
+            _candidate(4.0, 640.0, 220.0, False),
+        ]
+        payload_unavailable = build_qtc_payload(too_noisy, cfg)
+        self.assertEqual(payload_unavailable["status"], "unavailable")
+        self.assertFalse(payload_unavailable["quality"]["is_valid"])
+        self.assertIsNone(payload_unavailable["session_value_ms"])
+
 
 if __name__ == "__main__":
     unittest.main()

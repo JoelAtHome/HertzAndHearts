@@ -7,43 +7,81 @@ on:
       - published
 
 jobs:
-
   build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            package_name: Hertz-and-Hearts-linux-x64.tar.gz
+          - os: windows-2022
+            package_name: Hertz-and-Hearts-windows-x64.zip
+          - os: macos-14
+            package_name: Hertz-and-Hearts-macos.zip
 
-    runs-on: ubuntu-24.04
+    runs-on: ${{ matrix.os }}
 
     steps:
+      - uses: actions/checkout@v4
 
-    - uses: actions/checkout@v4
-
-    - uses: actions/setup-python@v5
-      with:
+      - uses: actions/setup-python@v5
+        with:
           python-version: "3.12"
 
-    - name: Install dependencies
-      run: |
+      - name: Install dependencies
+        run: |
           python -m pip install --upgrade pip
           python -m pip install -e .[build]
 
-    - name: release build
-      if: github.event_name == 'release'
-      run: |
-        pyinstaller --onefile --icon=docs/logo.ico --name=Hertz-and-Hearts.bin hnh/app.py --windowed
+      - name: Build app bundle (all platforms)
+        run: |
+          pyinstaller Hertz-and-Hearts.spec --clean --noconfirm
 
-    - name: manual build
-      if: github.event_name == 'workflow_dispatch'
-      run: |
-        pyinstaller --onefile --icon=docs/logo.ico --name=Hertz-and-Hearts.bin hnh/app.py
+      - name: Package Linux artifact
+        if: runner.os == 'Linux'
+        run: |
+          tar -C dist -czf "dist/${{ matrix.package_name }}" Hertz-and-Hearts
 
-    - name: upload build artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: Hertz-and-Hearts
-        path: dist/Hertz-and-Hearts.bin
+      - name: Package macOS artifact
+        if: runner.os == 'macOS'
+        run: |
+          ditto -c -k --sequesterRsrc --keepParent dist/Hertz-and-Hearts.app "dist/${{ matrix.package_name }}"
 
-    - name: upload build artifact to release
-      if: github.event_name == 'release'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      run: |
-        gh release upload ${{ github.ref_name }} dist/Hertz-and-Hearts.bin
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Compress-Archive -Path "dist/Hertz-and-Hearts/*" -DestinationPath "dist/${{ matrix.package_name }}" -Force
+
+      - name: Build Windows installer (.exe)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $ver = (python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          $ver = $ver -replace "b0$", "-beta"
+          iscc "/DMyAppVersion=$ver" installer.iss
+
+      - name: Upload platform artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.package_name }}
+          path: dist/${{ matrix.package_name }}
+
+      - name: Upload Windows setup artifact
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hertz-and-Hearts-Windows-Setup
+          path: installer_output/*.exe
+
+      - name: Upload artifacts to GitHub release
+        if: github.event_name == 'release'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          gh release upload "${{ github.ref_name }}" "dist/${{ matrix.package_name }}" --clobber
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            gh release upload "${{ github.ref_name }}" installer_output/*.exe --clobber
+          fi

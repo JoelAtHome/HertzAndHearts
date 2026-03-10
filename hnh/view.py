@@ -73,6 +73,7 @@ from hnh.edf_export import export_session_edf_plus
 from hnh.profile_store import ProfileStore
 from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correlations
 from hnh.perf_probe import get_perf_probe
+from hnh.session_report_rebuild import generate_reports_for_session_dir
 from hnh import __version__ as version, resources  # noqa
 import warnings
 
@@ -670,6 +671,7 @@ class SessionHistoryDialog(QDialog):
         self._profile_name = profile_name
         self._all_sessions = list(sessions)
         self._sessions: list[dict[str, str | None]] = []
+        self._sessions_by_id: dict[str, dict[str, str | None]] = {}
         self._profile_store = profile_store
         self._show_hidden = False
 
@@ -696,6 +698,15 @@ class SessionHistoryDialog(QDialog):
         self._purge_abandoned_btn = QPushButton("Purge abandoned…")
         self._purge_abandoned_btn.clicked.connect(self._on_purge_abandoned)
         history_actions.addWidget(self._purge_abandoned_btn)
+        self._generate_report_btn = QPushButton("Generate report")
+        self._generate_report_btn.clicked.connect(self._on_generate_report_selected)
+        history_actions.addWidget(self._generate_report_btn)
+        self._copy_folder_btn = QPushButton("Copy folder path")
+        self._copy_folder_btn.clicked.connect(self._on_copy_folder_path)
+        history_actions.addWidget(self._copy_folder_btn)
+        self._copy_csv_btn = QPushButton("Copy CSV path")
+        self._copy_csv_btn.clicked.connect(self._on_copy_csv_path)
+        history_actions.addWidget(self._copy_csv_btn)
         tab_history_layout.addLayout(history_actions)
 
         self._table = QTableWidget()
@@ -707,7 +718,14 @@ class SessionHistoryDialog(QDialog):
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.itemSelectionChanged.connect(self._sync_history_buttons)
+        self._table.cellDoubleClicked.connect(self._on_history_cell_double_clicked)
+        self._table.cellEntered.connect(self._on_history_cell_hovered)
+        self._table.setMouseTracking(True)
         self._table.setAlternatingRowColors(True)
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self._table.customContextMenuRequested.connect(self._on_history_context_menu)
+        self._table.setSortingEnabled(True)
+        self._table.viewport().installEventFilter(self)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
@@ -715,6 +733,8 @@ class SessionHistoryDialog(QDialog):
         self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         tab_history_layout.addWidget(self._table, stretch=1)
+        self._copy_cell_shortcut = QShortcut(QKeySequence.Copy, self._table)
+        self._copy_cell_shortcut.activated.connect(self._copy_selected_cell_text)
 
         tabs.addTab(tab_history, "History")
 
@@ -850,9 +870,15 @@ class SessionHistoryDialog(QDialog):
             self._sessions = [
                 s for s in self._all_sessions if str(s.get("is_hidden") or "0") != "1"
             ]
+        self._sessions_by_id = {
+            str(s.get("session_id") or "").strip(): s
+            for s in self._sessions
+            if str(s.get("session_id") or "").strip()
+        }
         self.setWindowTitle(f"Session History — {profile_name}")
         hidden_count = sum(1 for s in self._all_sessions if str(s.get("is_hidden") or "0") == "1")
         self._update_history_summary(hidden_count)
+        self._table.setSortingEnabled(False)
         self._table.setRowCount(len(self._sessions))
         selected_row_idx: int | None = None
         for row_idx, row in enumerate(self._sessions):
@@ -866,15 +892,33 @@ class SessionHistoryDialog(QDialog):
             csv_path = str(row.get("csv_path") or "--")
             values = [started, session_id, state, session_dir, csv_path]
             for col_idx, val in enumerate(values):
-                self._table.setItem(row_idx, col_idx, QTableWidgetItem(val))
+                item = QTableWidgetItem(val)
+                if col_idx in (3, 4) and str(val).strip() and str(val).strip() != "--":
+                    link_font = item.font()
+                    link_font.setUnderline(True)
+                    item.setFont(link_font)
+                    item.setForeground(QColor(0, 102, 204))
+                    item.setToolTip("Double-click to open location. Right-click for actions.")
+                self._table.setItem(row_idx, col_idx, item)
             if selected_session_id and session_id == selected_session_id:
                 selected_row_idx = row_idx
         self._table.resizeRowsToContents()
+        self._table.setSortingEnabled(True)
         if selected_row_idx is not None:
-            self._table.selectRow(selected_row_idx)
-            self._table.setCurrentCell(selected_row_idx, 0)
-            self._table.setFocus(Qt.FocusReason.OtherFocusReason)
+            self._select_table_row_by_session_id(selected_session_id)
         self._sync_history_buttons()
+
+    def _select_table_row_by_session_id(self, session_id: str | None):
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        for row_idx in range(self._table.rowCount()):
+            cell = self._table.item(row_idx, 1)
+            if cell is not None and cell.text().strip() == sid:
+                self._table.selectRow(row_idx)
+                self._table.setCurrentCell(row_idx, 0)
+                self._table.setFocus(Qt.FocusReason.OtherFocusReason)
+                return
 
     def _update_history_summary(self, hidden_count: int | None = None):
         if hidden_count is None:
@@ -907,19 +951,149 @@ class SessionHistoryDialog(QDialog):
 
     def _selected_session(self) -> dict[str, str | None] | None:
         row = self._table.currentRow()
-        if row < 0 or row >= len(self._sessions):
+        if row < 0:
             return None
-        return self._sessions[row]
+        sid_item = self._table.item(row, 1)
+        if sid_item is None:
+            return None
+        sid = sid_item.text().strip()
+        if not sid:
+            return None
+        return self._sessions_by_id.get(sid)
 
     def _sync_history_buttons(self):
         selected = self._selected_session()
         if selected is None:
             self._hide_btn.setEnabled(False)
             self._unhide_btn.setEnabled(False)
+            self._generate_report_btn.setEnabled(False)
+            self._copy_folder_btn.setEnabled(False)
+            self._copy_csv_btn.setEnabled(False)
             return
         hidden = str(selected.get("is_hidden") or "0") == "1"
+        session_dir = Path(str(selected.get("session_dir") or ""))
+        has_csv = (session_dir / "session.csv").exists()
+        folder_path = str(selected.get("session_dir") or "").strip()
+        csv_path = str(selected.get("csv_path") or "").strip()
         self._hide_btn.setEnabled(not hidden)
         self._unhide_btn.setEnabled(hidden)
+        self._generate_report_btn.setEnabled(session_dir.exists() and has_csv)
+        self._copy_folder_btn.setEnabled(bool(folder_path and folder_path != "--"))
+        self._copy_csv_btn.setEnabled(bool(csv_path and csv_path != "--"))
+
+    def _copy_text_to_clipboard(self, text: str, label: str):
+        cleaned = str(text or "").strip()
+        if not cleaned or cleaned == "--":
+            self._set_history_status(f"No {label.lower()} available to copy.", clear_after_ms=1800)
+            return
+        QApplication.clipboard().setText(cleaned)
+        self._set_history_status(f"{label} copied to clipboard.", clear_after_ms=1800)
+
+    def _copy_selected_cell_text(self):
+        item = self._table.currentItem()
+        if item is None:
+            self._set_history_status("Select a table cell to copy.", clear_after_ms=1500)
+            return
+        text = item.text()
+        if not text.strip():
+            self._set_history_status("Selected cell is empty.", clear_after_ms=1500)
+            return
+        QApplication.clipboard().setText(text)
+        self._set_history_status("Copied selected cell text.", clear_after_ms=1500)
+
+    def _on_copy_folder_path(self):
+        selected = self._selected_session()
+        if selected is None:
+            return
+        self._copy_text_to_clipboard(str(selected.get("session_dir") or ""), "Folder path")
+
+    def _on_copy_csv_path(self):
+        selected = self._selected_session()
+        if selected is None:
+            return
+        self._copy_text_to_clipboard(str(selected.get("csv_path") or ""), "CSV path")
+
+    def _on_history_cell_double_clicked(self, row: int, col: int):
+        # Path-focused shortcut: double-click folder/csv cells to navigate quickly.
+        if row < 0:
+            return
+        if col == 3:
+            self._table.setCurrentCell(row, col)
+            self._open_selected_folder()
+            return
+        if col == 4:
+            item = self._table.item(row, col)
+            path_text = item.text().strip() if item is not None else ""
+            if not path_text or path_text == "--":
+                self._set_history_status("CSV path is unavailable.", clear_after_ms=1800)
+                return
+            csv_path = Path(path_text)
+            target = csv_path.parent if csv_path.exists() else (
+                csv_path if csv_path.is_dir() else csv_path.parent
+            )
+            if not target or not target.exists():
+                self._set_history_status("CSV location is unavailable.", clear_after_ms=2000)
+                return
+            ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+            if ok:
+                self._set_history_status("Opened CSV location.", clear_after_ms=1500)
+            else:
+                self._set_history_status("Could not open CSV location.", clear_after_ms=2200)
+
+    def _on_history_cell_hovered(self, _row: int, col: int):
+        if col in (3, 4):
+            self._table.viewport().setCursor(Qt.PointingHandCursor)
+            return
+        self._table.viewport().unsetCursor()
+
+    def eventFilter(self, watched, event):
+        if watched is self._table.viewport() and event.type() == QEvent.Type.Leave:
+            self._table.viewport().unsetCursor()
+        return super().eventFilter(watched, event)
+
+    def _open_selected_folder(self):
+        selected = self._selected_session()
+        if selected is None:
+            return
+        folder = Path(str(selected.get("session_dir") or "").strip())
+        if not str(folder) or str(folder) == "--" or not folder.exists():
+            self._set_history_status("Session folder is unavailable.", clear_after_ms=2000)
+            return
+        ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+        if ok:
+            self._set_history_status("Opened session folder.", clear_after_ms=1500)
+            return
+        self._set_history_status("Could not open session folder.", clear_after_ms=2200)
+
+    def _on_history_context_menu(self, pos):
+        item = self._table.itemAt(pos)
+        if item is not None:
+            self._table.setCurrentItem(item)
+        selected = self._selected_session()
+        if selected is None:
+            return
+        folder_text = str(selected.get("session_dir") or "").strip()
+        csv_text = str(selected.get("csv_path") or "").strip()
+        folder_ok = bool(folder_text and folder_text != "--")
+        csv_ok = bool(csv_text and csv_text != "--")
+        folder_exists = Path(folder_text).exists() if folder_ok else False
+
+        menu = QMenu(self)
+        copy_folder_action = menu.addAction("Copy folder path")
+        copy_folder_action.setEnabled(folder_ok)
+        copy_csv_action = menu.addAction("Copy CSV path")
+        copy_csv_action.setEnabled(csv_ok)
+        menu.addSeparator()
+        open_folder_action = menu.addAction("Open folder")
+        open_folder_action.setEnabled(folder_exists)
+
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if chosen == copy_folder_action:
+            self._on_copy_folder_path()
+        elif chosen == copy_csv_action:
+            self._on_copy_csv_path()
+        elif chosen == open_folder_action:
+            self._open_selected_folder()
 
     def _reload_history(self):
         if self._profile_store is None:
@@ -1040,6 +1214,49 @@ class SessionHistoryDialog(QDialog):
                 f"Removed {int(result.get('removed_rows', 0))} abandoned session(s).\n"
                 f"Deleted folders: {int(result.get('deleted_dirs', 0))}\n"
                 f"Missing folders: {int(result.get('missing_dirs', 0))}"
+            ),
+        )
+
+    def _on_generate_report_selected(self):
+        selected = self._selected_session()
+        if selected is None:
+            return
+        session_dir = Path(str(selected.get("session_dir") or "").strip())
+        if not session_dir.exists():
+            _warning_ok(self, "Session History", "Selected session folder no longer exists.")
+            return
+        csv_path = session_dir / "session.csv"
+        if not csv_path.exists():
+            _warning_ok(self, "Session History", "Selected session has no session.csv to rebuild report data.")
+            return
+        self.setEnabled(False)
+        self._set_history_status("Generating report from saved session...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            docx_path, pdf_path = generate_reports_for_session_dir(
+                session_dir,
+                profile_name=str(selected.get("profile_name") or self._profile_name),
+            )
+            self._set_history_status("Report generated from saved session.", clear_after_ms=2000)
+        except Exception as exc:
+            self._set_history_status("Report generation failed.", clear_after_ms=3000)
+            _warning_ok(
+                self,
+                "Generate Report",
+                f"Could not generate report for this session.\n\n{exc}",
+            )
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
+        _info_ok(
+            self,
+            "Report generated",
+            (
+                "Saved report artifacts in the selected session folder:\n"
+                f"- {docx_path.name}\n"
+                f"- {pdf_path.name}"
             ),
         )
 

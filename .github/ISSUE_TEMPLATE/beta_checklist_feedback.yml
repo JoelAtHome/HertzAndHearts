@@ -1,0 +1,93 @@
+name: Beta checklist feedback
+description: Submit pass/fail feedback after running the public beta checklist.
+title: "[Beta Feedback]: "
+labels:
+  - beta
+  - feedback
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing Hertz & Hearts.
+
+        Please run the checklist first:
+        - docs/PUBLIC_RELEASE_CHECKLIST.md
+
+  - type: input
+    id: app_version
+    attributes:
+      label: App version
+      placeholder: e.g., 1.0.0-beta
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating system
+      placeholder: e.g., Windows 11, Ubuntu 24.04, macOS 14
+    validations:
+      required: true
+
+  - type: input
+    id: sensor
+    attributes:
+      label: Sensor model
+      placeholder: e.g., Polar H10, Decathlon Dual HR
+    validations:
+      required: false
+
+  - type: textarea
+    id: checklist_summary
+    attributes:
+      label: Checklist results summary
+      description: Count of pass/fail/not-applicable items.
+      placeholder: |
+        Must Pass: 14 pass / 1 fail
+        Should Pass: 4 pass / 0 fail
+    validations:
+      required: true
+
+  - type: textarea
+    id: failed_items
+    attributes:
+      label: Failed checklist items
+      description: List each failed item and include exact repro steps.
+      placeholder: |
+        - Item: Core Functionality #4
+          Steps:
+          1) ...
+          2) ...
+          Expected: ...
+          Actual: ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: usability_feedback
+    attributes:
+      label: Usability feedback
+      description: Any confusion, friction, or wording issues?
+      placeholder: |
+        - ...
+    validations:
+      required: false
+
+  - type: textarea
+    id: attachments
+    attributes:
+      label: Logs, screenshots, or clips
+      description: Paste links or snippets if available.
+      render: shell
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I ran the public release checklist.
+          required: true
+        - label: I searched existing issues for duplicates.
+          required: true

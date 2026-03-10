@@ -96,8 +96,8 @@ Complexity review checklist:
 - Proposed approach: Add a way to generate reports from past sessions—e.g. via Session History (select session → "Generate report") or a small CLI/script that builds report data from CSV + manifest and writes DOCX/PDF into the session folder.
 - Effort: M
 - Impact: Med
-- Status: idea
-- Notes: Report data currently built from in-memory state; would need to derive hr_values, rmssd_values, etc. from CSV. Manifest holds session metadata.
+- Status: done
+- Notes: Implemented via Session History action (`Generate report`) that rebuilds report data from saved `session.csv` + `session_manifest.json` and writes DOCX/PDF into the selected session folder.
 
 ### Example: Save breathing presets
 - Proposed approach: Add named preset save/load controls in the main UI.
@@ -189,9 +189,9 @@ Implementation checklist:
 - [x] Implement unavailable fallback path when quality gates fail (`status=unavailable`, `quality.is_valid=false`, `quality.reason` populated).
 - [x] Populate report output `QTc (session)` from `qtc.session_value_ms` with non-diagnostic copy.
 - [x] Keep `qtc.trend.enabled=false` by default and add explicit feature toggle path for Phase 2.
-- [ ] Surface `qtc.method_suggestion` in report/UI (`suggested_method` + plain-language `reasoning`) and include non-diagnostic wording.
-- [ ] Add synthetic test vectors for known QT/RR pairs and expected QTc ranges across low/normal/high heart rates.
-- [ ] Add replay tests on recorded noisy sessions to verify stable summary and proper unavailable behavior.
+- [x] Surface `qtc.method_suggestion` in report/UI (`suggested_method` + plain-language `reasoning`) and include non-diagnostic wording.
+- [x] Add synthetic test vectors for known QT/RR pairs and expected QTc ranges across low/normal/high heart rates.
+- [x] Add replay tests on recorded noisy sessions to verify stable summary and proper unavailable behavior.
 
 ### 6) Add profile demographics metadata (age, gender, notes)
 - Problem: Profile records currently do not capture key contextual demographics needed for interpretation and reporting.
@@ -303,7 +303,7 @@ Implementation checklist:
 - Effort: S
 - Impact: High
 - Status: done
-- Notes: Duplicate `ibi_update -> update_ibis_buffer` wiring has been removed; follow-up live-stream validation is still pending to explicitly confirm 1:1 beat/update behavior under normal streaming.
+- Notes: Duplicate `ibi_update -> update_ibis_buffer` wiring has been removed. Added diagnostics regression checks covering 1:1 beat/update behavior; live-stream/manual smoke validation remains recommended.
 
 ### 21) [PERF] Move QTc compute off the UI thread
 - Problem: QTc extraction/delineation can block the GUI event loop and cause visible stutter during plotting.
@@ -428,7 +428,7 @@ Implementation checklist:
 Implementation checklist:
 - [x] Confirm all `ibi_update` wiring locations and choose single owner.
 - [x] Remove duplicate connection while preserving `hr_handler` behavior.
-- [ ] Verify `update_ibis_buffer` triggers once per beat in normal streaming.
+- [x] Verify `update_ibis_buffer` triggers once per beat in normal streaming.
 - [ ] Smoke-test HR/RMSSD/plot responsiveness and regression-risk paths (connect/reconnect/reset).
 
 ## Done

@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+
+if [ -f /usr/local/bin/hnh-kiosk-launch.sh ]; then
+  chmod 0755 /usr/local/bin/hnh-kiosk-launch.sh
+fi
+
+# Ensure writable targets exist in the image.
+mkdir -p /var/lib/hnh/sessions /var/lib/hnh/reports /var/log/hnh || true
