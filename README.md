@@ -13,15 +13,25 @@ See the full text in [`hnh/disclaimer.md`](hnh/disclaimer.md).
 
 ## Support This Project
 
-Hertz & Hearts is built and maintained by **J. Kobe Labs**.
+J. Kobe Labs is the proud developer of
+[Hertz & Hearts](https://github.com/JoelAtHome/Hertz-and-Hearts), an
+open-source HRV biofeedback application.
 
-If this project is useful to you, optional donations help fund maintenance,
-testing, documentation, and ongoing feature development.
+It helps users monitor heart rate variability and related metrics (such as
+RMSSD, LF/HF, and QTc trend context) using a Polar H10 chest strap or similar
+compatible sensors.
+
+This project is intended for research and educational use, not clinical
+diagnosis.
+
+If Hertz & Hearts aids your research or personal practice, optional donations
+help sustain maintenance, bug fixes, testing, documentation, and future
+features.
 
 - GitHub Sponsors: https://github.com/sponsors/JoelAtHome
 - Buy Me a Coffee (no GitHub login): https://buymeacoffee.com/JoelAtHome
 
-Thank you for supporting independent open-source work.
+Thank you for supporting independent open-source development.
 
 ## Project Wishlist
 
@@ -116,12 +126,14 @@ and be aware that it can take a fair bit of practice to improve.
 ## Contributing and Support
 
 Contributions are welcome (issues, code, docs, testing).
-If you prefer to support financially, optional donations are available via:
+If Hertz & Hearts aids your research or personal practice, optional donations
+help sustain maintenance, bug fixes, testing, documentation, and future
+features:
 
 - GitHub Sponsors: https://github.com/sponsors/JoelAtHome
 - Buy Me a Coffee (no GitHub login): https://buymeacoffee.com/JoelAtHome
 
-Thank you for helping sustain ongoing maintenance, testing, and documentation.
+Thank you for supporting independent open-source development.
 
 ## Report Bugs and Request Features
 

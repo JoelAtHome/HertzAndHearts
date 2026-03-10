@@ -6275,8 +6275,9 @@ class View(QMainWindow):
         root = QVBoxLayout(dlg)
         intro = QLabel(
             f"Hertz & Hearts is maintained by {_SUPPORT_BRAND_NAME}. "
-            "If this project helps your work, optional donations support "
-            "maintenance, testing, documentation, and new features."
+            "This project is intended for research and educational use, not clinical diagnosis. "
+            "If Hertz & Hearts aids your research or personal practice, optional donations support "
+            "maintenance, bug fixes, testing, documentation, and future features."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -6403,8 +6404,9 @@ class View(QMainWindow):
         msg.setWindowTitle("Support Hertz & Hearts")
         msg.setText(
             f"Hertz & Hearts is maintained by {_SUPPORT_BRAND_NAME}. "
-            "If this project helped this session, optional donations support "
-            "ongoing maintenance and improvements."
+            "This project is intended for research and educational use, not clinical diagnosis. "
+            "If Hertz & Hearts aids your research or personal practice, optional donations support "
+            "maintenance, bug fixes, testing, documentation, and future features."
         )
         if is_guest:
             msg.setInformativeText(

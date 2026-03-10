@@ -6,7 +6,7 @@
 
 This software ("**Hertz & Hearts**") is a cardiac monitoring and biofeedback research tool. It has **not** been cleared, approved, certified, or otherwise authorized as a medical device by the U.S. Food and Drug Administration (FDA), European Union authorities, or other applicable regulatory authorities.
 
-Hertz & Hearts is intended solely for **investigational and research use**.
+Hertz & Hearts is intended solely for **investigational, research, and educational use**.
 
 ## 2. No Medical Advice
 
