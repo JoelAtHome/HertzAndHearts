@@ -2,153 +2,89 @@
 
 # Hertz & Hearts
 
-A desktop application for heart rate variability (HRV) biofeedback training with ECG chest straps.
-RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT.
-This software is intended only for investigational and research use.
+Desktop HRV biofeedback app for ECG chest straps.  
 Current beta: **1.0.0-beta**.
-License: GPL-3.0 (see `LICENSE`).
 
-## Upstream Acknowledgment
+**Research use only. Not for clinical diagnosis or treatment.**
 
-Hertz & Hearts is built upon the OpenHRV project by Jan C. Brammer.
+## Start Here
 
-- Upstream project: https://github.com/JanCBrammer/OpenHRV
-- This fork/continuation remains GPL-3.0 licensed.
+- Install from source:
+  - `pip install .`
+- Launch:
+  - `hnh`
+  - or `python -m hnh.app`
+- Pair your sensor in OS Bluetooth settings, then in-app:
+  - `Scan` -> select sensor -> `Connect`
+- Start a session:
+  - `Start New` -> record -> `Stop` or `Stop & Save`
 
-## Research Use Disclaimer (Full Text)
+For full walkthrough:
+- `docs/USER_GUIDE.md`
 
-See the full text in [`hnh/disclaimer.md`](hnh/disclaimer.md).
+For troubleshooting:
+- `docs/troubleshooting.md`
 
-## Support This Project
+## Downloads
 
-J. Kobe Labs is the proud developer of
-[Hertz & Hearts](https://github.com/JoelAtHome/Hertz-and-Hearts), an
-open-source HRV biofeedback application.
+- Prebuilt artifacts are published in GitHub Releases:
+  - https://github.com/JoelAtHome/Hertz-and-Hearts/releases
 
-It helps users monitor heart rate variability and related metrics (such as
-RMSSD, LF/HF, and QTc trend context) using a Polar H10 chest strap or similar
-compatible sensors.
+## Compatible Sensors
 
-This project is intended for research and educational use, not clinical
-diagnosis.
-
-If Hertz & Hearts aids your research or personal practice, optional donations
-help sustain maintenance, bug fixes, testing, documentation, and future
-features.
-
-- GitHub Sponsors: https://github.com/sponsors/JoelAtHome
-- Buy Me a Coffee (no GitHub login): https://buymeacoffee.com/JoelAtHome
-
-Thank you for supporting independent open-source development.
-
-## Project Wishlist
-
-Track feature ideas and planned improvements in [WISHLIST.md](WISHLIST.md).
-
-## Compatible sensors
 - Polar H7, H9, H10
 - Decathlon Dual HR (model ZT26D)
 
-## Installation
+## Beta Testing
 
-It is highly recommended to install the project in a virtual Python environment,
-e.g., using [conda](https://docs.python.org/3/library/venv.html) or
-[venv](https://docs.python.org/3/library/venv.html).
-The required Python version is specified in `pyproject.toml`.
+- Tester announcement: `docs/BETA_ANNOUNCEMENT.md`
+- Tester instructions: `docs/BETA_TESTER_INSTRUCTIONS.md`
+- Public release checklist: `docs/PUBLIC_RELEASE_CHECKLIST.md`
+- BLE platform matrix: `docs/BLE_PLATFORM_VALIDATION_MATRIX.md`
 
-In your Python environment, clone the repository, and subsequently run
+## Packaging and Kiosk
 
-```
-pip install .
-```
+- Cross-platform packaging: `docs/PACKAGING.md`
+- Build kiosk ISO (WSL + CI): `docs/BUILD_KIOSK_ISO.md`
+- Kiosk architecture notes: `docs/KIOSK_USB_PLAN.md`
+- Kiosk storage layout: `docs/KIOSK_STORAGE_LAYOUT.md`
 
-in the root of the repository. Alternatively, you can skip cloning by running
+## Screenshots and Example Report Assets
 
-```
-pip install git+https://github.com/JoelAtHome/Hertz-and-Hearts.git
-```
+- Suggested screenshot/report capture plan: `docs/SCREENSHOT_AND_REPORT_ASSETS.md`
 
-You can now start the application with
+### Quick Tour (Add Images Here)
 
-```
-python -m hnh.app
-```
+Add screenshots using these file names, then they will render in README:
 
-or alternatively, with the shortcut
+- `docs/assets/app/01_main_dashboard.png`
+- `docs/assets/app/02_session_history_replay.png`
+- `docs/assets/app/03_trends_compare.png`
+- `docs/assets/app/04_qtc_window.png`
+- `docs/assets/reports/01_one_page_report.png`
 
-```
-hnh
-```
-Hertz & Hearts has been tested on Ubuntu 24.04. It should run on Windows and macOS as well.
-If you have problems running Hertz & Hearts have a look at [docs/troubleshooting.md](docs/troubleshooting.md).
+Recommended captions are in `docs/assets/CAPTIONS.md`.
 
-## Packaging
+## Upstream Acknowledgment
 
-For cross-platform package generation (Windows/macOS/Linux), see [docs/PACKAGING.md](docs/PACKAGING.md).
+Hertz & Hearts is built upon OpenHRV by Jan C. Brammer.
 
-## Ubuntu executable
+- Upstream project: https://github.com/JanCBrammer/OpenHRV
+- Continuation/fork remains GPL-3.0 licensed.
 
-On Linux, download the latest packaged build from this repository's Releases.
+## License and Disclaimer
 
-## User Guide
+- License: GPL-3.0 (`LICENSE`)
+- Full research-use disclaimer: `hnh/disclaimer.md`
 
-### Connect your ECG sensor
-First make sure the sensor is paired with your computer
-(i.e., find and pair the sensor in your computer's Bluetooth settings).
-Then search the sensor in **Hertz & Hearts** by clicking `Scan`. The addresses of all
-paired sensors show up in the drop-down menu. Select your sensor from the
-drop-down menu and click `Connect` in order to establish a connection. You can
-disconnect the sensor anytime by clicking `Disconnect`. Disconnecting is useful
-if you want to connect to another sensor, or if an error occurs with the connection.
-Should you have problems with the connection try disconnecting, and then reconnecting
-the sensor.
+## Contributing, Support, and Feedback
 
-![connect_sensor](https://github.com/JanCBrammer/OpenHRV/raw/main/docs/connect_sensor.gif)
+- Bug reports:
+  - https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=bug_report.yml
+- Feature requests:
+  - https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=feature_request.yml
+- Optional support:
+  - GitHub Sponsors: https://github.com/sponsors/JoelAtHome
+  - Buy Me a Coffee: https://buymeacoffee.com/JoelAtHome
 
-### Set an HRV target
-You can personalize the HRV target using the `Target` slider. After you've
-been training for a while you will have a good idea of what's an attainable target
-for you (this can vary depending on how much sleep or coffee you had etc.). You
-can adjust the target anytime if you find the current target too easy or difficult.
-
-![adjust_hrv_target](https://github.com/JanCBrammer/OpenHRV/raw/main/docs/adjust_hrv_target.gif)
-
-### Set a breathing pace
-The breathing pacer can help you increase your HRV. Breathe out as the blue
-disk shrinks and breathe in as it gets larger. Explore how different breathing rates
-affect your HRV by adjusting the `Rate` slider anytime during a session. Everyone
-has a personal breathing rate at which their HRV is at its highest. Usually that
-rate is somewhere between 4 and 7 breaths per minute. You can also hide the pacer
-by unchecking the `Show pacer` box if you want to practice regulating HRV without pacing.
-
-![adjust_breathing_pacer](https://github.com/JanCBrammer/OpenHRV/raw/main/docs/adjust_breathing_pacer.gif)
-
-
-### Biofeedback training
-Below you can watch heart rate variability (HRV) biofeedback training in action. Note
-how the blue heart rate curve rises and falls. These fluctuations are the "variability"
-in HRV. Your goal is to get the fluctuations large and regular. As you get better at this,
-the white HRV curve will go up. There is no "ideal" HRV, as in "everyone should achieve
-an HRV of 500 msec". Try to increase HRV relative to what you have achieved before
-and be aware that it can take a fair bit of practice to improve.
-
-![biofeedback_demo](https://github.com/JanCBrammer/OpenHRV/raw/main/docs/biofeedback_demo.gif)
-
-## Contributing and Support
-
-Contributions are welcome (issues, code, docs, testing).
-If Hertz & Hearts aids your research or personal practice, optional donations
-help sustain maintenance, bug fixes, testing, documentation, and future
-features:
-
-- GitHub Sponsors: https://github.com/sponsors/JoelAtHome
-- Buy Me a Coffee (no GitHub login): https://buymeacoffee.com/JoelAtHome
-
-Thank you for supporting independent open-source development.
-
-## Report Bugs and Request Features
-
-- Bug reports: https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=bug_report.yml
-- Feature requests: https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=feature_request.yml
-
-Please search existing issues first to avoid duplicates.
+Please search existing issues before filing a new one.

@@ -73,7 +73,9 @@ lb config \
   --mirror-bootstrap "${HNH_MIRROR}" \
   --mirror-binary "${HNH_MIRROR}" \
   --mirror-chroot-security "${HNH_MIRROR}" \
-  --debian-installer live
+  --debian-installer false \
+  --apt-source-archives false \
+  --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
 
 echo "[kiosk-iso] Starting build (this can take a while)..."
 sudo lb build

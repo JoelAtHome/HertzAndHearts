@@ -41,8 +41,8 @@ lb config \
   --mirror-bootstrap "${MIRROR_BOOTSTRAP}" \
   --mirror-binary "${MIRROR_BINARY}" \
   --mirror-chroot-security "${MIRROR_SECURITY}" \
-  --debian-installer live \
-  --apt-options "--yes -o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+  --debian-installer false \
+  --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
 
 # Apply optional kiosk customization overlay from repo.
 if [[ -d "${REPO_WIN_PATH}/kiosk/live-build" ]]; then

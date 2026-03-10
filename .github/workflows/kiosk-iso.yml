@@ -33,8 +33,8 @@ jobs:
             --mirror-bootstrap http://archive.ubuntu.com/ubuntu \
             --mirror-binary http://archive.ubuntu.com/ubuntu \
             --mirror-chroot-security http://security.ubuntu.com/ubuntu \
-            --debian-installer live \
-            --apt-options "--yes -o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+            --debian-installer false \
+            --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
 
           # Apply kiosk customization overlay (autostart + writable path prep).
           if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
@@ -63,8 +63,8 @@ jobs:
               --mirror-bootstrap http://archive.ubuntu.com/ubuntu \
               --mirror-binary http://archive.ubuntu.com/ubuntu \
               --mirror-chroot-security http://security.ubuntu.com/ubuntu \
-              --debian-installer live \
-              --apt-options "--yes -o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
+              --debian-installer false \
+              --apt-options "-o Acquire::Retries=20 -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90"
             if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
               rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
               chmod +x config/hooks/normal/*.hook.chroot || true
@@ -72,6 +72,15 @@ jobs:
             fi
             build_once
           fi
+
+      - name: Capture build logs on failure
+        if: failure()
+        run: |
+          cd "${RUNNER_TEMP}/hnh-kiosk-build" || exit 0
+          mkdir -p _failure_logs
+          cp -f *.log _failure_logs/ 2>/dev/null || true
+          cp -f config/* _failure_logs/ 2>/dev/null || true
+          cp -f auto/* _failure_logs/ 2>/dev/null || true
 
       - name: Stage ISO output
         run: |
@@ -85,6 +94,13 @@ jobs:
         with:
           name: hnh-kiosk-base.iso
           path: ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso
+
+      - name: Upload failure logs artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hnh-kiosk-build-failure-logs
+          path: ${{ runner.temp }}/hnh-kiosk-build/_failure_logs
 
       - name: Upload ISO to release
         if: github.event_name == 'release'
