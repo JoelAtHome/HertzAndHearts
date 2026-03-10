@@ -35,7 +35,7 @@ jobs:
             --mirror-binary https://archive.ubuntu.com/ubuntu \
             --mirror-chroot-security https://security.ubuntu.com/ubuntu \
             --debian-installer false \
-            --apt-options "-o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
+            --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
 
           # Apply kiosk customization overlay (autostart + writable path prep).
           if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
@@ -65,7 +65,7 @@ jobs:
               --mirror-binary https://archive.ubuntu.com/ubuntu \
               --mirror-chroot-security https://security.ubuntu.com/ubuntu \
               --debian-installer false \
-              --apt-options "-o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
+              --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
             if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
               rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
               chmod +x config/hooks/normal/*.hook.chroot || true
