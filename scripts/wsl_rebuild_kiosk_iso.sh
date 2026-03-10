@@ -36,6 +36,7 @@ lb config \
   --distribution noble \
   --architectures amd64 \
   --binary-images iso-hybrid \
+  --syslinux-theme "" \
   --apt-source-archives false \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${MIRROR_BOOTSTRAP}" \
@@ -50,10 +51,6 @@ if [[ -d "${REPO_WIN_PATH}/kiosk/live-build" ]]; then
   chmod +x config/hooks/normal/*.hook.chroot || true
   chmod +x config/includes.chroot/usr/local/bin/*.sh || true
 fi
-
-# Noble no longer ships legacy ubuntu-oneiric syslinux theme packages.
-# Clearing this keeps lb_binary_syslinux from failing.
-sed -i 's/^LB_SYSLINUX_THEME=.*/LB_SYSLINUX_THEME=""/' config/binary || true
 
 echo "[hnh-kiosk] Building ISO (this may take a while)..."
 sudo lb build
