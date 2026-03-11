@@ -18,6 +18,13 @@ MIRROR_SECURITY="https://security.ubuntu.com/ubuntu"
 echo "[hnh-kiosk] Installing/updating required tools..."
 sudo apt update
 sudo apt install -y xorriso squashfs-tools syslinux-utils live-build wget curl git rsync || true
+if ! command -v isohybrid >/dev/null 2>&1 && command -v isohybrid.pl >/dev/null 2>&1; then
+  sudo ln -sf "$(command -v isohybrid.pl)" /usr/local/bin/isohybrid
+fi
+if ! command -v isohybrid >/dev/null 2>&1; then
+  echo "[hnh-kiosk] ERROR: isohybrid not found after dependency install." >&2
+  exit 1
+fi
 
 # Reduce apt index churn/mismatch risk in flaky mirror windows.
 printf 'Acquire::Languages "none";\nAcquire::Retries "20";\nAcquire::http::Timeout "90";\nAcquire::https::Timeout "90";\n' \

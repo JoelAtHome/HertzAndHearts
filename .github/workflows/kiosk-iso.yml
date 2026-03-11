@@ -18,8 +18,13 @@ jobs:
 
       - name: Install kiosk ISO build dependencies
         run: |
+          set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y live-build xorriso squashfs-tools syslinux-utils wget curl git rsync
+          if ! command -v isohybrid >/dev/null 2>&1 && command -v isohybrid.pl >/dev/null 2>&1; then
+            sudo ln -sf "$(command -v isohybrid.pl)" /usr/local/bin/isohybrid
+          fi
+          command -v isohybrid >/dev/null 2>&1 || { echo "isohybrid not found after dependency install"; exit 4; }
 
       - name: Configure live-build
         run: |

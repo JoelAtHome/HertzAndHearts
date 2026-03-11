@@ -32,6 +32,10 @@ if [[ "${INSTALL_DEPS}" == "1" ]]; then
   sudo apt install -y xorriso squashfs-tools syslinux-utils live-build wget curl git rsync
 fi
 
+if ! command -v isohybrid >/dev/null 2>&1 && command -v isohybrid.pl >/dev/null 2>&1; then
+  sudo ln -sf "$(command -v isohybrid.pl)" /usr/local/bin/isohybrid
+fi
+
 if ! command -v lb >/dev/null 2>&1; then
   echo "[kiosk-iso] live-build (lb) not found. Run with --install-deps first." >&2
   exit 1
@@ -39,6 +43,11 @@ fi
 
 if ! command -v xorriso >/dev/null 2>&1; then
   echo "[kiosk-iso] xorriso not found. Run with --install-deps first." >&2
+  exit 1
+fi
+
+if ! command -v isohybrid >/dev/null 2>&1; then
+  echo "[kiosk-iso] isohybrid not found. Install syslinux-utils (or provide isohybrid.pl)." >&2
   exit 1
 fi
 
