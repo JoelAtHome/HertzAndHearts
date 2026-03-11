@@ -19,7 +19,7 @@ This beta is mainly for validating:
 I would appreciate testers willing to run a structured checklist and file actionable issues.
 
 Project:
-- https://github.com/JoelAtHome/Hertz-and-Hearts
+- https://github.com/JoelAtHome/HertzAndHearts
 
 Tester checklist:
 - `docs/PUBLIC_RELEASE_CHECKLIST.md`

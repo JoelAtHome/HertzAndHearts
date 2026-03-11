@@ -19,7 +19,7 @@ If you want to help:
 3. Submit findings via GitHub issue (bug template or beta checklist template).
 
 Project:
-- GitHub: https://github.com/JoelAtHome/Hertz-and-Hearts
+- GitHub: https://github.com/JoelAtHome/HertzAndHearts
 
 What I especially want tested:
 - connect -> record -> stop/save flow

@@ -28,7 +28,7 @@ For troubleshooting:
 ## Downloads
 
 - Prebuilt artifacts are published in GitHub Releases:
-  - https://github.com/JoelAtHome/Hertz-and-Hearts/releases
+  - https://github.com/JoelAtHome/HertzAndHearts/releases
 
 ## Compatible Sensors
 
@@ -96,9 +96,9 @@ Hertz & Hearts is built upon OpenHRV by Jan C. Brammer.
 ## Contributing, Support, and Feedback
 
 - Bug reports:
-  - https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=bug_report.yml
+  - https://github.com/JoelAtHome/HertzAndHearts/issues/new?template=bug_report.yml
 - Feature requests:
-  - https://github.com/JoelAtHome/Hertz-and-Hearts/issues/new?template=feature_request.yml
+  - https://github.com/JoelAtHome/HertzAndHearts/issues/new?template=feature_request.yml
 - Optional support:
   - GitHub Sponsors: https://github.com/sponsors/JoelAtHome
   - Buy Me a Coffee: https://buymeacoffee.com/JoelAtHome

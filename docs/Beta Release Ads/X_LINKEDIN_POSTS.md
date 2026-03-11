@@ -9,7 +9,7 @@ Looking for beta testers to run our checklist + submit issues.
 
 Research use only. Not for diagnosis/treatment.
 
-Repo: https://github.com/JoelAtHome/Hertz-and-Hearts
+Repo: https://github.com/JoelAtHome/HertzAndHearts
 
 ## X (thread opener)
 
@@ -21,7 +21,7 @@ If you are into HRV, recovery, biofeedback, or coaching workflows, I would love 
 Checklist + issue templates are in the repo.
 
 Research use only. Not clinical.
-https://github.com/JoelAtHome/Hertz-and-Hearts
+https://github.com/JoelAtHome/HertzAndHearts
 
 ## LinkedIn (longer)
 
@@ -36,7 +36,7 @@ If you are willing to help test:
 3) Submit findings via issue templates
 
 Project:
-https://github.com/JoelAtHome/Hertz-and-Hearts
+https://github.com/JoelAtHome/HertzAndHearts
 
 This is **research use software** and is **not intended for clinical diagnosis or treatment**.
 
