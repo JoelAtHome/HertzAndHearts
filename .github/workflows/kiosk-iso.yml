@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install kiosk ISO build dependencies
         run: |
@@ -101,14 +101,14 @@ jobs:
           cp -f "${ISO_PATH}" dist/hnh-kiosk-base.iso
 
       - name: Upload ISO artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: hnh-kiosk-base.iso
           path: ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso
 
       - name: Upload failure logs artifact
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: hnh-kiosk-build-failure-logs
           path: ${{ runner.temp }}/hnh-kiosk-build/_failure_logs

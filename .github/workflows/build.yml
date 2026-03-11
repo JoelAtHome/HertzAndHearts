@@ -22,7 +22,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: actions/setup-python@v5
         with:
@@ -63,14 +63,14 @@ jobs:
           iscc "/DMyAppVersion=$ver" installer.iss
 
       - name: Upload platform artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.package_name }}
           path: dist/${{ matrix.package_name }}
 
       - name: Upload Windows setup artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: Hertz-and-Hearts-Windows-Setup
           path: installer_output/*.exe

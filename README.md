@@ -1,4 +1,4 @@
-<img src="docs/logo.png" width="125" height="125" />
+<img src="./docs/logo.png" width="125" height="125" />
 
 # Hertz & Hearts
 
@@ -53,17 +53,33 @@ For troubleshooting:
 
 - Suggested screenshot/report capture plan: `docs/SCREENSHOT_AND_REPORT_ASSETS.md`
 
-### Quick Tour (Add Images Here)
+### Quick Tour
 
-Add screenshots using these file names, then they will render in README:
+**1) Live session dashboard with ECG monitor**
 
-- `docs/assets/app/01_main_dashboard.png`
-- `docs/assets/app/02_session_history_replay.png`
-- `docs/assets/app/03_trends_compare.png`
-- `docs/assets/app/04_qtc_window.png`
-- `docs/assets/reports/01_one_page_report.png`
+![Live session dashboard with ECG monitor](./docs/pics/main_screen_w_ecg.png)
 
-Recommended captions are in `docs/assets/CAPTIONS.md`.
+**2) Session Trends for cross-session comparison**
+
+![Session trends view with HR, RMSSD, SDNN, and QTc](./docs/pics/trends.png)
+
+**3) QTc monitor with uncertainty band and threshold context**
+
+![QTc monitor with rolling median and quality context](./docs/pics/QTc.png)
+
+**4) Poincare plot for beat-to-beat variability shape**
+
+![Poincare plot showing RR(n) vs RR(n+1)](./docs/pics/poincare_plot.png)
+
+**5) ECG monitor (streaming view)**
+
+![ECG monitor streaming view](./docs/pics/ecg_lone.png)
+
+**6) ECG monitor (frozen view with cursor measurement)**
+
+![ECG monitor frozen view with cursor-based interval measurement](./docs/pics/ecg_frozen.png)
+
+For reusable caption text, see `docs/assets/CAPTIONS.md`.
 
 ## Upstream Acknowledgment
 
