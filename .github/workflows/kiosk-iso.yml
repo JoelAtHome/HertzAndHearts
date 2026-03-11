@@ -102,12 +102,15 @@ jobs:
           ls -lh "${ISO_PATH}"
           mkdir -p dist
           cp -f "${ISO_PATH}" dist/hnh-kiosk-base.iso
+          (cd dist && sha256sum hnh-kiosk-base.iso > hnh-kiosk-base.iso.sha256)
 
-      - name: Upload ISO artifact
+      - name: Upload ISO artifacts
         uses: actions/upload-artifact@v5
         with:
-          name: hnh-kiosk-base.iso
-          path: ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso
+          name: hnh-kiosk-artifacts
+          path: |
+            ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso
+            ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso.sha256
 
       - name: Upload failure logs artifact
         if: failure()
@@ -121,4 +124,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.ref_name }}" "${RUNNER_TEMP}/hnh-kiosk-build/dist/hnh-kiosk-base.iso" --clobber
+          gh release upload "${{ github.ref_name }}" \
+            "${RUNNER_TEMP}/hnh-kiosk-build/dist/hnh-kiosk-base.iso" \
+            "${RUNNER_TEMP}/hnh-kiosk-build/dist/hnh-kiosk-base.iso.sha256" \
+            --clobber
