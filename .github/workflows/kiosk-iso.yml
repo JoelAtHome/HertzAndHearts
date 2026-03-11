@@ -115,19 +115,33 @@ jobs:
         run: |
           set -euo pipefail
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
+          pwd > _failure_logs/stage-cwd.txt
+          ls -la > _failure_logs/stage-ls-root.txt
+          ls -la .build > _failure_logs/stage-ls-dotbuild.txt 2>/dev/null || true
+          ls -la binary > _failure_logs/stage-ls-binary-dir.txt 2>/dev/null || true
+          find . -maxdepth 5 -type f > _failure_logs/stage-files-maxdepth5.txt 2>/dev/null || true
           # Prefer final live-build outputs; avoid intermediate chroot artifacts.
           ISO_PATH=""
-          for CANDIDATE in "./binary.iso" "./live-image-amd64.iso" "./binary.hybrid.iso" "./live-image-amd64.hybrid.iso"; do
+          for CANDIDATE in "./binary.iso" "./live-image-amd64.iso" "./binary.hybrid.iso" "./live-image-amd64.hybrid.iso" "./.build/binary.iso" "./.build/live-image-amd64.iso" "./.build/binary.hybrid.iso" "./.build/live-image-amd64.hybrid.iso"; do
             if [ -f "${CANDIDATE}" ]; then
               ISO_PATH="${CANDIDATE}"
               break
             fi
           done
           if [ -z "${ISO_PATH}" ]; then
-            ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" -not -path "./chroot/*" -not -path "./.build/*" -print -quit 2>/dev/null || true)"
+            ISO_PATH="$(find . -maxdepth 5 -type f -name "*.iso" -not -path "./chroot/*" -print -quit 2>/dev/null || true)"
           fi
-          IMG_PATH="$(find . -maxdepth 3 -type f -name "*.img" -not -path "./chroot/*" -not -path "./.build/*" -print -quit 2>/dev/null || true)"
-          find . -maxdepth 3 -type f -name "*.iso" -not -path "./.build/*" -print > _failure_logs/iso-paths.txt 2>/dev/null || true
+          IMG_PATH=""
+          for CANDIDATE in "./binary.img" "./live-image-amd64.img" "./.build/binary.img" "./.build/live-image-amd64.img"; do
+            if [ -f "${CANDIDATE}" ]; then
+              IMG_PATH="${CANDIDATE}"
+              break
+            fi
+          done
+          if [ -z "${IMG_PATH}" ]; then
+            IMG_PATH="$(find . -maxdepth 5 -type f -name "*.img" -not -path "./chroot/*" -print -quit 2>/dev/null || true)"
+          fi
+          find . -maxdepth 5 -type f -name "*.iso" -print > _failure_logs/iso-paths.txt 2>/dev/null || true
           if [ -z "${ISO_PATH}" ] && [ -z "${IMG_PATH}" ]; then
             echo "No ISO/IMG produced by live-build." >&2
             exit 2
