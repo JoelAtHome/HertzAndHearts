@@ -34,15 +34,15 @@ fi
 
 if ! command -v isohybrid >/dev/null 2>&1; then
   if command -v isohybrid.pl >/dev/null 2>&1; then
-    sudo ln -sf "$(command -v isohybrid.pl)" /usr/local/bin/isohybrid
+    sudo ln -sf "$(command -v isohybrid.pl)" /usr/bin/isohybrid
   else
-    sudo tee /usr/local/bin/isohybrid >/dev/null <<'EOF'
+    sudo tee /usr/bin/isohybrid >/dev/null <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 echo "[kiosk-iso] WARN: isohybrid binary unavailable; skipping legacy post-process." >&2
 exit 0
 EOF
-    sudo chmod +x /usr/local/bin/isohybrid
+    sudo chmod +x /usr/bin/isohybrid
   fi
 fi
 
