@@ -48,7 +48,7 @@ lb config \
   --mode ubuntu \
   --distribution noble \
   --architectures amd64 \
-  --binary-images "iso,hdd" \
+  --binary-images "iso hdd" \
   --bootloader grub-efi \
   --apt-source-archives false \
   --source false \

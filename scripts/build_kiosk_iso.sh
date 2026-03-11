@@ -82,7 +82,7 @@ lb config \
   --mode ubuntu \
   --distribution "${HNH_DISTRO}" \
   --architectures "${HNH_ARCH}" \
-  --binary-images "iso,hdd" \
+  --binary-images "iso hdd" \
   --bootloader grub-efi \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${HNH_MIRROR}" \
