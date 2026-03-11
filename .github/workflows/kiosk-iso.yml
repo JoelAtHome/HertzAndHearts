@@ -54,6 +54,7 @@ jobs:
             --bootloader grub-efi \
             --archive-areas "main restricted universe multiverse" \
             --apt-source-archives false \
+            --source false \
             --mirror-bootstrap https://archive.ubuntu.com/ubuntu \
             --mirror-binary https://archive.ubuntu.com/ubuntu \
             --mirror-chroot-security https://security.ubuntu.com/ubuntu \
@@ -85,6 +86,7 @@ jobs:
               --bootloader grub-efi \
               --archive-areas "main restricted universe multiverse" \
               --apt-source-archives false \
+              --source false \
               --mirror-bootstrap https://archive.ubuntu.com/ubuntu \
               --mirror-binary https://archive.ubuntu.com/ubuntu \
               --mirror-chroot-security https://security.ubuntu.com/ubuntu \
@@ -115,17 +117,17 @@ jobs:
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
           # Prefer final live-build outputs; avoid intermediate chroot artifacts.
           ISO_PATH=""
-          for CANDIDATE in "./binary.hybrid.iso" "./live-image-amd64.hybrid.iso"; do
+          for CANDIDATE in "./binary.iso" "./live-image-amd64.iso" "./binary.hybrid.iso" "./live-image-amd64.hybrid.iso"; do
             if [ -f "${CANDIDATE}" ]; then
               ISO_PATH="${CANDIDATE}"
               break
             fi
           done
           if [ -z "${ISO_PATH}" ]; then
-            ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" -not -path "./chroot/*" -not -path "./.build/*" 2>/dev/null | head -n 1)"
+            ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" -not -path "./chroot/*" -not -path "./.build/*" -print -quit 2>/dev/null || true)"
           fi
-          IMG_PATH="$(find . -maxdepth 3 -type f -name "*.img" -not -path "./chroot/*" -not -path "./.build/*" 2>/dev/null | head -n 1)"
-          find . -maxdepth 3 -type f -name "*.iso" -not -path "./.build/*" 2>/dev/null | tee _failure_logs/iso-paths.txt
+          IMG_PATH="$(find . -maxdepth 3 -type f -name "*.img" -not -path "./chroot/*" -not -path "./.build/*" -print -quit 2>/dev/null || true)"
+          find . -maxdepth 3 -type f -name "*.iso" -not -path "./.build/*" -print > _failure_logs/iso-paths.txt 2>/dev/null || true
           if [ -z "${ISO_PATH}" ] && [ -z "${IMG_PATH}" ]; then
             echo "No ISO/IMG produced by live-build." >&2
             exit 2

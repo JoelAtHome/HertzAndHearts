@@ -89,6 +89,7 @@ lb config \
   --mirror-binary "${HNH_MIRROR}" \
   --mirror-chroot-security "${HNH_MIRROR}" \
   --debian-installer false \
+  --source false \
   --apt-source-archives false \
   --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
 

@@ -51,6 +51,7 @@ lb config \
   --binary-images "iso,hdd" \
   --bootloader grub-efi \
   --apt-source-archives false \
+  --source false \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${MIRROR_BOOTSTRAP}" \
   --mirror-binary "${MIRROR_BINARY}" \
