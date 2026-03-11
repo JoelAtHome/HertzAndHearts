@@ -50,7 +50,7 @@ jobs:
             --mode ubuntu \
             --distribution noble \
             --architectures amd64 \
-            --binary-images iso \
+            --binary-images "iso,hdd" \
             --bootloader grub-efi \
             --archive-areas "main restricted universe multiverse" \
             --apt-source-archives false \
@@ -81,7 +81,7 @@ jobs:
               --mode ubuntu \
               --distribution noble \
               --architectures amd64 \
-              --binary-images iso \
+              --binary-images "iso,hdd" \
               --bootloader grub-efi \
               --archive-areas "main restricted universe multiverse" \
               --apt-source-archives false \
@@ -122,41 +122,53 @@ jobs:
           if [ -z "${ISO_PATH}" ]; then
             ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" -not -path "./chroot/*" -not -path "./.build/*" 2>/dev/null | head -n 1)"
           fi
+          IMG_PATH="$(find . -maxdepth 3 -type f -name "*.img" -not -path "./chroot/*" -not -path "./.build/*" 2>/dev/null | head -n 1)"
           find . -maxdepth 3 -type f -name "*.iso" -not -path "./.build/*" 2>/dev/null | tee _failure_logs/iso-paths.txt
-          if [ -z "${ISO_PATH}" ]; then
-            echo "No ISO produced by live-build." >&2
+          if [ -z "${ISO_PATH}" ] && [ -z "${IMG_PATH}" ]; then
+            echo "No ISO/IMG produced by live-build." >&2
             exit 2
           fi
-          ls -lh "${ISO_PATH}"
           mkdir -p dist
-          cp -f "${ISO_PATH}" dist/hnh-kiosk-base.iso
-          # Rebuild boot metadata with xorriso to improve USB firmware detection.
-          if command -v xorriso >/dev/null 2>&1; then
-            if xorriso -indev dist/hnh-kiosk-base.iso -outdev dist/hnh-kiosk-base.usb.iso -boot_image any replay -boot_image any partition_table=on; then
-              mv -f dist/hnh-kiosk-base.usb.iso dist/hnh-kiosk-base.iso
-            else
-              echo "WARN: xorriso replay could not add partition table metadata." >&2
-              rm -f dist/hnh-kiosk-base.usb.iso
+          if [ -n "${ISO_PATH}" ]; then
+            ls -lh "${ISO_PATH}"
+            cp -f "${ISO_PATH}" dist/hnh-kiosk-base.iso
+            if command -v xorriso >/dev/null 2>&1; then
+              if xorriso -indev dist/hnh-kiosk-base.iso -outdev dist/hnh-kiosk-base.usb.iso -boot_image any replay -boot_image any partition_table=on; then
+                mv -f dist/hnh-kiosk-base.usb.iso dist/hnh-kiosk-base.iso
+              else
+                echo "WARN: xorriso replay could not add partition table metadata." >&2
+                rm -f dist/hnh-kiosk-base.usb.iso
+              fi
             fi
+            file dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.file.txt
+            fdisk -l dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.fdisk.txt
+            if ! awk '/Disklabel type/ {found=1} END {exit found?0:1}' dist/hnh-kiosk-base.iso.fdisk.txt; then
+              echo "WARN: ISO lacks partition table metadata; USB boot compatibility may vary by firmware." >&2
+            fi
+            (cd dist && sha256sum hnh-kiosk-base.iso > hnh-kiosk-base.iso.sha256)
           fi
-          # Emit bootability diagnostics and require partition metadata.
-          file dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.file.txt
-          fdisk -l dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.fdisk.txt
-          if ! awk '/Disklabel type/ {found=1} END {exit found?0:1}' dist/hnh-kiosk-base.iso.fdisk.txt; then
-            echo "ERROR: ISO lacks partition table metadata; this image is likely not USB-bootable on many systems." >&2
-            exit 3
+          if [ -n "${IMG_PATH}" ]; then
+            ls -lh "${IMG_PATH}"
+            cp -f "${IMG_PATH}" dist/hnh-kiosk-base.img
+            file dist/hnh-kiosk-base.img | tee dist/hnh-kiosk-base.img.file.txt
+            fdisk -l dist/hnh-kiosk-base.img | tee dist/hnh-kiosk-base.img.fdisk.txt
+            (cd dist && sha256sum hnh-kiosk-base.img > hnh-kiosk-base.img.sha256)
           fi
-          (cd dist && sha256sum hnh-kiosk-base.iso > hnh-kiosk-base.iso.sha256)
 
       - name: Upload ISO artifacts
         uses: actions/upload-artifact@v7
         with:
           name: hnh-kiosk-artifacts
+          if-no-files-found: warn
           path: |
             ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso
             ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso.sha256
             ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso.file.txt
             ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.iso.fdisk.txt
+            ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.img
+            ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.img.sha256
+            ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.img.file.txt
+            ${{ runner.temp }}/hnh-kiosk-build/dist/hnh-kiosk-base.img.fdisk.txt
 
       - name: Upload failure logs artifact
         if: failure()

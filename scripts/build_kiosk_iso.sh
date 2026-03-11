@@ -82,7 +82,7 @@ lb config \
   --mode ubuntu \
   --distribution "${HNH_DISTRO}" \
   --architectures "${HNH_ARCH}" \
-  --binary-images iso \
+  --binary-images "iso,hdd" \
   --bootloader grub-efi \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${HNH_MIRROR}" \
@@ -102,27 +102,48 @@ for CANDIDATE in "${BUILD_ROOT}/binary.iso" "${BUILD_ROOT}/live-image-${HNH_ARCH
     break
   fi
 done
-if [[ -z "${ISO_PATH}" ]]; then
-  echo "[kiosk-iso] Build completed but no ISO output was found." >&2
+IMG_PATH=""
+for CANDIDATE in "${BUILD_ROOT}/binary.img" "${BUILD_ROOT}/live-image-${HNH_ARCH}.img"; do
+  if [[ -f "${CANDIDATE}" ]]; then
+    IMG_PATH="${CANDIDATE}"
+    break
+  fi
+done
+if [[ -z "${ISO_PATH}" && -z "${IMG_PATH}" ]]; then
+  echo "[kiosk-iso] Build completed but no ISO/IMG output was found." >&2
   exit 1
 fi
 
 OUT_DIR="${REPO_ROOT}/dist"
 mkdir -p "${OUT_DIR}"
-OUT_ISO="${OUT_DIR}/hnh-kiosk-base-${PROJECT_VERSION}.iso"
-cp -f "${ISO_PATH}" "${OUT_ISO}"
-if command -v xorriso >/dev/null 2>&1; then
-  TMP_USB_ISO="${OUT_ISO%.iso}.usb.iso"
-  if xorriso -indev "${OUT_ISO}" -outdev "${TMP_USB_ISO}" -boot_image any replay -boot_image any partition_table=on; then
-    mv -f "${TMP_USB_ISO}" "${OUT_ISO}"
-  else
-    echo "[kiosk-iso] WARN: xorriso replay could not add partition table metadata."
-    rm -f "${TMP_USB_ISO}"
+if [[ -n "${ISO_PATH}" ]]; then
+  OUT_ISO="${OUT_DIR}/hnh-kiosk-base-${PROJECT_VERSION}.iso"
+  cp -f "${ISO_PATH}" "${OUT_ISO}"
+  if command -v xorriso >/dev/null 2>&1; then
+    TMP_USB_ISO="${OUT_ISO%.iso}.usb.iso"
+    if xorriso -indev "${OUT_ISO}" -outdev "${TMP_USB_ISO}" -boot_image any replay -boot_image any partition_table=on; then
+      mv -f "${TMP_USB_ISO}" "${OUT_ISO}"
+    else
+      echo "[kiosk-iso] WARN: xorriso replay could not add partition table metadata."
+      rm -f "${TMP_USB_ISO}"
+    fi
   fi
+  file "${OUT_ISO}"
+  fdisk -l "${OUT_ISO}" || true
+  sha256sum "${OUT_ISO}" > "${OUT_ISO}.sha256"
 fi
-file "${OUT_ISO}"
-fdisk -l "${OUT_ISO}" || true
-sha256sum "${OUT_ISO}" > "${OUT_ISO}.sha256"
+if [[ -n "${IMG_PATH}" ]]; then
+  OUT_IMG="${OUT_DIR}/hnh-kiosk-base-${PROJECT_VERSION}.img"
+  cp -f "${IMG_PATH}" "${OUT_IMG}"
+  file "${OUT_IMG}"
+  fdisk -l "${OUT_IMG}" || true
+  sha256sum "${OUT_IMG}" > "${OUT_IMG}.sha256"
+fi
 
 echo "[kiosk-iso] Done."
-echo "[kiosk-iso] Output ISO: ${OUT_ISO}"
+if [[ -n "${ISO_PATH}" ]]; then
+  echo "[kiosk-iso] Output ISO: ${OUT_ISO}"
+fi
+if [[ -n "${IMG_PATH}" ]]; then
+  echo "[kiosk-iso] Output IMG: ${OUT_IMG}"
+fi

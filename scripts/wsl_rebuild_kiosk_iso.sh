@@ -48,7 +48,7 @@ lb config \
   --mode ubuntu \
   --distribution noble \
   --architectures amd64 \
-  --binary-images iso \
+  --binary-images "iso,hdd" \
   --bootloader grub-efi \
   --apt-source-archives false \
   --archive-areas "main restricted universe multiverse" \
@@ -75,25 +75,45 @@ for CANDIDATE in "${BUILD_ROOT}/binary.iso" "${BUILD_ROOT}/live-image-amd64.iso"
     break
   fi
 done
-if [[ -z "${ISO_PATH}" ]]; then
-  echo "[hnh-kiosk] ERROR: no ISO output was produced." >&2
+IMG_PATH=""
+for CANDIDATE in "${BUILD_ROOT}/binary.img" "${BUILD_ROOT}/live-image-amd64.img"; do
+  if [[ -f "${CANDIDATE}" ]]; then
+    IMG_PATH="${CANDIDATE}"
+    break
+  fi
+done
+if [[ -z "${ISO_PATH}" && -z "${IMG_PATH}" ]]; then
+  echo "[hnh-kiosk] ERROR: no ISO/IMG output was produced." >&2
   exit 1
 fi
 
 mkdir -p "${DIST_OUT}"
-cp -f "${ISO_PATH}" "${DIST_OUT}/hnh-kiosk-base.iso"
-if command -v xorriso >/dev/null 2>&1; then
-  TMP_USB_ISO="${DIST_OUT}/hnh-kiosk-base.usb.iso"
-  if xorriso -indev "${DIST_OUT}/hnh-kiosk-base.iso" -outdev "${TMP_USB_ISO}" -boot_image any replay -boot_image any partition_table=on; then
-    mv -f "${TMP_USB_ISO}" "${DIST_OUT}/hnh-kiosk-base.iso"
-  else
-    echo "[hnh-kiosk] WARN: xorriso replay could not add partition table metadata."
-    rm -f "${TMP_USB_ISO}"
+if [[ -n "${ISO_PATH}" ]]; then
+  cp -f "${ISO_PATH}" "${DIST_OUT}/hnh-kiosk-base.iso"
+  if command -v xorriso >/dev/null 2>&1; then
+    TMP_USB_ISO="${DIST_OUT}/hnh-kiosk-base.usb.iso"
+    if xorriso -indev "${DIST_OUT}/hnh-kiosk-base.iso" -outdev "${TMP_USB_ISO}" -boot_image any replay -boot_image any partition_table=on; then
+      mv -f "${TMP_USB_ISO}" "${DIST_OUT}/hnh-kiosk-base.iso"
+    else
+      echo "[hnh-kiosk] WARN: xorriso replay could not add partition table metadata."
+      rm -f "${TMP_USB_ISO}"
+    fi
   fi
+  file "${DIST_OUT}/hnh-kiosk-base.iso"
+  fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
+  sha256sum "${DIST_OUT}/hnh-kiosk-base.iso" > "${DIST_OUT}/hnh-kiosk-base.iso.sha256"
 fi
-file "${DIST_OUT}/hnh-kiosk-base.iso"
-fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
-sha256sum "${DIST_OUT}/hnh-kiosk-base.iso" > "${DIST_OUT}/hnh-kiosk-base.iso.sha256"
+if [[ -n "${IMG_PATH}" ]]; then
+  cp -f "${IMG_PATH}" "${DIST_OUT}/hnh-kiosk-base.img"
+  file "${DIST_OUT}/hnh-kiosk-base.img"
+  fdisk -l "${DIST_OUT}/hnh-kiosk-base.img" || true
+  sha256sum "${DIST_OUT}/hnh-kiosk-base.img" > "${DIST_OUT}/hnh-kiosk-base.img.sha256"
+fi
 
 echo "[hnh-kiosk] SUCCESS"
-echo "[hnh-kiosk] ISO copied to: ${DIST_OUT}/hnh-kiosk-base.iso"
+if [[ -n "${ISO_PATH}" ]]; then
+  echo "[hnh-kiosk] ISO copied to: ${DIST_OUT}/hnh-kiosk-base.iso"
+fi
+if [[ -n "${IMG_PATH}" ]]; then
+  echo "[hnh-kiosk] IMG copied to: ${DIST_OUT}/hnh-kiosk-base.img"
+fi
