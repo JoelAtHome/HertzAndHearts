@@ -119,7 +119,18 @@ if command -v isohybrid >/dev/null 2>&1; then
   fi
 fi
 file "${OUT_ISO}"
-fdisk -l "${OUT_ISO}" || true
+if ! fdisk -l "${OUT_ISO}"; then
+  true
+fi
+if ! fdisk -l "${OUT_ISO}" 2>/dev/null | awk '/Disklabel type/ {found=1} END {exit found?0:1}'; then
+  echo "[kiosk-iso] WARN: missing partition table metadata; attempting xorriso post-fix."
+  xorriso -indev "${OUT_ISO}" \
+    -outdev "${OUT_ISO}" \
+    -boot_image any replay \
+    -boot_image any partition_table=on || true
+  file "${OUT_ISO}"
+  fdisk -l "${OUT_ISO}" || true
+fi
 sha256sum "${OUT_ISO}" > "${OUT_ISO}.sha256"
 
 echo "[kiosk-iso] Done."

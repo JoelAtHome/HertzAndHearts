@@ -90,7 +90,18 @@ if command -v isohybrid >/dev/null 2>&1; then
   fi
 fi
 file "${DIST_OUT}/hnh-kiosk-base.iso"
-fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
+if ! fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso"; then
+  true
+fi
+if ! fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" 2>/dev/null | awk '/Disklabel type/ {found=1} END {exit found?0:1}'; then
+  echo "[hnh-kiosk] WARN: missing partition table metadata; attempting xorriso post-fix."
+  xorriso -indev "${DIST_OUT}/hnh-kiosk-base.iso" \
+    -outdev "${DIST_OUT}/hnh-kiosk-base.iso" \
+    -boot_image any replay \
+    -boot_image any partition_table=on || true
+  file "${DIST_OUT}/hnh-kiosk-base.iso"
+  fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
+fi
 sha256sum "${DIST_OUT}/hnh-kiosk-base.iso" > "${DIST_OUT}/hnh-kiosk-base.iso.sha256"
 
 echo "[hnh-kiosk] SUCCESS"
