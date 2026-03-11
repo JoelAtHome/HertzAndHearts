@@ -70,7 +70,7 @@ jobs:
           fi
       - name: Build ISO (retry once on transient mirror issues)
         run: |
-          set -e
+          set -euo pipefail
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
           build_once() {
             sudo lb build 2>&1 | tee _failure_logs/lb-build.log
