@@ -66,14 +66,14 @@ jobs:
           iscc "/DMyAppVersion=$ver" installer.iss
 
       - name: Upload platform artifact
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.package_name }}
           path: dist/${{ matrix.package_name }}
 
       - name: Upload Windows setup artifact
         if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: Hertz-and-Hearts-Windows-Setup
           path: installer_output/*.exe
