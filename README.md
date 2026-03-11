@@ -9,11 +9,14 @@ Current beta: **1.0.0-beta**.
 
 ## Start Here
 
-- Install from source:
-  - `pip install .`
+- Recommended for most users (Windows/macOS/Linux):
+  - Download a prebuilt package from Releases:
+    - https://github.com/JoelAtHome/HertzAndHearts/releases
+- Install from source (all platforms):
+  - `python -m pip install .`
 - Launch:
-  - `hnh`
-  - or `python -m hnh.app`
+  - Windows: `py -3 -m hnh.app` (or `python -m hnh.app`)
+  - macOS/Linux: `python3 -m hnh.app` (or `hnh` if on PATH)
 - Pair your sensor in OS Bluetooth settings, then in-app:
   - `Scan` -> select sensor -> `Connect`
 - Start a session:
