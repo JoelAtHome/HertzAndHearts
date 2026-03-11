@@ -48,7 +48,7 @@ lb config \
   --mode ubuntu \
   --distribution noble \
   --architectures amd64 \
-  --binary-images iso-hybrid \
+  --binary-images iso \
   --bootloader grub-efi \
   --apt-source-archives false \
   --archive-areas "main restricted universe multiverse" \
@@ -68,9 +68,15 @@ fi
 echo "[hnh-kiosk] Building ISO (this may take a while)..."
 sudo lb build
 
-ISO_PATH="${BUILD_ROOT}/live-image-amd64.hybrid.iso"
-if [[ ! -f "${ISO_PATH}" ]]; then
-  echo "[hnh-kiosk] ERROR: ISO not produced at ${ISO_PATH}" >&2
+ISO_PATH=""
+for CANDIDATE in "${BUILD_ROOT}/binary.iso" "${BUILD_ROOT}/live-image-amd64.iso" "${BUILD_ROOT}/live-image-amd64.hybrid.iso"; do
+  if [[ -f "${CANDIDATE}" ]]; then
+    ISO_PATH="${CANDIDATE}"
+    break
+  fi
+done
+if [[ -z "${ISO_PATH}" ]]; then
+  echo "[hnh-kiosk] ERROR: no ISO output was produced." >&2
   exit 1
 fi
 

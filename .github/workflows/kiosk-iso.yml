@@ -50,7 +50,7 @@ jobs:
             --mode ubuntu \
             --distribution noble \
             --architectures amd64 \
-            --binary-images iso-hybrid \
+            --binary-images iso \
             --bootloader grub-efi \
             --archive-areas "main restricted universe multiverse" \
             --apt-source-archives false \
@@ -81,7 +81,7 @@ jobs:
               --mode ubuntu \
               --distribution noble \
               --architectures amd64 \
-              --binary-images iso-hybrid \
+              --binary-images iso \
               --bootloader grub-efi \
               --archive-areas "main restricted universe multiverse" \
               --apt-source-archives false \

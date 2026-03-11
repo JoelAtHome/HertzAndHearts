@@ -82,7 +82,7 @@ lb config \
   --mode ubuntu \
   --distribution "${HNH_DISTRO}" \
   --architectures "${HNH_ARCH}" \
-  --binary-images iso-hybrid \
+  --binary-images iso \
   --bootloader grub-efi \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${HNH_MIRROR}" \
@@ -95,9 +95,15 @@ lb config \
 echo "[kiosk-iso] Starting build (this can take a while)..."
 sudo lb build
 
-ISO_PATH="${BUILD_ROOT}/live-image-${HNH_ARCH}.hybrid.iso"
-if [[ ! -f "${ISO_PATH}" ]]; then
-  echo "[kiosk-iso] Build completed but ISO not found at: ${ISO_PATH}" >&2
+ISO_PATH=""
+for CANDIDATE in "${BUILD_ROOT}/binary.iso" "${BUILD_ROOT}/live-image-${HNH_ARCH}.iso" "${BUILD_ROOT}/live-image-${HNH_ARCH}.hybrid.iso"; do
+  if [[ -f "${CANDIDATE}" ]]; then
+    ISO_PATH="${CANDIDATE}"
+    break
+  fi
+done
+if [[ -z "${ISO_PATH}" ]]; then
+  echo "[kiosk-iso] Build completed but no ISO output was found." >&2
   exit 1
 fi
 
