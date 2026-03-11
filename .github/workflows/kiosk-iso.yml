@@ -27,12 +27,7 @@ jobs:
             else
               # Some environments omit isohybrid even with syslinux-utils.
               # Provide a harmless shim so live-build does not hard-fail at binary.sh.
-              sudo tee /usr/local/bin/isohybrid >/dev/null <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "[kiosk-iso] WARN: isohybrid binary unavailable; skipping legacy post-process." >&2
-exit 0
-EOF
+              printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "[kiosk-iso] WARN: isohybrid binary unavailable; skipping legacy post-process." >&2' 'exit 0' | sudo tee /usr/local/bin/isohybrid >/dev/null
               sudo chmod +x /usr/local/bin/isohybrid
             fi
           fi
