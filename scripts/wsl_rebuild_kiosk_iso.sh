@@ -70,7 +70,7 @@ if [[ -d "${REPO_WIN_PATH}/kiosk/live-build" ]]; then
 fi
 
 echo "[hnh-kiosk] Building ISO (this may take a while)..."
-sudo lb build
+sudo lb binary
 
 ISO_PATH=""
 for CANDIDATE in "${BUILD_ROOT}/binary.iso" "${BUILD_ROOT}/live-image-amd64.iso" "${BUILD_ROOT}/live-image-amd64.hybrid.iso"; do

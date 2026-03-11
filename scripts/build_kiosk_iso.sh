@@ -97,7 +97,7 @@ lb config \
 printf '%s\n' 'LB_SOURCE="false"' 'LB_SOURCE_IMAGES="none"' >> config/source
 
 echo "[kiosk-iso] Starting build (this can take a while)..."
-sudo lb build
+sudo lb binary
 
 ISO_PATH=""
 for CANDIDATE in "${BUILD_ROOT}/binary.iso" "${BUILD_ROOT}/live-image-${HNH_ARCH}.iso" "${BUILD_ROOT}/live-image-${HNH_ARCH}.hybrid.iso"; do
