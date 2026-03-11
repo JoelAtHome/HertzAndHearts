@@ -20,6 +20,7 @@ jobs:
 
       - name: Configure live-build
         run: |
+          set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/hnh-kiosk-build"
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
           mkdir -p _failure_logs
@@ -29,14 +30,15 @@ jobs:
             --distribution noble \
             --architectures amd64 \
             --binary-images iso-hybrid \
-            --bootloaders "grub-efi,grub-pc" \
+            --bootloader grub-efi \
             --archive-areas "main restricted universe multiverse" \
             --apt-source-archives false \
             --mirror-bootstrap https://archive.ubuntu.com/ubuntu \
             --mirror-binary https://archive.ubuntu.com/ubuntu \
             --mirror-chroot-security https://security.ubuntu.com/ubuntu \
             --debian-installer false \
-            --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
+            --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true" \
+            2>&1 | tee _failure_logs/lb-config.log
 
           # Apply kiosk customization overlay (autostart + writable path prep).
           if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
@@ -59,14 +61,15 @@ jobs:
               --distribution noble \
               --architectures amd64 \
               --binary-images iso-hybrid \
-              --bootloaders "grub-efi,grub-pc" \
+              --bootloader grub-efi \
               --archive-areas "main restricted universe multiverse" \
               --apt-source-archives false \
               --mirror-bootstrap https://archive.ubuntu.com/ubuntu \
               --mirror-binary https://archive.ubuntu.com/ubuntu \
               --mirror-chroot-security https://security.ubuntu.com/ubuntu \
               --debian-installer false \
-              --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
+              --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true" \
+              2>&1 | tee _failure_logs/lb-config-retry.log
             if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
               rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
               chmod +x config/hooks/normal/*.hook.chroot || true
