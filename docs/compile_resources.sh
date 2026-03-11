@@ -1,3 +1,3 @@
 #!/bin/bash
 
-pyside6-rcc resources.qrc -o "../vns_ta/resources.py"
+pyside6-rcc resources.qrc -o "../hnh/resources.py"

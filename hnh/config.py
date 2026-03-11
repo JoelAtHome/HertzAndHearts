@@ -94,7 +94,7 @@ PSD_VAGAL_BAND: Final[tuple[float, float]] = (0.07, 0.13)
 SETTLING_DURATION: Final[int] = 15  # seconds
 
 # Baseline phase: follows settling; the RMSSD average captured here
-# becomes the patient's baseline reference.
+# becomes the user's baseline reference.
 BASELINE_DURATION: Final[int] = 30  # seconds
 
 # Initial warmup: ignore first N seconds of data for plotting and baseline
