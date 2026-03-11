@@ -17,7 +17,7 @@ MIRROR_SECURITY="https://security.ubuntu.com/ubuntu"
 
 echo "[hnh-kiosk] Installing/updating required tools..."
 sudo apt update
-sudo apt install -y xorriso squashfs-tools syslinux-utils live-build wget curl git rsync || true
+sudo apt install -y xorriso squashfs-tools syslinux syslinux-utils isolinux live-build wget curl git rsync || true
 if ! command -v isohybrid >/dev/null 2>&1; then
   if command -v isohybrid.pl >/dev/null 2>&1; then
     sudo ln -sf "$(command -v isohybrid.pl)" /usr/bin/isohybrid

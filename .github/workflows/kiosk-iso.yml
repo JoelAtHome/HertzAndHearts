@@ -20,7 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y live-build xorriso squashfs-tools syslinux-utils wget curl git rsync
+          sudo apt-get install -y live-build xorriso squashfs-tools syslinux syslinux-utils isolinux wget curl git rsync
           if ! command -v isohybrid >/dev/null 2>&1; then
             if command -v isohybrid.pl >/dev/null 2>&1; then
               sudo ln -sf "$(command -v isohybrid.pl)" /usr/bin/isohybrid
@@ -29,6 +29,12 @@ jobs:
               # Provide a harmless shim so live-build does not hard-fail at binary.sh.
               printf '%s\n' '#!/usr/bin/env bash' 'set -euo pipefail' 'echo "[kiosk-iso] WARN: isohybrid binary unavailable; skipping legacy post-process." >&2' 'exit 0' | sudo tee /usr/bin/isohybrid >/dev/null
               sudo chmod +x /usr/bin/isohybrid
+            fi
+          fi
+          if ! command -v isohybrid >/dev/null 2>&1; then
+            CANDIDATE="$(sudo sh -c \"command -v isohybrid.pl 2>/dev/null || true\")"
+            if [ -n "${CANDIDATE}" ]; then
+              sudo ln -sf "${CANDIDATE}" /usr/bin/isohybrid
             fi
           fi
           command -v isohybrid >/dev/null 2>&1 || { echo "isohybrid not found after dependency install"; exit 4; }

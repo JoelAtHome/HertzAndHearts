@@ -29,7 +29,7 @@ done
 if [[ "${INSTALL_DEPS}" == "1" ]]; then
   echo "[kiosk-iso] Installing build dependencies..."
   sudo apt update
-  sudo apt install -y xorriso squashfs-tools syslinux-utils live-build wget curl git rsync
+  sudo apt install -y xorriso squashfs-tools syslinux syslinux-utils isolinux live-build wget curl git rsync
 fi
 
 if ! command -v isohybrid >/dev/null 2>&1; then
