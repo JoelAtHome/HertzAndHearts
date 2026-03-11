@@ -3,6 +3,7 @@ import hashlib
 import os
 import json
 import math
+import re
 import random
 import shutil
 import statistics
@@ -123,6 +124,18 @@ def _load_card0_disclaimer_text() -> str:
 
 
 _CARD0_DISCLAIMER_TEXT = _load_card0_disclaimer_text()
+
+
+def _display_version_label(raw_version: str) -> str:
+    """Convert internal package version to user-facing label."""
+    token = str(raw_version or "").strip()
+    if not token:
+        return "dev"
+    match = re.fullmatch(r"(\d+\.\d+\.\d+)b(\d+)", token)
+    if match:
+        base, beta_num = match.groups()
+        return f"{base}-beta" if beta_num == "0" else f"{base}-beta.{beta_num}"
+    return token
 
 
 def _one_page_share_path(bundle: SessionBundle, report_stage: str) -> Path:
@@ -4718,7 +4731,7 @@ class View(QMainWindow):
         )
         self._profile_store.ensure_profile(self._session_profile_id)
 
-        self.setWindowTitle(f"Hertz & Hearts ({version})")
+        self.setWindowTitle(f"Hertz & Hearts ({_display_version_label(version)})")
         self.setWindowIcon(QIcon(":/logo.png"))
         app = QApplication.instance()
         if app is not None:
