@@ -70,6 +70,8 @@ if [[ -d "${REPO_WIN_PATH}/kiosk/live-build" ]]; then
 fi
 
 echo "[hnh-kiosk] Building ISO (this may take a while)..."
+sudo lb bootstrap
+sudo lb chroot
 sudo lb binary
 
 ISO_PATH=""

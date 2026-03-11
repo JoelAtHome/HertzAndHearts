@@ -97,6 +97,8 @@ lb config \
 printf '%s\n' 'LB_SOURCE="false"' 'LB_SOURCE_IMAGES="none"' >> config/source
 
 echo "[kiosk-iso] Starting build (this can take a while)..."
+sudo lb bootstrap
+sudo lb chroot
 sudo lb binary
 
 ISO_PATH=""

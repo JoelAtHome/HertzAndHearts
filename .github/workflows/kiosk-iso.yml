@@ -76,6 +76,8 @@ jobs:
           set -euo pipefail
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
           build_once() {
+            sudo lb bootstrap 2>&1 | tee _failure_logs/lb-bootstrap.log
+            sudo lb chroot 2>&1 | tee _failure_logs/lb-chroot.log
             sudo lb binary 2>&1 | tee _failure_logs/lb-build.log
           }
           if ! build_once; then
@@ -103,6 +105,8 @@ jobs:
               chmod +x config/hooks/normal/*.hook.chroot || true
               chmod +x config/includes.chroot/usr/local/bin/*.sh || true
             fi
+            sudo lb bootstrap 2>&1 | tee _failure_logs/lb-bootstrap-retry.log
+            sudo lb chroot 2>&1 | tee _failure_logs/lb-chroot-retry.log
             sudo lb binary 2>&1 | tee _failure_logs/lb-build-retry.log
           fi
 
