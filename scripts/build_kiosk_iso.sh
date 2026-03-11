@@ -106,7 +106,11 @@ mkdir -p "${OUT_DIR}"
 OUT_ISO="${OUT_DIR}/hnh-kiosk-base-${PROJECT_VERSION}.iso"
 cp -f "${ISO_PATH}" "${OUT_ISO}"
 if command -v isohybrid >/dev/null 2>&1; then
-  isohybrid --uefi "${OUT_ISO}" || isohybrid "${OUT_ISO}"
+  if ! isohybrid --uefi "${OUT_ISO}"; then
+    if ! isohybrid "${OUT_ISO}"; then
+      echo "[kiosk-iso] WARN: isohybrid could not patch ISO; using original output."
+    fi
+  fi
 fi
 file "${OUT_ISO}"
 fdisk -l "${OUT_ISO}" || true

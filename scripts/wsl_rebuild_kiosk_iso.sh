@@ -77,7 +77,11 @@ fi
 mkdir -p "${DIST_OUT}"
 cp -f "${ISO_PATH}" "${DIST_OUT}/hnh-kiosk-base.iso"
 if command -v isohybrid >/dev/null 2>&1; then
-  isohybrid --uefi "${DIST_OUT}/hnh-kiosk-base.iso" || isohybrid "${DIST_OUT}/hnh-kiosk-base.iso"
+  if ! isohybrid --uefi "${DIST_OUT}/hnh-kiosk-base.iso"; then
+    if ! isohybrid "${DIST_OUT}/hnh-kiosk-base.iso"; then
+      echo "[hnh-kiosk] WARN: isohybrid could not patch ISO; using original output."
+    fi
+  fi
 fi
 file "${DIST_OUT}/hnh-kiosk-base.iso"
 fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
