@@ -58,6 +58,9 @@ lb config \
   --mirror-chroot-security "${MIRROR_SECURITY}" \
   --debian-installer false \
   --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true"
+# Some live-build variants still execute lb_source despite --source false.
+# Force-disable source image generation in config as a hard override.
+printf '%s\n' 'LB_SOURCE="false"' 'LB_SOURCE_IMAGES="none"' >> config/source
 
 # Apply optional kiosk customization overlay from repo.
 if [[ -d "${REPO_WIN_PATH}/kiosk/live-build" ]]; then

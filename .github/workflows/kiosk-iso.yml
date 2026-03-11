@@ -61,6 +61,9 @@ jobs:
             --debian-installer false \
             --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true" \
             2>&1 | tee _failure_logs/lb-config.log
+          # Some live-build versions still enter lb_source despite --source false.
+          # Force-disable source image generation in config file as a hard override.
+          printf '%s\n' 'LB_SOURCE="false"' 'LB_SOURCE_IMAGES="none"' >> config/source
 
           # Apply kiosk customization overlay (autostart + writable path prep).
           if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
@@ -93,6 +96,8 @@ jobs:
               --debian-installer false \
               --apt-options "--yes -o Acquire::Retries=20 -o Acquire::By-Hash=yes -o Acquire::Languages=none -o Acquire::http::Timeout=90 -o Acquire::https::Timeout=90 -o Acquire::http::No-Cache=true -o Acquire::https::No-Cache=true" \
               2>&1 | tee _failure_logs/lb-config-retry.log
+            # Keep source generation disabled across retry path as well.
+            printf '%s\n' 'LB_SOURCE="false"' 'LB_SOURCE_IMAGES="none"' >> config/source
             if [ -d "${GITHUB_WORKSPACE}/kiosk/live-build" ]; then
               rsync -a "${GITHUB_WORKSPACE}/kiosk/live-build/" config/
               chmod +x config/hooks/normal/*.hook.chroot || true
