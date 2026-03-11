@@ -111,8 +111,18 @@ jobs:
       - name: Stage ISO output
         run: |
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
-          find . -maxdepth 3 -type f -name "*.iso" 2>/dev/null | tee _failure_logs/iso-paths.txt
-          ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" 2>/dev/null | head -n 1)"
+          # Prefer final live-build outputs; avoid intermediate chroot artifacts.
+          ISO_PATH=""
+          for CANDIDATE in "./binary.hybrid.iso" "./live-image-amd64.hybrid.iso"; do
+            if [ -f "${CANDIDATE}" ]; then
+              ISO_PATH="${CANDIDATE}"
+              break
+            fi
+          done
+          if [ -z "${ISO_PATH}" ]; then
+            ISO_PATH="$(find . -maxdepth 3 -type f -name "*.iso" -not -path "./chroot/*" -not -path "./.build/*" 2>/dev/null | head -n 1)"
+          fi
+          find . -maxdepth 3 -type f -name "*.iso" -not -path "./.build/*" 2>/dev/null | tee _failure_logs/iso-paths.txt
           if [ -z "${ISO_PATH}" ]; then
             echo "No ISO produced by live-build." >&2
             exit 2
