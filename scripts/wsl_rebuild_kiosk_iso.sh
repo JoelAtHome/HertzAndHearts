@@ -82,26 +82,17 @@ fi
 
 mkdir -p "${DIST_OUT}"
 cp -f "${ISO_PATH}" "${DIST_OUT}/hnh-kiosk-base.iso"
-if command -v isohybrid >/dev/null 2>&1; then
-  if ! isohybrid --uefi "${DIST_OUT}/hnh-kiosk-base.iso"; then
-    if ! isohybrid "${DIST_OUT}/hnh-kiosk-base.iso"; then
-      echo "[hnh-kiosk] WARN: isohybrid could not patch ISO; using original output."
-    fi
+if command -v xorriso >/dev/null 2>&1; then
+  TMP_USB_ISO="${DIST_OUT}/hnh-kiosk-base.usb.iso"
+  if xorriso -indev "${DIST_OUT}/hnh-kiosk-base.iso" -outdev "${TMP_USB_ISO}" -boot_image any replay -boot_image any partition_table=on; then
+    mv -f "${TMP_USB_ISO}" "${DIST_OUT}/hnh-kiosk-base.iso"
+  else
+    echo "[hnh-kiosk] WARN: xorriso replay could not add partition table metadata."
+    rm -f "${TMP_USB_ISO}"
   fi
 fi
 file "${DIST_OUT}/hnh-kiosk-base.iso"
-if ! fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso"; then
-  true
-fi
-if ! fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" 2>/dev/null | awk '/Disklabel type/ {found=1} END {exit found?0:1}'; then
-  echo "[hnh-kiosk] WARN: missing partition table metadata; attempting xorriso post-fix."
-  xorriso -indev "${DIST_OUT}/hnh-kiosk-base.iso" \
-    -outdev "${DIST_OUT}/hnh-kiosk-base.iso" \
-    -boot_image any replay \
-    -boot_image any partition_table=on || true
-  file "${DIST_OUT}/hnh-kiosk-base.iso"
-  fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
-fi
+fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
 sha256sum "${DIST_OUT}/hnh-kiosk-base.iso" > "${DIST_OUT}/hnh-kiosk-base.iso.sha256"
 
 echo "[hnh-kiosk] SUCCESS"

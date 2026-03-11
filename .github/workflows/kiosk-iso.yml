@@ -130,28 +130,21 @@ jobs:
           ls -lh "${ISO_PATH}"
           mkdir -p dist
           cp -f "${ISO_PATH}" dist/hnh-kiosk-base.iso
-          # Add hybrid partition metadata to improve USB boot detection in BIOS/UEFI.
-          if command -v isohybrid >/dev/null 2>&1; then
-            if ! isohybrid --uefi dist/hnh-kiosk-base.iso; then
-              if ! isohybrid dist/hnh-kiosk-base.iso; then
-                echo "WARN: isohybrid could not patch this ISO; continuing with original output." >&2
-              fi
+          # Rebuild boot metadata with xorriso to improve USB firmware detection.
+          if command -v xorriso >/dev/null 2>&1; then
+            if xorriso -indev dist/hnh-kiosk-base.iso -outdev dist/hnh-kiosk-base.usb.iso -boot_image any replay -boot_image any partition_table=on; then
+              mv -f dist/hnh-kiosk-base.usb.iso dist/hnh-kiosk-base.iso
+            else
+              echo "WARN: xorriso replay could not add partition table metadata." >&2
+              rm -f dist/hnh-kiosk-base.usb.iso
             fi
           fi
-          # Emit bootability diagnostics for troubleshooting.
+          # Emit bootability diagnostics and require partition metadata.
           file dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.file.txt
           fdisk -l dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.fdisk.txt
           if ! awk '/Disklabel type/ {found=1} END {exit found?0:1}' dist/hnh-kiosk-base.iso.fdisk.txt; then
-            echo "WARN: ISO lacks partition table metadata; attempting xorriso post-fix." >&2
-            xorriso -indev dist/hnh-kiosk-base.iso \
-              -outdev dist/hnh-kiosk-base.iso \
-              -boot_image any replay \
-              -boot_image any partition_table=on || true
-            file dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.file.txt
-            fdisk -l dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.fdisk.txt
-            if ! awk '/Disklabel type/ {found=1} END {exit found?0:1}' dist/hnh-kiosk-base.iso.fdisk.txt; then
-              echo "WARN: ISO still lacks partition table metadata after xorriso post-fix." >&2
-            fi
+            echo "ERROR: ISO lacks partition table metadata; this image is likely not USB-bootable on many systems." >&2
+            exit 3
           fi
           (cd dist && sha256sum hnh-kiosk-base.iso > hnh-kiosk-base.iso.sha256)
 

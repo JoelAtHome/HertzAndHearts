@@ -111,26 +111,17 @@ OUT_DIR="${REPO_ROOT}/dist"
 mkdir -p "${OUT_DIR}"
 OUT_ISO="${OUT_DIR}/hnh-kiosk-base-${PROJECT_VERSION}.iso"
 cp -f "${ISO_PATH}" "${OUT_ISO}"
-if command -v isohybrid >/dev/null 2>&1; then
-  if ! isohybrid --uefi "${OUT_ISO}"; then
-    if ! isohybrid "${OUT_ISO}"; then
-      echo "[kiosk-iso] WARN: isohybrid could not patch ISO; using original output."
-    fi
+if command -v xorriso >/dev/null 2>&1; then
+  TMP_USB_ISO="${OUT_ISO%.iso}.usb.iso"
+  if xorriso -indev "${OUT_ISO}" -outdev "${TMP_USB_ISO}" -boot_image any replay -boot_image any partition_table=on; then
+    mv -f "${TMP_USB_ISO}" "${OUT_ISO}"
+  else
+    echo "[kiosk-iso] WARN: xorriso replay could not add partition table metadata."
+    rm -f "${TMP_USB_ISO}"
   fi
 fi
 file "${OUT_ISO}"
-if ! fdisk -l "${OUT_ISO}"; then
-  true
-fi
-if ! fdisk -l "${OUT_ISO}" 2>/dev/null | awk '/Disklabel type/ {found=1} END {exit found?0:1}'; then
-  echo "[kiosk-iso] WARN: missing partition table metadata; attempting xorriso post-fix."
-  xorriso -indev "${OUT_ISO}" \
-    -outdev "${OUT_ISO}" \
-    -boot_image any replay \
-    -boot_image any partition_table=on || true
-  file "${OUT_ISO}"
-  fdisk -l "${OUT_ISO}" || true
-fi
+fdisk -l "${OUT_ISO}" || true
 sha256sum "${OUT_ISO}" > "${OUT_ISO}.sha256"
 
 echo "[kiosk-iso] Done."
