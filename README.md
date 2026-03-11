@@ -20,7 +20,7 @@ Current beta: **1.0.0-beta**.
 - Pair your sensor in OS Bluetooth settings, then in-app:
   - `Scan` -> select sensor -> `Connect`
 - Start a session:
-  - `Start New` -> record -> `Stop` or `Stop & Save`
+  - `Start New` -> record -> `Stop & Save`
 
 For full walkthrough:
 - `docs/USER_GUIDE.md`
