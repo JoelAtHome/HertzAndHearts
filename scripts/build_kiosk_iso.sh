@@ -69,7 +69,7 @@ lb config \
   --distribution "${HNH_DISTRO}" \
   --architectures "${HNH_ARCH}" \
   --binary-images iso-hybrid \
-  --syslinux-theme "" \
+  --bootloaders "grub-efi,grub-pc" \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${HNH_MIRROR}" \
   --mirror-binary "${HNH_MIRROR}" \

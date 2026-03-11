@@ -36,7 +36,7 @@ lb config \
   --distribution noble \
   --architectures amd64 \
   --binary-images iso-hybrid \
-  --syslinux-theme "" \
+  --bootloaders "grub-efi,grub-pc" \
   --apt-source-archives false \
   --archive-areas "main restricted universe multiverse" \
   --mirror-bootstrap "${MIRROR_BOOTSTRAP}" \
