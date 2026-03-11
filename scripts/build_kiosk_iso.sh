@@ -29,7 +29,7 @@ done
 if [[ "${INSTALL_DEPS}" == "1" ]]; then
   echo "[kiosk-iso] Installing build dependencies..."
   sudo apt update
-  sudo apt install -y xorriso squashfs-tools live-build wget curl git rsync
+  sudo apt install -y xorriso squashfs-tools syslinux-utils live-build wget curl git rsync
 fi
 
 if ! command -v lb >/dev/null 2>&1; then
@@ -91,6 +91,12 @@ OUT_DIR="${REPO_ROOT}/dist"
 mkdir -p "${OUT_DIR}"
 OUT_ISO="${OUT_DIR}/hnh-kiosk-base-${PROJECT_VERSION}.iso"
 cp -f "${ISO_PATH}" "${OUT_ISO}"
+if command -v isohybrid >/dev/null 2>&1; then
+  isohybrid --uefi "${OUT_ISO}" || isohybrid "${OUT_ISO}"
+fi
+file "${OUT_ISO}"
+fdisk -l "${OUT_ISO}" || true
+sha256sum "${OUT_ISO}" > "${OUT_ISO}.sha256"
 
 echo "[kiosk-iso] Done."
 echo "[kiosk-iso] Output ISO: ${OUT_ISO}"

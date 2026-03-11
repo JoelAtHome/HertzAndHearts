@@ -17,7 +17,7 @@ MIRROR_SECURITY="https://security.ubuntu.com/ubuntu"
 
 echo "[hnh-kiosk] Installing/updating required tools..."
 sudo apt update
-sudo apt install -y xorriso squashfs-tools live-build wget curl git rsync || true
+sudo apt install -y xorriso squashfs-tools syslinux-utils live-build wget curl git rsync || true
 
 # Reduce apt index churn/mismatch risk in flaky mirror windows.
 printf 'Acquire::Languages "none";\nAcquire::Retries "20";\nAcquire::http::Timeout "90";\nAcquire::https::Timeout "90";\n' \
@@ -63,6 +63,12 @@ fi
 
 mkdir -p "${DIST_OUT}"
 cp -f "${ISO_PATH}" "${DIST_OUT}/hnh-kiosk-base.iso"
+if command -v isohybrid >/dev/null 2>&1; then
+  isohybrid --uefi "${DIST_OUT}/hnh-kiosk-base.iso" || isohybrid "${DIST_OUT}/hnh-kiosk-base.iso"
+fi
+file "${DIST_OUT}/hnh-kiosk-base.iso"
+fdisk -l "${DIST_OUT}/hnh-kiosk-base.iso" || true
+sha256sum "${DIST_OUT}/hnh-kiosk-base.iso" > "${DIST_OUT}/hnh-kiosk-base.iso.sha256"
 
 echo "[hnh-kiosk] SUCCESS"
 echo "[hnh-kiosk] ISO copied to: ${DIST_OUT}/hnh-kiosk-base.iso"
