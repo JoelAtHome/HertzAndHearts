@@ -20,7 +20,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y live-build xorriso squashfs-tools syslinux syslinux-utils isolinux wget curl git rsync
+          sudo apt-get install -y live-build xorriso squashfs-tools syslinux syslinux-utils isolinux fdisk wget curl git rsync
           if ! command -v isohybrid >/dev/null 2>&1; then
             if command -v isohybrid.pl >/dev/null 2>&1; then
               sudo ln -sf "$(command -v isohybrid.pl)" /usr/bin/isohybrid
@@ -105,11 +105,13 @@ jobs:
           cd "${RUNNER_TEMP}/hnh-kiosk-build" || exit 0
           mkdir -p _failure_logs
           cp -f *.log _failure_logs/ 2>/dev/null || true
+          cp -f dist/* _failure_logs/ 2>/dev/null || true
           cp -f config/* _failure_logs/ 2>/dev/null || true
           cp -f auto/* _failure_logs/ 2>/dev/null || true
 
       - name: Stage ISO output
         run: |
+          set -euo pipefail
           cd "${RUNNER_TEMP}/hnh-kiosk-build"
           # Prefer final live-build outputs; avoid intermediate chroot artifacts.
           ISO_PATH=""
@@ -141,7 +143,11 @@ jobs:
               fi
             fi
             file dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.file.txt
-            fdisk -l dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.fdisk.txt
+            if command -v fdisk >/dev/null 2>&1; then
+              fdisk -l dist/hnh-kiosk-base.iso | tee dist/hnh-kiosk-base.iso.fdisk.txt
+            else
+              echo "fdisk not available on runner." | tee dist/hnh-kiosk-base.iso.fdisk.txt
+            fi
             if ! awk '/Disklabel type/ {found=1} END {exit found?0:1}' dist/hnh-kiosk-base.iso.fdisk.txt; then
               echo "WARN: ISO lacks partition table metadata; USB boot compatibility may vary by firmware." >&2
             fi
@@ -151,7 +157,11 @@ jobs:
             ls -lh "${IMG_PATH}"
             cp -f "${IMG_PATH}" dist/hnh-kiosk-base.img
             file dist/hnh-kiosk-base.img | tee dist/hnh-kiosk-base.img.file.txt
-            fdisk -l dist/hnh-kiosk-base.img | tee dist/hnh-kiosk-base.img.fdisk.txt
+            if command -v fdisk >/dev/null 2>&1; then
+              fdisk -l dist/hnh-kiosk-base.img | tee dist/hnh-kiosk-base.img.fdisk.txt
+            else
+              echo "fdisk not available on runner." | tee dist/hnh-kiosk-base.img.fdisk.txt
+            fi
             (cd dist && sha256sum hnh-kiosk-base.img > hnh-kiosk-base.img.sha256)
           fi
 
