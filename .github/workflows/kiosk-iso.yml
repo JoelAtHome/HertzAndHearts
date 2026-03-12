@@ -50,7 +50,7 @@ jobs:
             --mode ubuntu \
             --distribution noble \
             --architectures amd64 \
-            --binary-images "iso hdd" \
+            --binary-images "iso-hybrid" \
             --bootloader grub-efi \
             --archive-areas "main restricted universe multiverse" \
             --apt-source-archives false \
@@ -87,7 +87,7 @@ jobs:
               --mode ubuntu \
               --distribution noble \
               --architectures amd64 \
-              --binary-images "iso hdd" \
+              --binary-images "iso-hybrid" \
               --bootloader grub-efi \
               --archive-areas "main restricted universe multiverse" \
               --apt-source-archives false \
@@ -151,8 +151,8 @@ jobs:
             IMG_PATH="$(find . -maxdepth 5 -type f -name "*.img" -not -path "./chroot/*" -print -quit 2>/dev/null || true)"
           fi
           find . -maxdepth 5 -type f -name "*.iso" -print > _failure_logs/iso-paths.txt 2>/dev/null || true
-          if [ -z "${ISO_PATH}" ] && [ -z "${IMG_PATH}" ]; then
-            echo "No ISO/IMG produced by live-build." >&2
+          if [ -z "${ISO_PATH}" ]; then
+            echo "No ISO produced by live-build. Failing build to avoid shipping IMG-only artifacts." >&2
             exit 2
           fi
           mkdir -p dist
