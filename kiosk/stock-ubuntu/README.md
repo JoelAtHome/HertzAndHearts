@@ -13,6 +13,7 @@ chmod +x scripts/provision_kiosk_stock_ubuntu.sh
 ```
 
 This script installs dependencies, clones/updates the repo, creates a venv, installs Hertz & Hearts, creates the launcher, and writes autostart config.
+It also writes an app-menu launcher so you can relaunch Hertz & Hearts from the desktop app picker.
 
 ## Optional overrides
 
@@ -34,3 +35,11 @@ Copy it to:
 - `~/.config/autostart/hnh.desktop`
 
 and replace `REPLACE_WITH_USERNAME`.
+
+## Relaunch command
+
+Use this command to relaunch manually:
+
+```bash
+~/.local/bin/hnh-kiosk-launch.sh
+```

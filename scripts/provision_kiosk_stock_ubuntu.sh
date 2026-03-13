@@ -17,6 +17,7 @@ HNH_DATA_ROOT="${HNH_DATA_ROOT:-/var/lib/hnh}"
 HNH_LOG_ROOT="${HNH_LOG_ROOT:-/var/log/hnh}"
 HNH_LAUNCHER_PATH="${HNH_LAUNCHER_PATH:-${HOME}/.local/bin/hnh-kiosk-launch.sh}"
 HNH_AUTOSTART_PATH="${HNH_AUTOSTART_PATH:-${HOME}/.config/autostart/hnh.desktop}"
+HNH_APP_MENU_ENTRY_PATH="${HNH_APP_MENU_ENTRY_PATH:-${HOME}/.local/share/applications/hertz-and-hearts.desktop}"
 
 echo "[hnh-kiosk] Installing OS packages..."
 sudo apt update
@@ -66,6 +67,10 @@ export XDG_CACHE_HOME="/tmp/hnh-cache"
 export TMPDIR="/tmp/hnh-tmp"
 mkdir -p "\${XDG_CACHE_HOME}" "\${TMPDIR}" || true
 
+# Force Qt to use X11 decorations on Linux to keep dialogs bordered/clear.
+export QT_QPA_PLATFORM="\${QT_QPA_PLATFORM:-xcb}"
+export QT_QPA_PLATFORMTHEME="\${QT_QPA_PLATFORMTHEME:-gtk3}"
+
 LOCK_FILE="/tmp/hnh-kiosk.lock"
 exec 9>"\${LOCK_FILE}"
 if ! flock -n 9; then
@@ -92,7 +97,20 @@ X-GNOME-Autostart-enabled=true
 NoDisplay=false
 EOF
 
+mkdir -p "$(dirname "${HNH_APP_MENU_ENTRY_PATH}")"
+cat > "${HNH_APP_MENU_ENTRY_PATH}" <<EOF
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Hertz and Hearts
+Comment=Run Hertz and Hearts
+Exec=${HNH_LAUNCHER_PATH}
+Terminal=false
+Categories=Education;Science;MedicalSoftware;
+EOF
+
 echo "[hnh-kiosk] Done."
 echo "[hnh-kiosk] Launcher: ${HNH_LAUNCHER_PATH}"
 echo "[hnh-kiosk] Autostart file: ${HNH_AUTOSTART_PATH}"
+echo "[hnh-kiosk] App menu entry: ${HNH_APP_MENU_ENTRY_PATH}"
 echo "[hnh-kiosk] Reboot or log out/in to test autostart."
