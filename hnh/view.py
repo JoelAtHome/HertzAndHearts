@@ -4,6 +4,7 @@ import os
 import platform
 import json
 import math
+import platform
 import re
 import random
 import shutil
@@ -153,6 +154,7 @@ def _warning_ok(parent, title: str, text: str) -> None:
     msg.setText(text)
     msg.setStandardButtons(QMessageBox.Ok)
     msg.setDefaultButton(QMessageBox.Ok)
+    _ensure_linux_window_decorations(msg)
     msg.exec()
 
 
@@ -164,7 +166,18 @@ def _info_ok(parent, title: str, text: str) -> None:
     msg.setText(text)
     msg.setStandardButtons(QMessageBox.Ok)
     msg.setDefaultButton(QMessageBox.Ok)
+    _ensure_linux_window_decorations(msg)
     msg.exec()
+
+
+def _ensure_linux_window_decorations(widget) -> None:
+    """Force titlebar/system decorations for dialogs on Linux WMs."""
+    if platform.system() != "Linux":
+        return
+    flags = widget.windowFlags()
+    flags |= Qt.Dialog | Qt.WindowTitleHint | Qt.WindowSystemMenuHint | Qt.WindowCloseButtonHint
+    flags &= ~Qt.FramelessWindowHint
+    widget.setWindowFlags(flags)
 
 
 def _save_last_sensor(name, address):
@@ -184,6 +197,21 @@ def _load_last_sensor():
         return data
     except Exception:
         return None
+
+
+def _clear_last_sensor(address: str | None = None):
+    try:
+        if not SENSOR_CONFIG.exists():
+            return
+        if not address:
+            SENSOR_CONFIG.unlink(missing_ok=True)
+            return
+        data = json.loads(SENSOR_CONFIG.read_text())
+        saved_addr = str((data or {}).get("address") or "").strip()
+        if saved_addr and saved_addr == str(address).strip():
+            SENSOR_CONFIG.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 class StatusBanner(QFrame):
     """Colored status label with a thin progress strip underneath."""
@@ -283,6 +311,7 @@ class Card0Dialog(QDialog):
         self.setWindowTitle("Hertz & Hearts — Welcome — Research Use Disclaimer")
         self.setMinimumSize(860, 700)
         self.setModal(True)
+        _ensure_linux_window_decorations(self)
 
         self._heart_anim_groups = []
 
@@ -550,6 +579,7 @@ class ProfileSelectionDialog(QDialog):
         self.setModal(True)
         self.setWindowTitle("Select Session User")
         self.setMinimumWidth(520)
+        _ensure_linux_window_decorations(self)
 
         root = QVBoxLayout(self)
         info = QLabel(
@@ -4187,6 +4217,9 @@ class PoincareWindow(QMainWindow):
         self._axis_hi_soft_cap_ms: float = 2500.0
         self._zoom_out_factor: float = 1.4
         self._zoom_in_factor: float = 1.0 / self._zoom_out_factor
+        self._manual_scale_hint_last_ts = 0.0
+        self._manual_scale_hint_cooldown_sec = 1.5
+        self._manual_scale_hint_msg: QMessageBox | None = None
 
         central = QWidget()
         layout = QVBoxLayout(central)
@@ -4249,6 +4282,7 @@ class PoincareWindow(QMainWindow):
         self._plot.getAxis("bottom").setPen(pg.mkPen("k"))
         self._plot.setMouseEnabled(x=False, y=False)
         self._plot.hideButtons()
+        self._plot.viewport().installEventFilter(self)
 
         self._identity = self._plot.plot(
             pen=pg.mkPen(color=(150, 150, 150), width=1, style=Qt.DashLine)
@@ -4355,6 +4389,41 @@ class PoincareWindow(QMainWindow):
             self._plot.setMouseEnabled(x=False, y=False)
         else:
             self._plot.setMouseEnabled(x=True, y=True)
+
+    def _show_manual_scale_hint_popup(self):
+        now = time.time()
+        if (now - self._manual_scale_hint_last_ts) < self._manual_scale_hint_cooldown_sec:
+            return
+        self._manual_scale_hint_last_ts = now
+        if self._manual_scale_hint_msg is not None:
+            try:
+                self._manual_scale_hint_msg.raise_()
+                self._manual_scale_hint_msg.activateWindow()
+            except Exception:
+                pass
+            return
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Scale Mode")
+        msg.setText("Mouse actions are available only when scale is MANUAL.")
+        msg.setInformativeText("Click 'Scale AUTO' to switch to MANUAL.")
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
+        msg.setWindowModality(Qt.NonModal)
+        _ensure_linux_window_decorations(msg)
+        msg.finished.connect(lambda _result: setattr(self, "_manual_scale_hint_msg", None))
+        self._manual_scale_hint_msg = msg
+        msg.open()
+
+    def eventFilter(self, obj, event):
+        if (
+            obj is self._plot.viewport()
+            and self._auto_scale
+            and event.type() in (QEvent.Wheel, QEvent.MouseButtonPress)
+        ):
+            self._show_manual_scale_hint_popup()
+            return True
+        return super().eventFilter(obj, event)
 
     def _adjust_locked_scale(self, factor: float):
         if self._auto_scale:
@@ -4654,6 +4723,10 @@ class View(QMainWindow):
 
         # 1. TRACKERS & STATE
         self.settings = Settings()
+        if platform.system() == "Linux":
+            os.environ["HNH_ENABLE_PMD"] = (
+                "1" if bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False)) else "0"
+            )
         self._perf_probe = get_perf_probe()
         self._profile_scoped_setting_defaults: dict[str, object] = {
             key: getattr(self.settings, key) for key in profile_scoped_keys()
@@ -4776,6 +4849,7 @@ class View(QMainWindow):
         self.scanner = SensorScanner()
         self.scanner.sensor_update.connect(self.model.update_sensors)
         self.scanner.status_update.connect(self.show_status)
+        self.scanner.scanning_state.connect(self._on_scan_state_changed)
 
         self.sensor = SensorClient()
         self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
@@ -4900,11 +4974,15 @@ class View(QMainWindow):
         self._connect_pulse_timer.timeout.connect(self._pulse_connect_button)
         self._connect_attempt_timer = QTimer()
         self._connect_attempt_timer.setSingleShot(True)
-        self._connect_attempt_timer.setInterval(15000)
+        # Linux/BlueZ service discovery can exceed 15s on some adapters.
+        # Keep timeout patient enough to avoid false "timed out" disconnects.
+        self._connect_attempt_timer.setInterval(30000)
         self._connect_attempt_timer.timeout.connect(self._on_connect_timeout)
         self._connect_pulse_on = False
         self._connect_pulse_active = False
         self._scan_pulse_active = False
+        self._is_scanning = False
+        self._received_ibi_since_connect = False
         self._preserve_good_on_reset = False
         self._resuming_after_button_disconnect = False
         self._pending_connect_target: tuple[str, str] | None = None
@@ -4922,16 +5000,16 @@ class View(QMainWindow):
         self.health_label = QLabel("Signal: Waiting for sensor")
 
         # Pacer controls
-        self.pacer_label = QLabel("Rate: 7")
+        self.pacer_label = QLabel("Rate: 6")
         self.pacer_rate = QSlider(Qt.Horizontal)
         self.pacer_rate.setRange(3, 15)
-        self.pacer_rate.setValue(7)
+        self.pacer_rate.setValue(6)
         self.pacer_rate.setTickPosition(QSlider.TicksBelow)
         self.pacer_rate.setTickInterval(1)
         self.pacer_rate.setSingleStep(1)
         self.pacer_rate.valueChanged.connect(self._update_breathing_rate)
         saved_rate = self._profile_store.get_profile_pref(
-            self._session_profile_id, "breathing_rate", "7"
+            self._session_profile_id, "breathing_rate", "6"
         )
         try:
             rate = int(saved_rate)
@@ -4959,11 +5037,13 @@ class View(QMainWindow):
 
         # Buttons
         self.scan_button = QPushButton("Scan")
-        self.scan_button.clicked.connect(self.scanner.scan)
+        self.scan_button.clicked.connect(self._on_scan_clicked)
         self.address_menu = QComboBox()
         saved = _load_last_sensor()
+        self._preloaded_sensor_text: str | None = None
         if saved:
-            self.address_menu.addItem(f"{saved['name']}, {saved['address']}")
+            self._preloaded_sensor_text = f"{saved['name']}, {saved['address']}"
+            self.address_menu.addItem(self._preloaded_sensor_text)
         self.battery_label = QLabel("\u2014")  # em dash when unknown, value% when connected
         self.battery_label.setStyleSheet(
             "font-size: 10px; color: #666; background: #e0e0e0; "
@@ -5390,7 +5470,7 @@ class View(QMainWindow):
         self.profile_header_label.setText(f"User: {self._session_profile_id}")
         self._apply_profile_scoped_settings(self._session_profile_id)
         saved_rate = self._profile_store.get_profile_pref(
-            self._session_profile_id, "breathing_rate", "7"
+            self._session_profile_id, "breathing_rate", "6"
         )
         try:
             rate = int(saved_rate)
@@ -5419,6 +5499,40 @@ class View(QMainWindow):
         )
         return hide_value != "1"
 
+    def _should_show_linux_pmd_guidance_for_profile(self, profile_id: str) -> bool:
+        if platform.system() != "Linux":
+            return False
+        shown = self._profile_store.get_profile_pref(
+            profile_id, "linux_pmd_guidance_seen", default="0"
+        )
+        return str(shown).strip() != "1"
+
+    def _show_linux_pmd_guidance_dialog(self, profile_id: str) -> None:
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Information)
+        msg.setWindowTitle("Linux ECG Mode Guidance")
+        msg.setText(
+            "For Linux stability, PMD/ECG mode is set to a safer default "
+            "(HR/RR streaming focus)."
+        )
+        msg.setInformativeText(
+            "When to keep PMD OFF:\n"
+            "• You want reliable HR/RMSSD/SDNN plotting.\n"
+            "• You have seen BLE disconnects or \"No data received\".\n\n"
+            "When to try PMD ON (experimental):\n"
+            "• You need full ECG/QTc PMD behavior and your adapter is stable.\n\n"
+            "Path: More → Settings… → Show Advanced → ECG Monitor → "
+            "Linux PMD/ECG Path (Experimental)."
+        )
+        settings_btn = msg.addButton("Open Settings", QMessageBox.ActionRole)
+        ok_btn = msg.addButton(QMessageBox.Ok)
+        msg.setDefaultButton(ok_btn)
+        _ensure_linux_window_decorations(msg)
+        msg.exec()
+        self._profile_store.set_profile_pref(profile_id, "linux_pmd_guidance_seen", "1")
+        if msg.clickedButton() == settings_btn:
+            self._open_settings()
+
     def _show_card0_dialog(self, profile_id: str) -> bool:
         dlg = Card0Dialog(self, allow_skip_for_profile=True)
         dlg.showMaximized()
@@ -5445,8 +5559,14 @@ class View(QMainWindow):
             msg.setDefaultButton(QMessageBox.Ok)
             flags = msg.windowFlags()
             flags &= ~Qt.WindowMinimizeButtonHint
-            flags &= ~Qt.WindowCloseButtonHint
-            flags |= Qt.CustomizeWindowHint | Qt.WindowTitleHint
+            flags |= (
+                Qt.CustomizeWindowHint
+                | Qt.WindowTitleHint
+                | Qt.WindowSystemMenuHint
+                | Qt.WindowCloseButtonHint
+            )
+            if platform.system() == "Linux":
+                flags &= ~Qt.FramelessWindowHint
             msg.setWindowFlags(flags)
             msg.exec()
         return True
@@ -5466,6 +5586,8 @@ class View(QMainWindow):
         else:
             self._disclaimer_acknowledged_at = None
             self._disclaimer_ack_mode = "profile_skip_preference"
+        if self._should_show_linux_pmd_guidance_for_profile(selected_profile):
+            self._show_linux_pmd_guidance_dialog(selected_profile)
 
     def _show_maximized_fit(self):
         """Size window to available screen (avoid showMaximized which can push window off-screen on Windows)."""
@@ -5601,6 +5723,11 @@ class View(QMainWindow):
     def _is_sensor_connected(self) -> bool:
         return self.sensor.client is not None
 
+    def _ecg_path_active(self) -> bool:
+        if platform.system() != "Linux":
+            return True
+        return bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False))
+
     def _set_session_state(self, state: str):
         self._session_state = state
         self._update_session_actions()
@@ -5628,6 +5755,7 @@ class View(QMainWindow):
         self.poincare_button.setEnabled(connected)
         self.psd_button.setEnabled(connected)
         if not connected:
+            self.ecg_button.setEnabled(False)
             self.qtc_button.setEnabled(False)
             if not connecting:
                 # Connectivity state must override any prior phase banner state.
@@ -5637,8 +5765,19 @@ class View(QMainWindow):
                 self.qtc_button.setText("QTc (no sensor)")
                 self.poincare_button.setText("Poincare (no sensor)")
                 self.psd_button.setText("PSD (no sensor)")
-        elif self.ecg_button.isEnabled():
+        else:
+            self.ecg_button.setEnabled(True)
             self.qtc_button.setEnabled(True)
+            if self._ecg_path_active():
+                self.ecg_button.setToolTip("Open/close the live ECG monitor window.")
+                self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
+            else:
+                self.ecg_button.setToolTip(
+                    "Open ECG window. Linux PMD/ECG path is disabled in Settings, so live ECG may not stream."
+                )
+                self.qtc_button.setToolTip(
+                    "Open QTc window. Linux PMD/ECG path is disabled in Settings, so QTc updates may be unavailable."
+                )
         self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
         self.ecg_window.set_image_capture_enabled(self._session_bundle is not None)
@@ -6698,7 +6837,7 @@ class View(QMainWindow):
             )
         gh_btn = msg.addButton("Donate via GitHub Sponsors", QMessageBox.AcceptRole)
         bmac_btn = msg.addButton(
-            "Donate via Buy Me a Coffee (no GitHub login)",
+            "Donate via Buy Me a Coffee",
             QMessageBox.ActionRole,
         )
         hide_week_btn = None
@@ -6725,6 +6864,36 @@ class View(QMainWindow):
             self._set_support_prompt_never()
             self.show_status("Support reminder disabled for this profile.")
 
+    def _on_scan_clicked(self):
+        self._on_scan_state_changed(True)
+        self.scanner.scan()
+
+    def _on_scan_state_changed(self, active: bool):
+        self._is_scanning = bool(active)
+        if self._is_scanning:
+            self._connect_pulse_active = False
+            self._scan_pulse_active = False
+            self._connect_pulse_timer.stop()
+            self._connect_pulse_on = False
+            self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+        self._apply_connect_ready_state()
+
+    def _forget_preloaded_sensor_entry(self):
+        current = self.address_menu.currentText().strip()
+        if not current:
+            return
+        parts = current.rsplit(",", 1)
+        if len(parts) < 2:
+            return
+        address = parts[1].strip()
+        _clear_last_sensor(address)
+        if self._preloaded_sensor_text and current == self._preloaded_sensor_text:
+            idx = self.address_menu.findText(self._preloaded_sensor_text, Qt.MatchFixedString)
+            if idx >= 0:
+                self.address_menu.removeItem(idx)
+                self._apply_connect_ready_state()
+
     def _start_connect_hints(self):
         has_plot_data = (
             (self.hr_trend_series.count() > 0 if hasattr(self, "hr_trend_series") else False)
@@ -6747,10 +6916,13 @@ class View(QMainWindow):
             self._hr_overlay.show()
             self._hrv_overlay.show()
         has_sensors = self._has_sensor_choices()
-        self._connect_pulse_active = has_sensors
-        self._scan_pulse_active = not has_sensors
+        self._connect_pulse_active = has_sensors and not self._is_scanning
+        self._scan_pulse_active = (not has_sensors) and not self._is_scanning
         self._apply_connect_ready_state()
-        if self._scan_pulse_active:
+        if self._is_scanning:
+            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+            self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+        elif self._scan_pulse_active:
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
         else:
@@ -6813,6 +6985,12 @@ class View(QMainWindow):
             self.connect_button.setToolTip("Already connected to a sensor.")
             self.connect_button.setDefault(False)
             return
+        if self._is_scanning:
+            self.connect_button.setEnabled(False)
+            self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+            self.connect_button.setToolTip("Scanning... wait for results before connecting.")
+            self.connect_button.setDefault(False)
+            return
         if self._connect_attempt_timer.isActive():
             self.connect_button.setEnabled(False)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
@@ -6839,6 +7017,10 @@ class View(QMainWindow):
         self.connect_button.setDefault(True)
 
     def _pulse_connect_button(self):
+        if self._is_scanning:
+            self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+            return
         self._connect_pulse_on = not self._connect_pulse_on
         if self._connect_pulse_active:
             if self._connect_pulse_on:
@@ -6852,6 +7034,7 @@ class View(QMainWindow):
                 self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
 
     def _open_settings(self):
+        prev_linux_pmd = bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False))
         dlg = SettingsDialog(
             self.settings,
             parent=self,
@@ -6861,6 +7044,17 @@ class View(QMainWindow):
         )
         if dlg.exec() == QDialog.Accepted:
             self._set_debug_mode(bool(self.settings.DEBUG), announce=False)
+            if platform.system() == "Linux":
+                current_linux_pmd = bool(
+                    getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False)
+                )
+                os.environ["HNH_ENABLE_PMD"] = "1" if current_linux_pmd else "0"
+                self.sensor.set_enable_pmd(current_linux_pmd)
+                if current_linux_pmd != prev_linux_pmd:
+                    self.show_status(
+                        "Linux PMD/ECG mode updated. Disconnect/reconnect sensor to apply."
+                    )
+                self._update_session_actions()
             pending_reset = dlg.get_pending_disclaimer_reset()
             if pending_reset in {"active", "all"}:
                 self._apply_disclaimer_prompt_reset(pending_reset)
@@ -7027,6 +7221,7 @@ class View(QMainWindow):
         if self.sensor.client is not None:
             return
         self.sensor.disconnect_client()
+        self._forget_preloaded_sensor_entry()
         self.connect_button.setEnabled(True)
         self.disconnect_button.setEnabled(False)
         self.scan_button.setEnabled(True)
@@ -7599,6 +7794,7 @@ class View(QMainWindow):
         self.direct_chart_update(payload)
 
     def list_addresses(self, addresses: NamedSignal):
+        self._is_scanning = False
         self.address_menu.clear()
         self.address_menu.addItems(addresses.value)
         self._set_scan_in_progress(False)
@@ -7740,14 +7936,11 @@ class View(QMainWindow):
             if self._copy_text_to_clipboard(recording_path):
                 status = f"Recording path saved to clipboard: {recording_path}"
 
-        if status == "Scanning for BLE sensors...":
-            self._set_scan_in_progress(True)
-        elif (
-            status.startswith("Found ")
-            and "sensor(s)." in status
-        ) or status == "Couldn't find sensors.":
-            self._set_scan_in_progress(False)
-            if status == "Couldn't find sensors.":
+        if status.startswith("Scanning for BLE sensors..."):
+            self._on_scan_state_changed(True)
+        elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
+            self._on_scan_state_changed(False)
+            if status.startswith("Couldn't find sensors."):
                 self._pending_connect_target = None
 
         if "Connected" in status and "Disconnecting" not in status:
@@ -7755,6 +7948,12 @@ class View(QMainWindow):
             self._connect_attempt_timer.stop()
             self._stop_connect_hints()
             self.is_phase_active = False
+            self._received_ibi_since_connect = False
+            # Connection is up; wait for first RR packet explicitly.
+            self._set_signal_indicator("Connected (waiting for beats)", "#2196F3")
+            self._last_data_time = time.time()
+            if not self._data_watchdog.isActive():
+                self._data_watchdog.start()
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
             self.scan_button.setEnabled(False)
@@ -7767,6 +7966,8 @@ class View(QMainWindow):
         elif "error" in status.lower() or "Disconnecting" in status:
             # If connect failed or link dropped, unblock reconnect immediately.
             self._connect_attempt_timer.stop()
+            if "error" in status.lower() and not self._received_ibi_since_connect:
+                self._forget_preloaded_sensor_entry()
             self._apply_connect_ready_state()
             self.disconnect_button.setEnabled(False)
             self.scan_button.setEnabled(True)
@@ -8150,6 +8351,7 @@ class View(QMainWindow):
     def update_ui_labels(self, data: NamedSignal):
         # 1. RAW BEAT DATA (Heart Rate & Instant Faults)
         if data.name == "ibis":
+            self._received_ibi_since_connect = True
             # First data after button-disconnect reconnect: complete interval, create gap
             if self._resuming_after_button_disconnect:
                 self._resuming_after_button_disconnect = False

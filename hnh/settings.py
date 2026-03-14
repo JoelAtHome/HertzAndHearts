@@ -183,6 +183,18 @@ REGISTRY = OrderedDict([
         "section": "ECG Monitor",
         "scope": "profile",
     }),
+    ("LINUX_ENABLE_PMD_EXPERIMENTAL", {
+        "display": "Linux PMD/ECG Path (Experimental)",
+        "tooltip": (
+            "Linux only. Enables Polar PMD control/data path used by ECG features. "
+            "When disabled, app uses stable HR/RR-only mode. If changed while running, "
+            "disconnect/reconnect sensor to apply."
+        ),
+        "type": bool,
+        "section": "ECG Monitor",
+        "scope": "global",
+        "advanced": True,
+    }),
 
     # --- QTc Estimation ---
     ("QTC_SUMMARY_WINDOW_SECONDS", {

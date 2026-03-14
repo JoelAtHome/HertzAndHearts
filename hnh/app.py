@@ -1,7 +1,23 @@
+import os
 import sys
 from importlib import metadata
 from datetime import datetime
 from pathlib import Path
+
+
+def _configure_linux_qt_defaults() -> None:
+    """
+    Keep Linux popup/dialog decorations consistent across launch methods.
+    The kiosk launcher exports these already; direct python launches should too.
+    """
+    if sys.platform != "linux":
+        return
+    os.environ.setdefault("QT_QPA_PLATFORM", "xcb")
+    os.environ.setdefault("QT_QPA_PLATFORMTHEME", "gtk3")
+
+
+_configure_linux_qt_defaults()
+
 from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
 from hnh.view import View

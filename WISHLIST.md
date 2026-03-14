@@ -52,6 +52,14 @@ Raw ideas go here first.
 - Status: idea
 - Notes: Keep wording non-diagnostic and include a disclaimer that morphology interpretation requires clinician judgment.
 
+### Linux PMD mode guidance in Help screens
+- Problem: Linux users may not know when to keep PMD mode off for stability versus turning it on for experimental ECG/QTc behavior.
+- Proposed approach: Add a short "Linux PMD mode" section to Help/F1 screens (main dashboard + ECG/QTc windows) with clear ON/OFF decision rules and the Settings path.
+- Effort: S
+- Impact: High
+- Status: idea
+- Notes: Keep language practical: "OFF for stable HR/RR plotting, ON only when ECG/QTc PMD is needed and stable on this adapter."
+
 ### Dynamic Relock tooltip for QTc trend window
 - Problem: The QTc trend `Relock` button tooltip is static, so users may miss that behavior changes by state (locked vs manual vs frozen/resume path).
 - Proposed approach: Mirror ECG tooltip behavior in QTc window with dynamic text updates tied to freeze/manual/relock transitions.
