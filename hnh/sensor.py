@@ -1,9 +1,11 @@
 import struct
 import numpy as np
+import platform
 from time import perf_counter_ns
 from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer
 from PySide6.QtBluetooth import (
     QBluetoothDeviceDiscoveryAgent,
+    QBluetoothLocalDevice,
     QLowEnergyController,
     QLowEnergyService,
     QLowEnergyCharacteristic,
@@ -122,6 +124,8 @@ class SensorClient(QObject):
         )
         self._connected_device_name: str = ""
         self._verity_warning_emitted = False
+        self._last_sensor: Union[None, QBluetoothDeviceInfo] = None
+        self._retried_connection_error = False
 
     def _sensor_address(self):
         return get_sensor_remote_address(self.client)
@@ -134,6 +138,38 @@ class SensorClient(QObject):
             )
             self.status_update.emit(msg)
             return
+        if not self._windows_ble_preflight(sensor):
+            return
+        self._last_sensor = sensor
+        self._retried_connection_error = False
+        self._start_connection(sensor)
+
+    def _windows_ble_preflight(self, sensor: QBluetoothDeviceInfo) -> bool:
+        if platform.system() != "Windows":
+            return True
+        try:
+            local = QBluetoothLocalDevice()
+        except Exception:
+            return True
+        try:
+            if local.hostMode() == QBluetoothLocalDevice.HostPoweredOff:
+                self.status_update.emit("Windows Bluetooth appears off. Turn Bluetooth on, then retry.")
+                return False
+        except Exception:
+            pass
+        try:
+            pairing_status = local.pairingStatus(sensor.address())
+            if pairing_status == QBluetoothLocalDevice.Unpaired:
+                self.status_update.emit(
+                    "Windows requires H10 pairing first. Pair H10 in Windows Bluetooth settings, then retry."
+                )
+                return False
+        except Exception:
+            # Some Windows BLE stacks do not expose reliable pairing status.
+            pass
+        return True
+
+    def _start_connection(self, sensor: QBluetoothDeviceInfo):
         self.status_update.emit(
             f"Connecting to sensor at {get_sensor_address(sensor)} (this might take a while)."
         )
@@ -145,6 +181,14 @@ class SensorClient(QObject):
         self.client.discoveryFinished.connect(self._connect_hr_service)
         self.client.disconnected.connect(self._reset_connection)
         self.client.connectToDevice()
+
+    def _retry_last_connection_once(self):
+        if self.client is not None:
+            return
+        if self._last_sensor is None:
+            return
+        self.status_update.emit("BLE connection failed once; retrying now...")
+        self._start_connection(self._last_sensor)
 
     def disconnect_client(self):
         try:
@@ -252,6 +296,13 @@ class SensorClient(QObject):
 
     def _read_battery(self):
         if self.battery_service is None:
+            return
+        if self.client is None:
+            return
+        try:
+            if self.client.state() != QLowEnergyController.ControllerState.ConnectedState:
+                return
+        except Exception:
             return
         char = self.battery_service.characteristic(self.BATTERY_LEVEL_UUID)
         if char.isValid():
@@ -500,8 +551,49 @@ class SensorClient(QObject):
             self.client = None
 
     def _catch_error(self, error):
+        error_text = str(error)
+        error_value = None
         try:
-            self.status_update.emit(f"An error occurred: {error}. Disconnecting sensor.")
+            error_value = int(error)
+        except Exception:
+            error_value = None
+        is_windows_connection_error = (
+            platform.system() == "Windows" and "ConnectionError" in error_text
+        )
+        if (
+            is_windows_connection_error
+            and (not self._retried_connection_error)
+            and self._last_sensor is not None
+        ):
+            self._retried_connection_error = True
+            try:
+                detail = (
+                    f"An error occurred: {error_text}"
+                    + (f" ({error_value})" if error_value is not None else "")
+                    + ". Retrying once..."
+                )
+                self.status_update.emit(detail)
+            except Exception:
+                pass
+            try:
+                self._reset_connection()
+            except Exception:
+                pass
+            QTimer.singleShot(900, self._retry_last_connection_once)
+            return
+        try:
+            detail = (
+                f"An error occurred: {error_text}"
+                + (f" ({error_value})" if error_value is not None else "")
+            )
+            if is_windows_connection_error:
+                detail += (
+                    ". Disconnecting sensor. "
+                    "Windows BLE tip: pair H10 in Windows and close Polar phone app Bluetooth."
+                )
+            else:
+                detail += ". Disconnecting sensor."
+            self.status_update.emit(detail)
         except Exception:
             pass
         try:

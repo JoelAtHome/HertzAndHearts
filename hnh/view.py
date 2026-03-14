@@ -1,6 +1,7 @@
 from datetime import datetime, date, timedelta
 import hashlib
 import os
+import platform
 import json
 import math
 import re
@@ -4906,6 +4907,7 @@ class View(QMainWindow):
         self._scan_pulse_active = False
         self._preserve_good_on_reset = False
         self._resuming_after_button_disconnect = False
+        self._pending_connect_target: tuple[str, str] | None = None
 
         self.recording_statusbar = StatusBanner()
 
@@ -6001,10 +6003,33 @@ class View(QMainWindow):
             self._show_post_session_support_prompt()
 
     def connect_sensor(self):
-        if not self.address_menu.currentText():
+        parsed = self._parse_sensor_menu_entry(self.address_menu.currentText())
+        if parsed is None:
+            self.show_status("No sensor selected. Click Scan, then select a sensor.")
             return
-        parts = self.address_menu.currentText().split(",")
-        self._do_connect(parts[0].strip(), parts[1].strip())
+        name, address = parsed
+        # On fresh launch the dropdown can contain the last saved sensor but no
+        # current scan results yet. Run a live scan first instead of declaring
+        # "stale" immediately.
+        if not self.model.sensors and self.sensor.client is None:
+            self._pending_connect_target = (name, address)
+            self._set_scan_in_progress(True)
+            self.scanner.scan()
+            return
+        self._do_connect(name, address)
+
+    def _parse_sensor_menu_entry(self, text: str) -> tuple[str, str] | None:
+        raw = (text or "").strip()
+        if not raw:
+            return None
+        if "," not in raw:
+            return None
+        name, address = raw.rsplit(",", 1)
+        name = name.strip()
+        address = address.strip()
+        if not name or not address:
+            return None
+        return name, address
 
     def _do_connect(self, name: str, address: str):
         self._suppress_comm_error_popups = False
@@ -6012,7 +6037,32 @@ class View(QMainWindow):
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         sensor = [s for s in self.model.sensors if get_sensor_address(s) == address]
 
+        if not sensor and name:
+            # BLE addresses can rotate. Prefer a live scan match by name before
+            # attempting a synthetic fallback device object.
+            name_folded = name.casefold()
+            for candidate in self.model.sensors:
+                candidate_name = (candidate.name() or "").strip()
+                if candidate_name.casefold() == name_folded:
+                    sensor = [candidate]
+                    break
+
         if not sensor:
+            if platform.system() == "Windows":
+                stale_index = self.address_menu.currentIndex()
+                if stale_index >= 0:
+                    self.address_menu.removeItem(stale_index)
+                    self._apply_connect_ready_state()
+                # If no live entries remain, guide the user to rescan.
+                if not self._has_sensor_choices():
+                    self._start_connect_hints()
+                    self.scan_button.setFocus(Qt.OtherFocusReason)
+                else:
+                    self._stop_connect_hints()
+                self.show_status(
+                    "Selected sensor is stale or out of range. Click Scan, then pick the live H10 entry."
+                )
+                return
             bt_addr = QBluetoothAddress(address)
             device = QBluetoothDeviceInfo(bt_addr, name, 0)
             device.setCoreConfigurations(QBluetoothDeviceInfo.LowEnergyCoreConfiguration)
@@ -7551,10 +7601,23 @@ class View(QMainWindow):
     def list_addresses(self, addresses: NamedSignal):
         self.address_menu.clear()
         self.address_menu.addItems(addresses.value)
+        self._set_scan_in_progress(False)
         self._apply_connect_ready_state()
         self._focus_connect_if_ready()
         if self.sensor.client is None:
             self._start_connect_hints()
+        if self._pending_connect_target is not None and self.sensor.client is None:
+            pending_name, pending_addr = self._pending_connect_target
+            self._pending_connect_target = None
+            self._do_connect(pending_name, pending_addr)
+
+    def _set_scan_in_progress(self, active: bool):
+        if active:
+            self.scan_button.setEnabled(False)
+            self._stop_connect_hints()
+            return
+        if self.sensor.client is None:
+            self.scan_button.setEnabled(True)
 
     def plot_pacer_disk(self):
         if not self.pacer_toggle.isChecked():
@@ -7677,6 +7740,16 @@ class View(QMainWindow):
             if self._copy_text_to_clipboard(recording_path):
                 status = f"Recording path saved to clipboard: {recording_path}"
 
+        if status == "Scanning for BLE sensors...":
+            self._set_scan_in_progress(True)
+        elif (
+            status.startswith("Found ")
+            and "sensor(s)." in status
+        ) or status == "Couldn't find sensors.":
+            self._set_scan_in_progress(False)
+            if status == "Couldn't find sensors.":
+                self._pending_connect_target = None
+
         if "Connected" in status and "Disconnecting" not in status:
             self._suppress_comm_error_popups = False
             self._connect_attempt_timer.stop()
@@ -7685,12 +7758,11 @@ class View(QMainWindow):
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
             self.scan_button.setEnabled(False)
-            if self.address_menu.currentText():
-                parts = self.address_menu.currentText().split(",")
-                if len(parts) >= 2:
-                    name, addr = parts[0].strip(), parts[1].strip()
-                    if "verity" not in name.lower():
-                        _save_last_sensor(name, addr)
+            parsed = self._parse_sensor_menu_entry(self.address_menu.currentText())
+            if parsed is not None:
+                name, addr = parsed
+                if "verity" not in name.lower():
+                    _save_last_sensor(name, addr)
             self._auto_start_recording()
         elif "error" in status.lower() or "Disconnecting" in status:
             # If connect failed or link dropped, unblock reconnect immediately.
