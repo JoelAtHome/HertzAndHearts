@@ -5039,11 +5039,8 @@ class View(QMainWindow):
         self.scan_button = QPushButton("Scan")
         self.scan_button.clicked.connect(self._on_scan_clicked)
         self.address_menu = QComboBox()
-        saved = _load_last_sensor()
+        # Require a fresh scan each launch to avoid stale/ghost sensor entries.
         self._preloaded_sensor_text: str | None = None
-        if saved:
-            self._preloaded_sensor_text = f"{saved['name']}, {saved['address']}"
-            self.address_menu.addItem(self._preloaded_sensor_text)
         self.battery_label = QLabel("\u2014")  # em dash when unknown, value% when connected
         self.battery_label.setStyleSheet(
             "font-size: 10px; color: #666; background: #e0e0e0; "
@@ -5387,7 +5384,7 @@ class View(QMainWindow):
         self._apply_connect_ready_state()
         self._start_connect_hints()
         self._update_session_actions()
-        self._focus_connect_if_ready()
+        self._focus_scan_if_needed()
         QTimer.singleShot(0, self._run_startup_flow)
 
         # Set Axis Labels
@@ -5766,17 +5763,18 @@ class View(QMainWindow):
                 self.poincare_button.setText("Poincare (no sensor)")
                 self.psd_button.setText("PSD (no sensor)")
         else:
-            self.ecg_button.setEnabled(True)
-            self.qtc_button.setEnabled(True)
-            if self._ecg_path_active():
+            ecg_enabled = self._ecg_path_active()
+            self.ecg_button.setEnabled(ecg_enabled)
+            self.qtc_button.setEnabled(ecg_enabled)
+            if ecg_enabled:
                 self.ecg_button.setToolTip("Open/close the live ECG monitor window.")
                 self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
             else:
                 self.ecg_button.setToolTip(
-                    "Open ECG window. Linux PMD/ECG path is disabled in Settings, so live ECG may not stream."
+                    "ECG window disabled: Linux PMD/ECG path is OFF in Settings."
                 )
                 self.qtc_button.setToolTip(
-                    "Open QTc window. Linux PMD/ECG path is disabled in Settings, so QTc updates may be unavailable."
+                    "QTc window disabled: Linux PMD/ECG path is OFF in Settings."
                 )
         self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
@@ -6382,8 +6380,9 @@ class View(QMainWindow):
         self._refresh_popup_control_labels()
 
     def _on_ecg_ready(self):
-        self.ecg_button.setEnabled(True)
-        self.qtc_button.setEnabled(True)
+        ecg_enabled = self._is_sensor_connected() and self._ecg_path_active()
+        self.ecg_button.setEnabled(ecg_enabled)
+        self.qtc_button.setEnabled(ecg_enabled)
         self._refresh_popup_control_labels()
 
     def _on_ecg_window_closed(self):
@@ -6563,7 +6562,7 @@ class View(QMainWindow):
     @staticmethod
     def _make_chart_overlay(parent):
         lbl = QLabel(
-            "No sensor connected\nPress Connect to begin",
+            "No sensor connected\nPress Scan & Connect to begin",
             parent,
         )
         lbl.setAlignment(Qt.AlignCenter)
@@ -6916,6 +6915,9 @@ class View(QMainWindow):
             self._hr_overlay.show()
             self._hrv_overlay.show()
         has_sensors = self._has_sensor_choices()
+        # Scan-first UX:
+        # - pulse Scan when no fresh scan results exist
+        # - pulse Connect when scan has results and next step is connect
         self._connect_pulse_active = has_sensors and not self._is_scanning
         self._scan_pulse_active = (not has_sensors) and not self._is_scanning
         self._apply_connect_ready_state()
@@ -7002,7 +7004,7 @@ class View(QMainWindow):
         if has_sensors:
             self.connect_button.setStyleSheet(self._CONNECT_NORMAL_CSS)
             self.connect_button.setToolTip("Connect to the selected sensor.")
-            self.connect_button.setDefault(True)
+            self.connect_button.setDefault(False)
         else:
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
             self.connect_button.setToolTip("No sensor selected yet. Click Scan first.")
@@ -7015,6 +7017,14 @@ class View(QMainWindow):
             return
         self.connect_button.setFocus(Qt.OtherFocusReason)
         self.connect_button.setDefault(True)
+
+    def _focus_scan_if_needed(self):
+        if self.sensor.client is not None or self._connect_attempt_timer.isActive():
+            return
+        if self._has_sensor_choices():
+            return
+        self.scan_button.setFocus(Qt.OtherFocusReason)
+        self.scan_button.setDefault(True)
 
     def _pulse_connect_button(self):
         if self._is_scanning:
@@ -7051,6 +7061,19 @@ class View(QMainWindow):
                 os.environ["HNH_ENABLE_PMD"] = "1" if current_linux_pmd else "0"
                 self.sensor.set_enable_pmd(current_linux_pmd)
                 if current_linux_pmd != prev_linux_pmd:
+                    state_text = "ON" if current_linux_pmd else "OFF"
+                    msg = QMessageBox(self)
+                    msg.setIcon(QMessageBox.Information)
+                    msg.setWindowTitle("ECG PMD Mode Updated")
+                    msg.setWindowModality(Qt.WindowModal)
+                    msg.setText(
+                        "Linux PMD/ECG Path is now set to "
+                        f"<b>{state_text}</b>.<br><br>"
+                        "Disconnect and reconnect the sensor to apply this change."
+                    )
+                    msg.setStandardButtons(QMessageBox.Ok)
+                    msg.setDefaultButton(QMessageBox.Ok)
+                    msg.exec()
                     self.show_status(
                         "Linux PMD/ECG mode updated. Disconnect/reconnect sensor to apply."
                     )
@@ -7799,7 +7822,10 @@ class View(QMainWindow):
         self.address_menu.addItems(addresses.value)
         self._set_scan_in_progress(False)
         self._apply_connect_ready_state()
-        self._focus_connect_if_ready()
+        if self._has_sensor_choices():
+            self._focus_connect_if_ready()
+        else:
+            self._focus_scan_if_needed()
         if self.sensor.client is None:
             self._start_connect_hints()
         if self._pending_connect_target is not None and self.sensor.client is None:
@@ -7957,11 +7983,6 @@ class View(QMainWindow):
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
             self.scan_button.setEnabled(False)
-            parsed = self._parse_sensor_menu_entry(self.address_menu.currentText())
-            if parsed is not None:
-                name, addr = parsed
-                if "verity" not in name.lower():
-                    _save_last_sensor(name, addr)
             self._auto_start_recording()
         elif "error" in status.lower() or "Disconnecting" in status:
             # If connect failed or link dropped, unblock reconnect immediately.
@@ -8082,8 +8103,10 @@ class View(QMainWindow):
         self._last_qtc_diag_logged = ()
         self._arm_main_plot_warmup(clear_series=clear_series)
         self.qtc_window.clear()
-        if self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
+        if self._ecg_path_active() and self.qtc_button.isEnabled() and not self.qtc_window.isVisible():
             self.qtc_button.setText("QTc (warming up...)")
+        else:
+            self._refresh_popup_control_labels()
         # Stream resets should clear locked/baseline phase banners immediately.
         self.is_phase_active = False
         if self._is_sensor_connected():
@@ -8532,10 +8555,13 @@ class View(QMainWindow):
                 self._arm_main_plot_warmup(clear_series=True)
                 self.ecg_window.sync_timeline_to_main(self._plot_start_delay_seconds)
                 self.qtc_window.sync_timeline_to_main(self._plot_start_delay_seconds)
-                if self.ecg_button.text() != "ECG (waiting for data...)":
-                    self.ecg_button.setText("ECG (waiting for data...)")
-                if self.qtc_button.text() not in ("QTc (warming up...)", "QTc (waiting for data...)"):
-                    self.qtc_button.setText("QTc (waiting for data...)")
+                if self._ecg_path_active():
+                    if self.ecg_button.text() != "ECG (waiting for data...)":
+                        self.ecg_button.setText("ECG (waiting for data...)")
+                    if self.qtc_button.text() not in ("QTc (warming up...)", "QTc (waiting for data...)"):
+                        self.qtc_button.setText("QTc (waiting for data...)")
+                else:
+                    self._refresh_popup_control_labels()
                 if self.settings.DEBUG:
                     print("Timer Started")
 

@@ -60,6 +60,14 @@ Raw ideas go here first.
 - Status: idea
 - Notes: Keep language practical: "OFF for stable HR/RR plotting, ON only when ECG/QTc PMD is needed and stable on this adapter."
 
+### Linux startup BLE prep behavior in Help screens
+- Problem: Linux users may not realize the app can run a startup Bluetooth reset/prep step before the main window appears, which can feel like a launch delay unless explained.
+- Proposed approach: Add a short Help/F1 note that explains the BLE prep popup, expected wait time, and why scan-first flow is recommended.
+- Effort: S
+- Impact: Med
+- Status: idea
+- Notes: Include troubleshooting guidance for "scan sees device but connect fails" and clarify that this startup behavior is Linux-specific.
+
 ### Dynamic Relock tooltip for QTc trend window
 - Problem: The QTc trend `Relock` button tooltip is static, so users may miss that behavior changes by state (locked vs manual vs frozen/resume path).
 - Proposed approach: Mirror ECG tooltip behavior in QTc window with dynamic text updates tied to freeze/manual/relock transitions.
