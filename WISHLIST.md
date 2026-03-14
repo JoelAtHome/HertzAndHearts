@@ -123,20 +123,12 @@ Complexity review checklist:
 - Notes: Start with local config storage; no cloud sync required.
 
 ### Donation/support CTA surfaces with polite frequency controls
-- Problem: Support/donation prompts are currently README-only, so many in-app users (especially kiosk/offline workflows) may never see a support path. Any end-of-session prompt also risks feeling intrusive without opt-out controls.
+- Problem: Support/donation prompts are currently README-only, so many in-app users may never see a support path. Any end-of-session prompt also risks feeling intrusive without opt-out controls.
 - Proposed approach: Added lightweight donation CTA surfaces in-app via `More -> Support Development…` and an optional end-of-session prompt with controls for `Hide for 1 week` and `Never show again`, persisted per profile.
 - Effort: S
 - Impact: Med
 - Status: done
 - Notes: Completed 2026-03-09. Prompt is non-blocking and only shown after finalize/save (not during active sessions). Includes offline fallback status if support link cannot open.
-
-### Kiosk donation/support UX parity (future)
-- Problem: Planned USB Linux kiosk workflows are often offline, so in-app web links may not be reachable during sessions and support messaging can be missed.
-- Proposed approach: Add kiosk-specific support surface with offline-friendly short URL + QR code and include the same suppression options (`Hide for 1 week`, `Never show again`) with per-profile persistence parity.
-- Effort: S
-- Impact: Med
-- Status: idea
-- Notes: Place in kiosk post-session screen and startup/help surface; never interrupt active session workflow.
 
 ### Re-evaluate settings scope after field testing
 - Problem: Initial global vs per-profile settings scope is now defined, but real-world workflows may reveal misclassified knobs (too much shared behavior or too much per-user divergence).

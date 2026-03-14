@@ -8,7 +8,7 @@ from pathlib import Path
 def _configure_linux_qt_defaults() -> None:
     """
     Keep Linux popup/dialog decorations consistent across launch methods.
-    The kiosk launcher exports these already; direct python launches should too.
+    Some launch paths export these already; direct python launches should too.
     """
     if sys.platform != "linux":
         return

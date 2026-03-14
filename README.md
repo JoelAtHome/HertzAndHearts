@@ -45,12 +45,9 @@ For troubleshooting:
 - Public release checklist: `docs/PUBLIC_RELEASE_CHECKLIST.md`
 - BLE platform matrix: `docs/BLE_PLATFORM_VALIDATION_MATRIX.md`
 
-## Packaging and Kiosk
+## Packaging
 
 - Cross-platform packaging: `docs/PACKAGING.md`
-- Build kiosk ISO (WSL + CI): `docs/BUILD_KIOSK_ISO.md`
-- Kiosk architecture notes: `docs/KIOSK_USB_PLAN.md`
-- Kiosk storage layout: `docs/KIOSK_STORAGE_LAYOUT.md`
 
 ## Screenshots and Example Report Assets
 

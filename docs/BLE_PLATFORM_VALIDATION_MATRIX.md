@@ -1,6 +1,6 @@
 # BLE Platform Validation Matrix
 
-Use this document to compare BLE reliability across Windows 11 and Linux kiosk candidates for Hertz & Hearts.
+Use this document to compare BLE reliability across Windows 11 and Linux candidates for Hertz & Hearts.
 
 Who should run this:
 
@@ -16,8 +16,8 @@ Goal:
 Platforms to compare:
 
 - Windows 11 (current desktop baseline)
-- Linux kiosk image (candidate A)
-- Linux kiosk image (candidate B, optional)
+- Linux test environment (candidate A)
+- Linux test environment (candidate B, optional)
 
 Hardware:
 
@@ -80,7 +80,7 @@ When a run fails, classify one primary cause:
 | Platform | Adapter | Total Runs | Connect Success % | Reconnect Success % | Completion % | Artifact Integrity % | Crashes/Hangs | Recommendation |
 |---|---|---:|---:|---:|---:|---:|---:|---|
 | Windows 11 | Intel AX... | 120 | 93.3 | 85.0 | 90.8 | 100 | 2 | Needs tuning |
-| Linux Kiosk A | USB dongle X | 120 | 98.3 | 96.7 | 97.5 | 100 | 0 | Preferred |
+| Linux A | USB dongle X | 120 | 98.3 | 96.7 | 97.5 | 100 | 0 | Preferred |
 
 ## Decision Rule
 
@@ -90,7 +90,7 @@ Select the deployment platform that:
 2. Shows the fewest recoverability issues
 3. Is simplest to support in field operations
 
-If no platform meets thresholds, do not promote to production kiosk mode. Fix blockers and rerun.
+If no platform meets thresholds, do not promote to production deployment. Fix blockers and rerun.
 
 ## Notes for Beta Testers
 

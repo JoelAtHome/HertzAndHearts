@@ -1,8 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=Hertz and Hearts Kiosk
-Comment=Start Hertz and Hearts in kiosk mode
-Exec=/usr/local/bin/hnh-kiosk-launch.sh
-Terminal=false
-X-GNOME-Autostart-enabled=true
-NoDisplay=false

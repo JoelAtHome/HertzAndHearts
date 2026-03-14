@@ -8,6 +8,7 @@
 + enhancement: Added GitHub issue templates for bug reports and feature requests.
 + enhancement: Added funding configuration and README support/reporting links.
 + maintenance: Marked `.app-startup.lock` as ignored runtime lock artifact.
++ maintenance: Removed the kiosk path after the approach failed.
 
 ### Version 1.1.1 (December 19 2025)
 + enhancement: Bumped PySide6 to version 6.10.

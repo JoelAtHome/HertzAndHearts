@@ -16,9 +16,6 @@ Use this as the default shot list for GitHub README, release notes, and beta ads
    - Show profile-aware configuration at a glance.
 6. **Report generation moment**
    - Show post-session flow or generated artifacts path.
-7. **Optional kiosk screenshot**
-   - Show minimal UX if kiosk mode is a target.
-
 ## Recommended GIFs (1-2)
 
 - Connect sensor -> start session -> stop/save (30-45s)

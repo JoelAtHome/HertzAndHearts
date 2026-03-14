@@ -32,7 +32,7 @@ For GUI/runtime dependency requirements, see Qt docs:
 
 If build artifacts are missing on a GitHub release:
 
-- Check Actions runs for `build` and `kiosk-iso`.
+- Check Actions runs for `build`.
 - Confirm release-upload steps succeeded.
 - If needed, manually download workflow artifacts and upload them in the release page.
 
