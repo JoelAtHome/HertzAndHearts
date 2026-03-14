@@ -4970,7 +4970,7 @@ class View(QMainWindow):
         self.hrv_widget.installEventFilter(self)
 
         self._connect_pulse_timer = QTimer()
-        self._connect_pulse_timer.setInterval(700)
+        self._connect_pulse_timer.setInterval(500)
         self._connect_pulse_timer.timeout.connect(self._pulse_connect_button)
         self._connect_attempt_timer = QTimer()
         self._connect_attempt_timer.setSingleShot(True)
@@ -6562,7 +6562,7 @@ class View(QMainWindow):
     @staticmethod
     def _make_chart_overlay(parent):
         lbl = QLabel(
-            "No sensor connected\nPress Scan & Connect to begin",
+            "No sensor connected\nPress Scan to begin",
             parent,
         )
         lbl.setAlignment(Qt.AlignCenter)
@@ -6925,11 +6925,15 @@ class View(QMainWindow):
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
         elif self._scan_pulse_active:
-            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+            # Make the startup guidance visible immediately (before first timer tick).
+            self.scan_button.setStyleSheet(self._SCAN_GLOW_CSS)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
         else:
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
-            self.connect_button.setStyleSheet(self._CONNECT_NORMAL_CSS)
+            if self._connect_pulse_active:
+                self.connect_button.setStyleSheet(self._CONNECT_GLOW_CSS)
+            else:
+                self.connect_button.setStyleSheet(self._CONNECT_NORMAL_CSS)
         if not self._connect_pulse_timer.isActive():
             self._connect_pulse_on = False
             self._connect_pulse_timer.start()
@@ -6969,7 +6973,8 @@ class View(QMainWindow):
     _SCAN_GLOW_CSS = (
         "QPushButton { "
         "font-size: 11px; padding: 2px 6px; "
-        "background: #d4edda; border: 2px solid #28a745; border-radius: 3px; "
+        "font-weight: 700; color: #2d3436; "
+        "background: #ffeaa7; border: 2px solid #e17055; border-radius: 3px; "
         "}"
     )
     _SCAN_NORMAL_CSS = (
