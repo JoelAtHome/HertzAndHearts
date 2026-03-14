@@ -1,4 +1,6 @@
 import struct
+import os
+import platform
 import numpy as np
 from time import perf_counter_ns
 from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer
@@ -35,6 +37,7 @@ def _decode_pmd_ecg_samples(raw_payload: bytes) -> list[float]:
 class SensorScanner(QObject):
     sensor_update = Signal(object)
     status_update = Signal(str)
+    scanning_state = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -47,10 +50,12 @@ class SensorScanner(QObject):
         if self.scanner.isActive():
             self.status_update.emit("Already searching for sensors.")
             return
+        self.scanning_state.emit(True)
         self.status_update.emit("Scanning for BLE sensors...")
         self.scanner.start(QBluetoothDeviceDiscoveryAgent.LowEnergyMethod)
 
     def _handle_scan_result(self):
+        self.scanning_state.emit(False)
         sensors: list[QBluetoothDeviceInfo] = [
             d
             for d in self.scanner.discoveredDevices()
@@ -63,6 +68,7 @@ class SensorScanner(QObject):
         self.status_update.emit(f"Found {len(sensors)} sensor(s).")
 
     def _handle_scan_error(self, error):
+        self.scanning_state.emit(False)
         print(error)
 
 
@@ -122,6 +128,36 @@ class SensorClient(QObject):
         )
         self._connected_device_name: str = ""
         self._verity_warning_emitted = False
+        self._pending_sensor: Union[None, QBluetoothDeviceInfo] = None
+        self._linux_retry_with_public = False
+        self._received_first_hr_packet = False
+        self._pending_pmd_after_hr = False
+        raw_enable_pmd = os.environ.get("HNH_ENABLE_PMD", "").strip().lower()
+        if raw_enable_pmd:
+            self._enable_pmd = raw_enable_pmd in {"1", "true", "yes", "on"}
+        else:
+            # On Linux/BlueZ, PMD control handshake can destabilize some adapters.
+            # Keep core HR/RR streaming stable by default; PMD can be forced on via env.
+            self._enable_pmd = platform.system() != "Linux"
+        raw_conservative = os.environ.get("HNH_PMD_CONSERVATIVE_CONNECT", "").strip().lower()
+        if raw_conservative:
+            self._conservative_pmd_connect = raw_conservative in {"1", "true", "yes", "on"}
+        else:
+            # Linux-only conservative PMD startup: delay PMD until HR packets flow.
+            self._conservative_pmd_connect = platform.system() == "Linux"
+
+    def set_enable_pmd(self, enabled: bool) -> None:
+        self._enable_pmd = bool(enabled)
+        if not self._enable_pmd:
+            self._pending_pmd_after_hr = False
+
+    def _start_pmd_discovery_safe(self) -> None:
+        if self.pmd_service is None:
+            return
+        try:
+            self.pmd_service.discoverDetails()
+        except Exception:
+            pass
 
     def _sensor_address(self):
         return get_sensor_remote_address(self.client)
@@ -137,9 +173,21 @@ class SensorClient(QObject):
         self.status_update.emit(
             f"Connecting to sensor at {get_sensor_address(sensor)} (this might take a while)."
         )
+        self._pending_sensor = sensor
+        self._received_first_hr_packet = False
         self._connected_device_name = sensor.name() or ""
         self._verity_warning_emitted = False
+        self._linux_retry_with_public = False
+        addr_hint = os.environ.get("HNH_BLE_ADDRESS_TYPE", "auto").strip().lower()
+        remote_type = QLowEnergyController.RemoteAddressType.RandomAddress
+        if addr_hint == "public":
+            remote_type = QLowEnergyController.RemoteAddressType.PublicAddress
+        elif platform.system() == "Linux" and addr_hint == "auto":
+            # Try Random first (common for BLE), then auto-retry Public once on ConnectionError.
+            self._linux_retry_with_public = True
         self.client = QLowEnergyController.createCentral(sensor)
+        if platform.system() == "Linux":
+            self.client.setRemoteAddressType(remote_type)
         self.client.errorOccurred.connect(self._catch_error)
         self.client.connected.connect(self._discover_services)
         self.client.discoveryFinished.connect(self._connect_hr_service)
@@ -200,6 +248,8 @@ class SensorClient(QObject):
         self.hr_service.discoverDetails()
 
         self._connect_battery_service()
+        if not self._enable_pmd:
+            return
 
         pmd_uuid_str = self.PMD_SERVICE_UUID.toString().lower()
         pmd_match = [
@@ -219,7 +269,11 @@ class SensorClient(QObject):
             self.pmd_service.characteristicWritten.connect(self._pmd_write_confirmed)
             self.pmd_service.descriptorWritten.connect(self._pmd_descriptor_written)
             self.pmd_service.errorOccurred.connect(self._pmd_error)
-            self.pmd_service.discoverDetails()
+            if self._conservative_pmd_connect:
+                # Linux safety path: wait until first HR packet before PMD handshake.
+                self._pending_pmd_after_hr = True
+            else:
+                self.pmd_service.discoverDetails()
         else:
             print(f"Couldn't establish connection to PMD service on {self._sensor_address()}.")
 
@@ -337,7 +391,10 @@ class SensorClient(QObject):
         if self._pmd_ready:
             return
         self._pmd_ready = True
-        self.start_ecg_stream()
+        if self._conservative_pmd_connect:
+            QTimer.singleShot(350, self.start_ecg_stream)
+        else:
+            self.start_ecg_stream()
 
     def start_ecg_stream(self):
         if self.pmd_service is None:
@@ -421,6 +478,7 @@ class SensorClient(QObject):
         self._ecg_start_pending = False
         self._ecg_data_received = False
         self._pmd_descriptors_pending = 0
+        self._pending_pmd_after_hr = False
         self._battery_timer.stop()
         self.battery_update.emit(-1)
         self._remove_battery_service()
@@ -500,6 +558,35 @@ class SensorClient(QObject):
             self.client = None
 
     def _catch_error(self, error):
+        if (
+            platform.system() == "Linux"
+            and error in (
+                QLowEnergyController.Error.ConnectionError,
+                QLowEnergyController.Error.UnknownRemoteDeviceError,
+            )
+            and self._linux_retry_with_public
+            and self._pending_sensor is not None
+            and not self._received_first_hr_packet
+        ):
+            self._linux_retry_with_public = False
+            self.status_update.emit(
+                "Connection retry: switching BLE address mode (Random → Public)."
+            )
+            sensor = self._pending_sensor
+            self._remove_battery_service()
+            self._remove_pmd_service()
+            self._remove_service()
+            self._remove_client()
+            self.client = QLowEnergyController.createCentral(sensor)
+            self.client.setRemoteAddressType(
+                QLowEnergyController.RemoteAddressType.PublicAddress
+            )
+            self.client.errorOccurred.connect(self._catch_error)
+            self.client.connected.connect(self._discover_services)
+            self.client.discoveryFinished.connect(self._connect_hr_service)
+            self.client.disconnected.connect(self._reset_connection)
+            self.client.connectToDevice()
+            return
         try:
             self.status_update.emit(f"An error occurred: {error}. Disconnecting sensor.")
         except Exception:
@@ -539,6 +626,13 @@ class SensorClient(QObject):
             on presence of uint16 HR format and energy expenditure.
         """
         heart_rate_measurement_bytes: bytes = data.data()
+        if not self._received_first_hr_packet:
+            self._received_first_hr_packet = True
+            self._pending_sensor = None
+            self._linux_retry_with_public = False
+            if self._pending_pmd_after_hr and self._enable_pmd:
+                self._pending_pmd_after_hr = False
+                QTimer.singleShot(700, self._start_pmd_discovery_safe)
 
         # self.status_update.emit("Sensor Connected and Streaming Data")
 

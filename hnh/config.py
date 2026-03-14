@@ -143,6 +143,10 @@ ECG_SAMPLE_RATE: Final[int] = 130  # Hz
 # How many seconds of ECG waveform are visible at once.
 ECG_DISPLAY_SECONDS: Final[int] = 5
 
+# Linux-only toggle: enable Polar PMD (ECG control/data) path.
+# Some BlueZ/adapter combinations are more stable with HR/RR-only mode.
+LINUX_ENABLE_PMD_EXPERIMENTAL: Final[bool] = False
+
 # Chart refresh interval.  33 ms ≈ 30 fps — a good balance between
 # smooth animation and CPU/GPU load.
 ECG_REFRESH_MS: Final[int] = 33
