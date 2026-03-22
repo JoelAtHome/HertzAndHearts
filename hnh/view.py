@@ -1,4 +1,5 @@
 from datetime import datetime, date, timedelta
+import bisect
 import hashlib
 import os
 import platform
@@ -825,29 +826,41 @@ class SessionHistoryDialog(QDialog):
         tab_replay_layout.addLayout(replay_controls)
 
         hint = QLabel(
-            "Use mouse to pan; mouse wheel on each axis to zoom. "
-            "Drag the timeline scrubber or use Play to scroll through time."
+            "Mouse wheel zooms; drag vertically to pan each plot’s amplitude. "
+            "Time axis is shared across plots (no horizontal drag). "
+            "Use the timeline scrubber or Play to move through time."
         )
         hint.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
+        hint.setWordWrap(True)
         tab_replay_layout.addWidget(hint)
 
         self._replay_plot_stack = pg.GraphicsLayoutWidget()
         self._replay_plot_stack.setBackground("w")
         self._replay_hr_plot = self._replay_plot_stack.addPlot(row=0, col=0, title="HR (bpm)")
         self._replay_hr_plot.setLabel("bottom", "Time (s)")
-        self._replay_hr_plot.setMouseEnabled(x=True, y=True)
         self._replay_hr_plot.showGrid(x=True, y=True, alpha=0.3)
         self._replay_plot_stack.nextRow()
         self._replay_rmssd_plot = self._replay_plot_stack.addPlot(row=1, col=0, title="RMSSD (ms)")
         self._replay_rmssd_plot.setLabel("bottom", "Time (s)")
-        self._replay_rmssd_plot.setMouseEnabled(x=True, y=True)
         self._replay_rmssd_plot.showGrid(x=True, y=True, alpha=0.3)
         self._replay_plot_stack.nextRow()
         self._replay_ecg_plot = self._replay_plot_stack.addPlot(row=2, col=0, title="ECG")
         self._replay_ecg_plot.setLabel("bottom", "Time (s)")
-        self._replay_ecg_plot.setMouseEnabled(x=True, y=True)
         self._replay_ecg_plot.showGrid(x=True, y=True, alpha=0.3)
+        # One shared time axis: wheel-zoom and range stay aligned; no horizontal drag per plot.
+        self._replay_rmssd_plot.setXLink(self._replay_hr_plot)
+        self._replay_ecg_plot.setXLink(self._replay_hr_plot)
+        for _rp in (self._replay_hr_plot, self._replay_rmssd_plot, self._replay_ecg_plot):
+            _rp.setMouseEnabled(x=False, y=True)
+            _vb = _rp.getViewBox()
+            if _vb is not None:
+                _vb.setMouseEnabled(x=False, y=True)
         tab_replay_layout.addWidget(self._replay_plot_stack, stretch=1)
+
+        self._replay_readout_label = QLabel("")
+        self._replay_readout_label.setWordWrap(True)
+        self._replay_readout_label.setStyleSheet("font-size: 11px; color: #222;")
+        tab_replay_layout.addWidget(self._replay_readout_label)
 
         timeline_layout = QHBoxLayout()
         timeline_layout.addWidget(QLabel("Time:"))
@@ -894,6 +907,8 @@ class SessionHistoryDialog(QDialog):
         self._replay_playhead_line_hr: pg.InfiniteLine | None = None
         self._replay_playhead_line_rmssd: pg.InfiniteLine | None = None
         self._replay_playhead_line_ecg: pg.InfiniteLine | None = None
+
+        self._replay_refresh_readout()
 
         self.populate(profile_name=profile_name, sessions=sessions)
         self._populate_replay_session_combo()
@@ -1366,7 +1381,13 @@ class SessionHistoryDialog(QDialog):
             ecg_t = [i / ecg_rate for i in range(len(ecg_samples))]
             self._replay_ecg_plot.plot(ecg_t, ecg_samples, pen=pg.mkPen("k", width=1.0))
         else:
-            self._replay_ecg_plot.addItem(pg.TextItem("No ECG data (load from EDF or CSV)", anchor=(0.5, 0.5)))
+            self._replay_ecg_plot.addItem(
+                pg.TextItem(
+                    "No ECG: replay reads waveform from session.edf only (not session.csv). "
+                    "Enable EDF+ export when saving, or add session.edf to this folder.",
+                    anchor=(0.5, 0.5),
+                )
+            )
 
         # Playhead lines
         self._replay_playhead_line_hr = pg.InfiniteLine(
@@ -1401,6 +1422,7 @@ class SessionHistoryDialog(QDialog):
         self._replay_playing = False
         self._replay_play_btn.setText("Play")
         self._replay_timer.stop()
+        self._replay_update_playhead()
 
     def _replay_toggle_play(self):
         """Play or pause replay."""
@@ -1436,6 +1458,9 @@ class SessionHistoryDialog(QDialog):
         """Update playhead position and timeline slider."""
         sec = self._replay_playhead_sec
         self._replay_time_label.setText(f"{sec:.1f} s")
+        if not self._replay_data:
+            self._replay_refresh_readout()
+            return
         duration = self._replay_data.get("duration_seconds") or 0.0
         max_slider = self._replay_timeline_slider.maximum()
         if duration > 0 and max_slider > 0:
@@ -1449,6 +1474,57 @@ class SessionHistoryDialog(QDialog):
             self._replay_playhead_line_rmssd.setValue(sec)
         if self._replay_playhead_line_ecg is not None:
             self._replay_playhead_line_ecg.setValue(sec)
+        self._replay_refresh_readout()
+
+    @staticmethod
+    def _replay_last_sample(times: list, values: list, t: float) -> float | None:
+        if not times or not values or len(times) != len(values):
+            return None
+        i = bisect.bisect_right(times, t) - 1
+        if i < 0:
+            return None
+        return float(values[i])
+
+    def _replay_refresh_readout(self) -> None:
+        """Show HR, RMSSD, HRV/SDNN (if present), and ECG at the current playhead time."""
+        if not self._replay_data:
+            self._replay_readout_label.setText(
+                "Values at playhead: load a session, then scrub or play — "
+                "HR, RMSSD, optional SDNN, and ECG sample appear here."
+            )
+            return
+        t = float(self._replay_playhead_sec)
+        data = self._replay_data
+        parts: list[str] = [f"time {t:.2f} s"]
+
+        hr = self._replay_last_sample(
+            data.get("hr_times") or [], data.get("hr_values") or [], t
+        )
+        parts.append(f"HR {hr:.1f} bpm" if hr is not None else "HR —")
+
+        rmssd = self._replay_last_sample(
+            data.get("rmssd_times") or [], data.get("rmssd_values") or [], t
+        )
+        parts.append(f"RMSSD {rmssd:.1f} ms" if rmssd is not None else "RMSSD —")
+
+        hrv_t = data.get("hrv_times") or []
+        hrv_v = data.get("hrv_values") or []
+        if hrv_t and hrv_v:
+            sdnn = self._replay_last_sample(hrv_t, hrv_v, t)
+            parts.append(f"SDNN {sdnn:.1f} ms" if sdnn is not None else "SDNN —")
+
+        rate = float(data.get("ecg_sample_rate_hz") or 0)
+        samps = data.get("ecg_samples") or []
+        if samps and rate > 0:
+            idx = int(t * rate)
+            if 0 <= idx < len(samps):
+                parts.append(f"ECG {float(samps[idx]):.4f}")
+            else:
+                parts.append("ECG —")
+        else:
+            parts.append("ECG —")
+
+        self._replay_readout_label.setText("  ·  ".join(parts))
 
     def _replay_on_timeline_moved(self, val: int):
         """User dragged timeline scrubber."""
@@ -1565,7 +1641,7 @@ class TrendsWindow(QMainWindow):
             axisItems={"bottom": recovery_date_axis}
         )
         self._rmssd_recovery_plot.setLabel("left", "RMSSD (ms)")
-        self._rmssd_recovery_plot.setMaximumHeight(170)
+        self._rmssd_recovery_plot.setMaximumHeight(340)
         self._rmssd_recovery_plot.showGrid(x=True, y=True, alpha=0.25)
         self._rmssd_recovery_plot.setXLink(self._plot_widget)
         tab1_layout.addWidget(self._rmssd_recovery_plot)

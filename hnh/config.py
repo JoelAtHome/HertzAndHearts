@@ -108,9 +108,8 @@ PLOT_WARMUP_SECONDS: Final[float] = MAIN_PLOT_START_SECONDS
 # so SDNN (needs stdev of ≥3 intervals) begins on the same x as the other two.
 MAIN_PLOT_SYNC_MIN_IBIS: Final[int] = 3
 
-# Export EDF+ session artifact on finalization.
-# Disabled by default to keep baseline recording/export lightweight.
-EXPORT_EDF_PLUS_D: Final[bool] = False
+# Export EDF+ session artifact on finalization (enables ECG in Session Replay).
+EXPORT_EDF_PLUS_D: Final[bool] = True
 
 # Folder where finalized sessions are copied. Empty = use default app data Sessions/{profile}.
 SESSION_SAVE_PATH: Final[str] = ""

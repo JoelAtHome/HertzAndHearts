@@ -5,6 +5,7 @@ Defaults come from config.py.  User changes are saved to a small JSON
 file in the user's home directory so they survive app restarts.
 """
 import json
+import math
 import os
 import shutil
 from collections import OrderedDict
@@ -16,7 +17,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QScrollArea, QWidget, QLineEdit, QListWidget,
     QInputDialog, QAbstractItemView, QFileDialog,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 
 from hnh import config as _defaults
 from hnh.data_paths import (
@@ -61,7 +62,8 @@ REGISTRY = OrderedDict([
         "display": "Export EDF+ on Finalize",
         "tooltip": (
             "When enabled, saving/finalizing a session also writes a compact "
-            "EDF+ file containing derived HR and RMSSD trend channels."
+            "EDF+ file with HR, RMSSD, and ECG (or synthetic ECG for replay). "
+            "Replay plots the waveform from this file; CSV alone does not carry ECG."
         ),
         "type": bool,
         "section": "Session Timing",
@@ -71,7 +73,9 @@ REGISTRY = OrderedDict([
         "display": "Session Save Path",
         "tooltip": (
             "Folder where finalized sessions (CSV, report, EDF+) are copied. "
-            "Leave empty to use the app data folder's Sessions/{profile} location."
+            "Leave empty to use the app data folder's Sessions/{profile} location. "
+            "Stored when you confirm Save & Close; the next Stop & Save uses this path "
+            "(no app restart)."
         ),
         "type": str,
         "section": "Session Timing",
@@ -417,12 +421,15 @@ def profile_scoped_keys() -> set[str]:
 class PathEditWidget(QWidget):
     """Line edit with Browse button for directory selection."""
 
+    textChanged = Signal(str)
+
     def __init__(self, current: str = "", parent=None):
         super().__init__(parent)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._edit = QLineEdit()
         self._edit.setText(current)
+        self._edit.textChanged.connect(self.textChanged.emit)
         layout.addWidget(self._edit)
         browse = QPushButton("Browse…")
         browse.clicked.connect(self._browse)
@@ -439,6 +446,34 @@ class PathEditWidget(QWidget):
 
     def setValue(self, val: str) -> None:
         self._edit.setText(val or "")
+
+
+# ──────────────────────────────────────────────────────────────────────
+#  Spin boxes: wheel scrolls the parent until the control is clicked (ClickFocus);
+#  after that, wheel adjusts the value like a normal spin box.
+# ──────────────────────────────────────────────────────────────────────
+class SpinBoxNoWheelUnlessFocused(QSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
+
+
+class DoubleSpinBoxNoWheelUnlessFocused(QDoubleSpinBox):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setFocusPolicy(Qt.ClickFocus)
+
+    def wheelEvent(self, event):
+        if not self.hasFocus():
+            event.ignore()
+            return
+        super().wheelEvent(event)
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -763,6 +798,12 @@ class AnnotationEditorDialog(QDialog):
 # ──────────────────────────────────────────────────────────────────────
 class SettingsDialog(QDialog):
     _show_advanced = False
+    # Non-default: keep text near-black for contrast; blue is a left accent only.
+    _LABEL_STYLE_DEFAULT = "border: none; padding-left: 0; margin-left: 0;"
+    _LABEL_STYLE_NON_DEFAULT = (
+        "font-weight: 700; color: #0d0d0d; border-left: 4px solid #1565c0; "
+        "padding-left: 8px; margin-left: 0;"
+    )
 
     def __init__(
         self,
@@ -780,6 +821,8 @@ class SettingsDialog(QDialog):
         self._profile_id = str(profile_id or "").strip()
         self._widgets: dict[str, QCheckBox | QSpinBox | QDoubleSpinBox | PathEditWidget] = {}
         self._labels: dict[str, QLabel] = {}
+        self._base_tooltips: dict[str, str] = {}
+        self._baseline_values: dict[str, object] | None = None
         self._advanced_groups: list[QGroupBox] = []
         self._section_groups: list[tuple[QGroupBox, list[str], bool]] = []
         self._pending_disclaimer_reset = "none"
@@ -852,11 +895,13 @@ class SettingsDialog(QDialog):
             for key, meta in items:
                 widget = self._create_widget(key, meta)
                 label = QLabel(self._build_label(meta))
-                label.setToolTip(meta["tooltip"])
-                widget.setToolTip(meta["tooltip"])
+                full_tip = self._compose_setting_tooltip(key, meta)
+                label.setToolTip(full_tip)
+                widget.setToolTip(full_tip)
                 form.addRow(label, widget)
                 self._widgets[key] = widget
                 self._labels[key] = label
+                self._base_tooltips[key] = full_tip
                 section_keys.append(key)
             self._form_layout.addWidget(group)
             if is_advanced:
@@ -866,6 +911,15 @@ class SettingsDialog(QDialog):
 
         scroll.setWidget(scroll_content)
         root.addWidget(scroll, stretch=1)
+
+        default_legend = QLabel(
+            "Values that differ from the factory default use bold text with a blue bar "
+            "beside the label. Every setting tooltip includes its factory default. "
+            "Hover a label for the full description."
+        )
+        default_legend.setWordWrap(True)
+        default_legend.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
+        root.addWidget(default_legend)
 
         # Advanced toggle
         self._advanced_toggle = QCheckBox("Show Advanced / Engineering Settings")
@@ -890,6 +944,8 @@ class SettingsDialog(QDialog):
 
         self._toggle_advanced(SettingsDialog._show_advanced)
         self._apply_scope_filter(self._scope_filter_toggle.isChecked())
+
+        self._wire_factory_default_highlights()
 
         # Buttons
         btn_row = QHBoxLayout()
@@ -921,6 +977,114 @@ class SettingsDialog(QDialog):
 
         root.addLayout(btn_row)
 
+    # --- factory-default highlighting ------------------------------------
+
+    @staticmethod
+    def _compose_setting_tooltip(key: str, meta: dict) -> str:
+        base = str(meta.get("tooltip") or "").strip()
+        fd = SettingsDialog._factory_default_tip_line(key)
+        if not base:
+            return fd
+        return f"{base}\n\n{fd}"
+
+    @staticmethod
+    def _factory_default_tip_line(key: str) -> str:
+        d = getattr(_defaults, key)
+        meta = REGISTRY[key]
+        t = meta["type"]
+        if t is bool:
+            return f"Factory default: {'On' if d else 'Off'}"
+        if t is int:
+            unit = str(meta.get("unit") or "").strip()
+            suf = f" {unit}" if unit else ""
+            return f"Factory default: {int(d)}{suf}"
+        if t is float:
+            unit = str(meta.get("unit") or "").strip()
+            dec = int(meta.get("decimals", 1))
+            suf = f" {unit}" if unit else ""
+            return f"Factory default: {float(d):.{dec}f}{suf}"
+        if t is str:
+            s = str(d).strip()
+            if not s:
+                if key == "SESSION_SAVE_PATH":
+                    return (
+                        "Factory default: empty (built-in session folder under your data root)"
+                    )
+                return "Factory default: empty"
+            return f"Factory default: {s}"
+        return f"Factory default: {d!r}"
+
+    def _effective_widget_value(self, key: str) -> object:
+        widget = self._widgets[key]
+        t = REGISTRY[key]["type"]
+        if t is bool:
+            return widget.isChecked()
+        if t is str:
+            v = widget.value()
+            if key == "SESSION_SAVE_PATH" and self._session_save_path_default and v == self._session_save_path_default:
+                return ""
+            return v
+        return widget.value()
+
+    def _matches_factory_default(self, key: str, val: object) -> bool:
+        d = getattr(_defaults, key)
+        t = REGISTRY[key]["type"]
+        if t is bool:
+            return bool(val) is bool(d)
+        if t is int:
+            return int(val) == int(d)
+        if t is str:
+            return str(val or "") == str(d or "")
+        if t is float:
+            return math.isclose(float(val), float(d), rel_tol=0.0, abs_tol=1e-6)
+        return val == d
+
+    def _refresh_default_highlight(self, key: str) -> None:
+        label = self._labels.get(key)
+        if label is None:
+            return
+        widget = self._widgets.get(key)
+        base_tip = self._base_tooltips.get(key, label.toolTip())
+        try:
+            cur = self._effective_widget_value(key)
+            at_default = self._matches_factory_default(key, cur)
+        except (TypeError, ValueError):
+            at_default = True
+        if at_default:
+            label.setStyleSheet(SettingsDialog._LABEL_STYLE_DEFAULT)
+            label.setToolTip(base_tip)
+            if widget is not None:
+                widget.setToolTip(base_tip)
+        else:
+            label.setStyleSheet(SettingsDialog._LABEL_STYLE_NON_DEFAULT)
+            nd_tip = (
+                base_tip
+                + "\n\nCurrent value differs from the app factory default "
+                "(config.py / fresh install)."
+            )
+            label.setToolTip(nd_tip)
+            if widget is not None:
+                widget.setToolTip(nd_tip)
+
+    def _wire_factory_default_highlights(self) -> None:
+        for key, widget in self._widgets.items():
+            if isinstance(widget, QCheckBox):
+                widget.stateChanged.connect(
+                    lambda *_a, k=key: self._refresh_default_highlight(k)
+                )
+            elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
+                widget.valueChanged.connect(
+                    lambda *_a, k=key: self._refresh_default_highlight(k)
+                )
+            elif isinstance(widget, PathEditWidget):
+                widget.textChanged.connect(
+                    lambda *_a, k=key: self._refresh_default_highlight(k)
+                )
+
+    def _refresh_all_default_highlights(self) -> None:
+        for k in self._widgets:
+            self._refresh_default_highlight(k)
+
     # --- widget helpers ---------------------------------------------------
 
     @staticmethod
@@ -946,13 +1110,13 @@ class SettingsDialog(QDialog):
                 display_val = self._session_save_path_default
             w = PathEditWidget(display_val)
         elif meta["type"] is float:
-            w = QDoubleSpinBox()
+            w = DoubleSpinBoxNoWheelUnlessFocused()
             w.setRange(meta["min"], meta["max"])
             w.setDecimals(meta.get("decimals", 1))
             w.setSingleStep(meta.get("step", 0.5))
             w.setValue(current)
         else:
-            w = QSpinBox()
+            w = SpinBoxNoWheelUnlessFocused()
             w.setRange(meta["min"], meta["max"])
             w.setSingleStep(meta.get("step", 1))
             w.setValue(current)
@@ -969,6 +1133,74 @@ class SettingsDialog(QDialog):
                 values[key] = widget.value()
         return values
 
+    def _normalize_for_persist(self, key: str, val: object) -> object:
+        if key == "SESSION_SAVE_PATH" and self._session_save_path_default:
+            if val == self._session_save_path_default:
+                return ""
+        return val
+
+    def _normalized_read_widgets(self) -> dict[str, object]:
+        return {k: self._normalize_for_persist(k, v) for k, v in self._read_widgets().items()}
+
+    def _persist_equal(self, key: str, a: object, b: object) -> bool:
+        t = REGISTRY[key]["type"]
+        if t is float:
+            try:
+                return math.isclose(float(a), float(b), rel_tol=0.0, abs_tol=1e-6)
+            except (TypeError, ValueError):
+                return False
+        return a == b
+
+    def _snapshots_equal(self, left: dict[str, object], right: dict[str, object]) -> bool:
+        if set(left) != set(right):
+            return False
+        for k in left:
+            if not self._persist_equal(k, left[k], right[k]):
+                return False
+        return True
+
+    def _format_value_for_change_list(self, key: str, val: object) -> str:
+        t = REGISTRY[key]["type"]
+        if t is bool:
+            return "On" if val else "Off"
+        if t is int:
+            try:
+                return str(int(val))
+            except (TypeError, ValueError):
+                return str(val)
+        if t is float:
+            dec = int(REGISTRY[key].get("decimals", 1))
+            try:
+                return f"{float(val):.{dec}f}"
+            except (TypeError, ValueError):
+                return str(val)
+        if t is str:
+            s = str(val).strip() if val is not None else ""
+            if not s:
+                return "(empty — built-in default)"
+            if len(s) > 72:
+                return f"{s[:34]}…{s[-34:]}"
+            return s
+        return repr(val)
+
+    def _summarize_changes(
+        self, old: dict[str, object], new: dict[str, object]
+    ) -> list[str]:
+        lines: list[str] = []
+        for key, meta in REGISTRY.items():
+            if key not in old or key not in new:
+                continue
+            o, n = old[key], new[key]
+            if self._persist_equal(key, o, n):
+                continue
+            disp = str(meta.get("display") or key)
+            scope = str(meta.get("scope", "global")).strip().lower()
+            tag = " [Profile]" if scope == "profile" else " [Global]"
+            fo = self._format_value_for_change_list(key, o)
+            fn = self._format_value_for_change_list(key, n)
+            lines.append(f"{disp}{tag}: {fo} → {fn}")
+        return lines
+
     def _write_widgets(self):
         for key, widget in self._widgets.items():
             val = getattr(self._settings, key)
@@ -982,15 +1214,32 @@ class SettingsDialog(QDialog):
             else:
                 widget.setValue(val)
 
+    def _apply_snapshot_to_widgets(self, snap: dict[str, object]) -> None:
+        """Restore controls from a normalized snapshot (e.g. session baseline)."""
+        for key, raw in snap.items():
+            widget = self._widgets.get(key)
+            if widget is None:
+                continue
+            t = REGISTRY[key]["type"]
+            if t is bool:
+                widget.setChecked(bool(raw))
+            elif t is str:
+                display_val = str(raw) if raw else ""
+                if key == "SESSION_SAVE_PATH" and not display_val and self._session_save_path_default:
+                    display_val = self._session_save_path_default
+                widget.setValue(display_val)
+            elif t is float:
+                widget.setValue(float(raw))
+            else:
+                widget.setValue(int(raw))
+
     # --- button handlers --------------------------------------------------
 
-    def _save_and_close(self):
+    def _persist_settings_and_accept(self) -> None:
         values = self._read_widgets()
         scoped_profile = profile_scoped_keys()
         for key, val in values.items():
-            if key == "SESSION_SAVE_PATH" and self._session_save_path_default:
-                if val == self._session_save_path_default:
-                    val = ""  # Store empty = use default
+            val = self._normalize_for_persist(key, val)
             setattr(self._settings, key, val)
             if (
                 key in scoped_profile
@@ -1005,6 +1254,53 @@ class SettingsDialog(QDialog):
         self._settings.save(exclude_keys=scoped_profile)
         self.accept()
 
+    def _save_and_close(self) -> None:
+        proposed = self._normalized_read_widgets()
+        baseline = self._baseline_values
+        if baseline is not None and not self._snapshots_equal(baseline, proposed):
+            lines = self._summarize_changes(baseline, proposed)
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Confirm changes?")
+            msg.setIcon(QMessageBox.Question)
+            msg.setText(
+                "You changed one or more settings. Accept these changes and close the dialog?"
+            )
+            bullet = "\n".join(f"• {ln}" for ln in lines)
+            foot = (
+                "\n\nCancel returns to Settings without saving. "
+                "Restore Previous puts all fields back to when you opened Settings "
+                "(not the same as the Restore Defaults button on the main screen). "
+                "Accept writes values, closes this dialog, and applies them in the app "
+                "(most options take effect immediately; e.g. session save path is used on the "
+                "next Stop & Save)."
+            )
+            if len(lines) <= 16:
+                msg.setInformativeText(bullet + foot)
+            else:
+                msg.setInformativeText(
+                    f"{len(lines)} settings will change.{foot}\n\n"
+                    "Use “Show Details…” for the full list."
+                )
+                msg.setDetailedText(bullet)
+            restore_btn = msg.addButton(
+                "Restore Previous", QMessageBox.ButtonRole.ActionRole
+            )
+            cancel_btn = msg.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+            accept_btn = msg.addButton("Accept", QMessageBox.ButtonRole.AcceptRole)
+            msg.setDefaultButton(accept_btn)
+            msg.exec()
+            clicked = msg.clickedButton()
+            if clicked == cancel_btn:
+                return
+            if clicked == restore_btn:
+                if self._baseline_values is not None:
+                    self._apply_snapshot_to_widgets(self._baseline_values)
+                    self._refresh_all_default_highlights()
+                return
+            if clicked != accept_btn:
+                return
+        self._persist_settings_and_accept()
+
     def _restore_defaults(self):
         reply = QMessageBox.question(
             self,
@@ -1015,6 +1311,8 @@ class SettingsDialog(QDialog):
         if reply == QMessageBox.Yes:
             self._settings.reset_defaults()
             self._write_widgets()
+            self._refresh_all_default_highlights()
+            self._baseline_values = self._normalized_read_widgets()
 
     def _toggle_advanced(self, show: bool):
         SettingsDialog._show_advanced = show
@@ -1226,4 +1524,6 @@ class SettingsDialog(QDialog):
 
     def showEvent(self, event):
         self._write_widgets()
+        self._refresh_all_default_highlights()
+        self._baseline_values = self._normalized_read_widgets()
         super().showEvent(event)

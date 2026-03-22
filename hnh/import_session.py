@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import csv
 import math
+import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -206,6 +207,20 @@ def import_file_as_session(
     bundle = create_session_bundle(session_root, profile_id)
     write_session_csv(bundle.csv_path, data)
 
+    edf_ok = False
+    if source_path.suffix.lower() == ".edf":
+        try:
+            shutil.copy2(source_path, bundle.edf_path)
+            edf_ok = bundle.edf_path.is_file()
+        except OSError:
+            edf_ok = False
+
+    artifacts: dict[str, Any] = {
+        "csv": {"path": str(bundle.csv_path.name), "exists": True},
+    }
+    if edf_ok:
+        artifacts["edf"] = {"path": str(bundle.edf_path.name), "exists": True}
+
     now = datetime.now()
     payload = {
         "schema_version": 1,
@@ -231,9 +246,7 @@ def import_file_as_session(
         "disconnect_intervals": [],
         "disconnect_total_seconds": 0,
         "disclaimer": {},
-        "artifacts": {
-            "csv": {"path": str(bundle.csv_path.name), "exists": True},
-        },
+        "artifacts": artifacts,
     }
     write_manifest(bundle.manifest_path, payload)
 
