@@ -5,6 +5,8 @@
 import platform
 import re
 
+from PyInstaller.utils.hooks import collect_submodules
+
 block_cipher = None
 
 # Read version from pyproject.toml (single source of truth).
@@ -17,6 +19,28 @@ IS_WIN = platform.system() == "Windows"
 
 icon_path = "docs/logo.icns" if IS_MAC else "docs/logo.ico"
 
+# Exclude only tkinter (Qt app). Do not strip other stdlib modules without auditing imports.
+# Hidden: lazy imports under hnh/ and full reportlab subtree (PDF export).
+_hiddenimports = [
+    "PySide6.QtCharts",
+    "PySide6.QtBluetooth",
+    "PySide6.QtWidgets",
+    "PySide6.QtCore",
+    "PySide6.QtGui",
+    "hnh.resources",
+    "numpy",
+    "hrvanalysis",
+    "matplotlib.figure",
+    "matplotlib.backends.backend_agg",
+    "scipy.signal",
+    "neurokit2",
+    "pyedflib",
+    "qrcode",
+    "qrcode.constants",
+    "pandas.errors",
+]
+_hiddenimports += collect_submodules("reportlab")
+
 a = Analysis(
     ["hnh/app.py"],
     pathex=[],
@@ -24,23 +48,12 @@ a = Analysis(
     datas=[
         ("LICENSE", "."),
     ],
-    hiddenimports=[
-        "PySide6.QtCharts",
-        "PySide6.QtBluetooth",
-        "PySide6.QtWidgets",
-        "PySide6.QtCore",
-        "PySide6.QtGui",
-        "hnh.resources",
-        "numpy",
-        "hrvanalysis",
-    ],
+    hiddenimports=_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         "tkinter",
-        "unittest",
-        "pydoc",
     ],
     noarchive=False,
     cipher=block_cipher,
