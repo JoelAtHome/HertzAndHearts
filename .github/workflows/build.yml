@@ -17,10 +17,16 @@ jobs:
         include:
           - os: ubuntu-24.04
             package_name: Hertz-and-Hearts-linux-x64.tar.gz
+            artifact_name: Hertz-and-Hearts-linux-x64
+            artifact_path: dist/Hertz-and-Hearts
           - os: windows-2022
             package_name: Hertz-and-Hearts-windows-x64.zip
+            artifact_name: Hertz-and-Hearts-windows-x64
+            artifact_path: dist/Hertz-and-Hearts
           - os: macos-14
             package_name: Hertz-and-Hearts-macos.zip
+            artifact_name: Hertz-and-Hearts-macos
+            artifact_path: dist/Hertz-and-Hearts.app
 
     runs-on: ${{ matrix.os }}
 
@@ -65,11 +71,13 @@ jobs:
           $ver = $ver -replace "b0$", "-beta"
           iscc "/DMyAppVersion=$ver" installer.iss
 
+      # Upload the built tree, not a pre-made .zip/.tar.gz: GitHub always zips
+      # artifacts, so uploading e.g. *.zip yields a zip inside the download zip.
       - name: Upload platform artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.package_name }}
-          path: dist/${{ matrix.package_name }}
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_path }}
 
       - name: Upload Windows setup artifact
         if: runner.os == 'Windows'
