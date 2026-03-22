@@ -8203,6 +8203,10 @@ class View(QMainWindow):
         if latest_session_time > 0:
             self._session_reset_markers_seconds.append(latest_session_time)
             self._session_report_time_offset_seconds = latest_session_time
+        # Drop frozen segment copies; new points restart at plot_elapsed≈0 and would
+        # overlap old segments on the same x window (disconnect/recovery gaps).
+        self._clear_main_plot_segment_series()
+        self._last_main_plot_elapsed_sec = 0.0
         self.start_time = None
         self.baseline_rmssd = None
         self.baseline_values = []
@@ -8235,6 +8239,36 @@ class View(QMainWindow):
             self.baseline_series.clear()
         if hasattr(self, 'hr_baseline_series'):
             self.hr_baseline_series.clear()
+        if not self._main_plots_frozen:
+            x_lo, x_hi = self._compute_main_plot_xrange(0.0)
+            self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
+        else:
+            self._apply_main_plot_interaction_mode()
+
+    def _clear_main_plot_segment_series(self) -> None:
+        """Remove gap/segment copies from charts (used after baseline reset and similar)."""
+        for seg in self._hr_segments:
+            try:
+                self.ibis_widget.plot.removeSeries(seg)
+                seg.deleteLater()
+            except Exception:
+                pass
+        self._hr_segments.clear()
+        hrv_chart = self.hrv_widget.chart()
+        for seg in self._rmssd_segments:
+            try:
+                hrv_chart.removeSeries(seg)
+                seg.deleteLater()
+            except Exception:
+                pass
+        self._rmssd_segments.clear()
+        for seg in self._sdnn_segments:
+            try:
+                hrv_chart.removeSeries(seg)
+                seg.deleteLater()
+            except Exception:
+                pass
+        self._sdnn_segments.clear()
 
     @staticmethod
     def _series_points(series: QLineSeries) -> list[QPointF]:
