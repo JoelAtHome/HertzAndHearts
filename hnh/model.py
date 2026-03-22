@@ -112,13 +112,16 @@ class Model(QObject):
         validated_ibi = self.validate_ibi(ibi)
         self.update_ibis_seconds(validated_ibi / 1000)
         self.ibis_buffer.append(validated_ibi)
-        self.ibis_buffer_update.emit(
-            NamedSignal("ibis", (self.ibis_seconds, self.ibis_buffer))
-        )
 
         if len(self.ibis_buffer) > 1:
             diff = abs(self.ibis_buffer[-1] - self.ibis_buffer[-2])
             self.update_hrv_buffer(diff)
+
+        # Emit after HRV so plot_ibis runs with the latest RMSSD payload queued
+        # for the same beat (avoids HR leading RMSSD/SDNN by one beat or timer tick).
+        self.ibis_buffer_update.emit(
+            NamedSignal("ibis", (self.ibis_seconds, self.ibis_buffer))
+        )
 
         self.update_counter += 1
         if self.update_counter % 5 == 0:

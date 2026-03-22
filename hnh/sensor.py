@@ -3,7 +3,7 @@ import os
 import platform
 import numpy as np
 from time import perf_counter_ns
-from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer
+from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer, qVersion
 from PySide6.QtBluetooth import (
     QBluetoothDeviceDiscoveryAgent,
     QBluetoothLocalDevice,
@@ -142,6 +142,16 @@ class SensorScanner(QObject):
             if (any(cs in d.name() for cs in COMPATIBLE_SENSORS)) and (d.rssi() <= 0)
         ]  # https://www.mokoblue.com/measures-of-bluetooth-rssi/
         if not sensors:
+            all_devs = self.scanner.discoveredDevices()
+            sample = [d.name() or "(no name)" for d in all_devs[:12]]
+            append_ble_diagnostic(
+                "scanner",
+                "scan_finished_empty",
+                message="No compatible sensors matched filters (name + RSSI).",
+                discovered_count=len(all_devs),
+                sample_names=sample,
+                platform=platform.system(),
+            )
             self.status_update.emit("Couldn't find sensors.")
             return
         self.sensor_update.emit(sensors)
@@ -237,6 +247,7 @@ class SensorClient(QObject):
         self._linux_retry_with_public = False
         self._received_first_hr_packet = False
         self._pending_pmd_after_hr = False
+        self._no_rr_interval_warning_emitted = False
         raw_enable_pmd = os.environ.get("HNH_ENABLE_PMD", "").strip().lower()
         if raw_enable_pmd:
             self._enable_pmd = raw_enable_pmd in {"1", "true", "yes", "on"}
@@ -330,6 +341,7 @@ class SensorClient(QObject):
         )
         self._pending_sensor = sensor
         self._received_first_hr_packet = False
+        self._no_rr_interval_warning_emitted = False
         self._connected_device_name = sensor.name() or ""
         self._verity_warning_emitted = False
         self._linux_retry_with_public = False
@@ -348,6 +360,21 @@ class SensorClient(QObject):
         self.client.discoveryFinished.connect(self._connect_hr_service)
         self.client.disconnected.connect(self._reset_connection)
         self.client.connectToDevice()
+        try:
+            qt_v = qVersion()
+        except Exception:
+            qt_v = ""
+        append_ble_diagnostic(
+            "client",
+            "connect_start",
+            message="Low energy connection initiated.",
+            sensor=str(get_sensor_address(sensor)),
+            sensor_name=sensor.name() or "",
+            platform=platform.system(),
+            qt_version=qt_v,
+            pmd_enabled=bool(self._enable_pmd),
+            pmd_conservative=bool(self._conservative_pmd_connect),
+        )
 
     def _retry_last_connection_once(self):
         if self.client is not None:
@@ -434,8 +461,19 @@ class SensorClient(QObject):
             if s.toString().lower() == pmd_uuid_str
         ]
         if not pmd_match:
+            svc_list = [s.toString() for s in self.client.services()][:40]
+            append_ble_diagnostic(
+                "client",
+                "pmd_service_missing",
+                message="PMD service UUID not in GATT table — ECG unavailable; HR/RR may still work.",
+                discovered_service_uuids=svc_list,
+                platform=platform.system(),
+            )
+            self.status_update.emit(
+                "ECG (Polar PMD) not found on this link — heart rate / RR still available."
+            )
             if DEBUG:
-                print(f"PMD service not found. Available services:")
+                print("PMD service not found. Available services:")
                 for s in self.client.services():
                     print(f"  {s.toString()}")
             return
@@ -452,7 +490,15 @@ class SensorClient(QObject):
             else:
                 self.pmd_service.discoverDetails()
         else:
-            print(f"Couldn't establish connection to PMD service on {self._sensor_address()}.")
+            msg = f"Couldn't establish connection to PMD service on {self._sensor_address()}."
+            print(msg)
+            p = append_ble_diagnostic(
+                "client",
+                "pmd_service_object_failed",
+                message=msg,
+                platform=platform.system(),
+            )
+            self.diagnostic_logged.emit(p)
 
     def _connect_battery_service(self):
         """Connect to BLE Battery Service (0x180F) if available. Polar H10 and many HR sensors support it."""
@@ -512,13 +558,40 @@ class SensorClient(QObject):
             self.HR_CHARACTERISTIC
         )
         if not hr_char.isValid():
-            print(f"Couldn't find HR characterictic on {self._sensor_address()}.")
+            msg = f"HR measurement characteristic missing or invalid on {self._sensor_address()}."
+            print(msg)
+            p = append_ble_diagnostic(
+                "client",
+                "hr_characteristic_invalid",
+                message=msg,
+                platform=platform.system(),
+            )
+            self.diagnostic_logged.emit(p)
+            self.status_update.emit(msg)
+            return
         self.hr_notification = hr_char.descriptor(
             QBluetoothUuid.DescriptorType.ClientCharacteristicConfiguration
         )
         if not self.hr_notification.isValid():
-            print("HR characteristic is invalid.")
+            msg = f"HR CCCD descriptor invalid on {self._sensor_address()}."
+            print(msg)
+            p = append_ble_diagnostic(
+                "client",
+                "hr_cccd_invalid",
+                message=msg,
+                platform=platform.system(),
+            )
+            self.diagnostic_logged.emit(p)
+            self.status_update.emit(msg)
+            return
         self.hr_service.writeDescriptor(self.hr_notification, self.ENABLE_NOTIFICATION)
+        append_ble_diagnostic(
+            "client",
+            "hr_notifications_enabled",
+            message="Subscribed to heart rate measurement notifications.",
+            address=str(self._sensor_address()),
+            platform=platform.system(),
+        )
         self.status_update.emit(f"Connected to {self._sensor_address()}")
         if not self._verity_warning_emitted and "verity" in self._connected_device_name.lower():
             self._verity_warning_emitted = True
@@ -559,9 +632,27 @@ class SensorClient(QObject):
                 self._pmd_descriptors_pending += 1
                 self.pmd_service.writeDescriptor(self.pmd_data_notification, self.ENABLE_NOTIFICATION)
             else:
-                print("PMD data descriptor is invalid.")
+                msg = "PMD data CCCD descriptor invalid."
+                print(msg)
+                p = append_ble_diagnostic(
+                    "client",
+                    "pmd_data_cccd_invalid",
+                    message=msg,
+                    platform=platform.system(),
+                )
+                self.diagnostic_logged.emit(p)
+                self.status_update.emit(msg)
         else:
-            print("PMD data characteristic not found!")
+            msg = "PMD data characteristic not found."
+            print(msg)
+            p = append_ble_diagnostic(
+                "client",
+                "pmd_data_char_missing",
+                message=msg,
+                platform=platform.system(),
+            )
+            self.diagnostic_logged.emit(p)
+            self.status_update.emit(msg)
 
         if self._pmd_descriptors_pending == 0:
             self._finalize_pmd_ready()
@@ -582,7 +673,15 @@ class SensorClient(QObject):
 
     def start_ecg_stream(self):
         if self.pmd_service is None:
-            print("Cannot start ECG: PMD service not available.")
+            msg = "Cannot start ECG: PMD service not available."
+            print(msg)
+            append_ble_diagnostic(
+                "client",
+                "ecg_start_skipped",
+                message=msg,
+                reason="no_pmd_service",
+                platform=platform.system(),
+            )
             return
         if not self._pmd_ready:
             self._ecg_start_pending = True
@@ -597,9 +696,25 @@ class SensorClient(QObject):
         if ctrl_char.isValid():
             self.pmd_service.writeCharacteristic(ctrl_char, self.ECG_START_COMMAND)
             self._ecg_streaming = True
+            append_ble_diagnostic(
+                "client",
+                "ecg_stream_command_sent",
+                message="PMD ECG start command written.",
+                platform=platform.system(),
+            )
             self.status_update.emit("ECG streaming started.")
         else:
-            print("Cannot start ECG: control characteristic not found.")
+            msg = "Cannot start ECG: PMD control characteristic not found."
+            print(msg)
+            p = append_ble_diagnostic(
+                "client",
+                "ecg_start_failed",
+                message=msg,
+                reason="control_char_missing",
+                platform=platform.system(),
+            )
+            self.diagnostic_logged.emit(p)
+            self.status_update.emit(msg)
 
     def stop_ecg_stream(self):
         if self.pmd_service is None or not self._ecg_streaming:
@@ -637,6 +752,9 @@ class SensorClient(QObject):
             qt_enum=str(enum_label),
         )
         self.diagnostic_logged.emit(p)
+        self.status_update.emit(
+            f"ECG (PMD) error: {error}. ECG streaming stopped; heart rate may still work."
+        )
         self._pmd_ready = False
         self._ecg_streaming = False
         self._ecg_start_pending = False
@@ -664,6 +782,13 @@ class SensorClient(QObject):
         if samples:
             if not self._ecg_data_received:
                 self._ecg_data_received = True
+                append_ble_diagnostic(
+                    "client",
+                    "first_ecg_pmd_samples",
+                    message="First decoded ECG samples from PMD data stream.",
+                    sample_count=len(samples),
+                    platform=platform.system(),
+                )
                 self.ecg_ready.emit()
             self.ecg_update.emit(samples)
 
@@ -673,6 +798,14 @@ class SensorClient(QObject):
         except Exception:
             addr = "unknown"
         print(f"Discarding sensor at {addr}.")
+        append_ble_diagnostic(
+            "client",
+            "link_reset",
+            message="BLE link torn down (disconnect, error, or reconnect).",
+            address=str(addr),
+            platform=platform.system(),
+            had_ecg_stream=bool(self._ecg_streaming),
+        )
         self._ecg_streaming = False
         self._pmd_ready = False
         self._ecg_start_pending = False
@@ -891,6 +1024,11 @@ class SensorClient(QObject):
             on presence of uint16 HR format and energy expenditure.
         """
         heart_rate_measurement_bytes: bytes = data.data()
+        byte0: int = heart_rate_measurement_bytes[0] if heart_rate_measurement_bytes else 0
+        uint8_format: bool = (byte0 & 1) == 0
+        energy_expenditure: bool = ((byte0 >> 3) & 1) == 1
+        rr_interval: bool = ((byte0 >> 4) & 1) == 1
+
         if not self._received_first_hr_packet:
             self._received_first_hr_packet = True
             self._pending_sensor = None
@@ -898,13 +1036,30 @@ class SensorClient(QObject):
             if self._pending_pmd_after_hr and self._enable_pmd:
                 self._pending_pmd_after_hr = False
                 QTimer.singleShot(700, self._start_pmd_discovery_safe)
-
-        # self.status_update.emit("Sensor Connected and Streaming Data")
-
-        byte0: int = heart_rate_measurement_bytes[0]
-        uint8_format: bool = (byte0 & 1) == 0
-        energy_expenditure: bool = ((byte0 >> 3) & 1) == 1
-        rr_interval: bool = ((byte0 >> 4) & 1) == 1
+            append_ble_diagnostic(
+                "client",
+                "first_hr_measurement",
+                message="First GATT heart-rate notification received.",
+                payload_bytes=len(heart_rate_measurement_bytes),
+                flags_byte=byte0,
+                has_rr_interval=bool(rr_interval),
+                address=str(self._sensor_address()),
+                platform=platform.system(),
+            )
+            if not rr_interval and not self._no_rr_interval_warning_emitted:
+                self._no_rr_interval_warning_emitted = True
+                warn = (
+                    "Sensor sent heart rate without RR intervals — check strap fit and "
+                    "that no other app holds the sensor exclusively."
+                )
+                p = append_ble_diagnostic(
+                    "client",
+                    "hr_no_rr_in_measurement",
+                    message=warn,
+                    platform=platform.system(),
+                )
+                self.diagnostic_logged.emit(p)
+                self.status_update.emit(warn)
 
         if not rr_interval:
             return

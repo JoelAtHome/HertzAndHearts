@@ -44,7 +44,7 @@ from hnh.pacer import Pacer
 from hnh.model import Model
 from hnh.config import (
     breathing_rate_to_tick, HRV_HISTORY_DURATION, IBI_HISTORY_DURATION,
-    PLOT_WARMUP_SECONDS,
+    PLOT_WARMUP_SECONDS, MAIN_PLOT_START_SECONDS, MAIN_PLOT_SYNC_MIN_IBIS,
     MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
     MIN_PLOT_IBI, MAX_PLOT_IBI,
     ECG_SAMPLE_RATE,
@@ -5200,7 +5200,7 @@ class View(QMainWindow):
         self.baseline_hr_values = []
         self.baseline_hr = None
         self.start_time = None
-        self._plot_start_delay_seconds = float(PLOT_WARMUP_SECONDS)
+        self._plot_start_delay_seconds = float(MAIN_PLOT_START_SECONDS)
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -5216,7 +5216,6 @@ class View(QMainWindow):
         self._hrv_axis_ceiling = None
         self._sdnn_axis_floor = None
         self._sdnn_axis_ceiling = None
-        self._main_plot_warmup_until: float | None = None
         self._main_plot_started = False
         self._main_plots_frozen = False
         self._all_plots_frozen = False
@@ -8589,7 +8588,9 @@ class View(QMainWindow):
             pass
         heart.deleteLater()
 
-    def direct_chart_update(self, hrv_data: NamedSignal):
+    def direct_chart_update(
+        self, hrv_data: NamedSignal, *, allow_main_plot_append: bool = False
+    ):
         try:
             if not hrv_data.value or len(hrv_data.value[1]) == 0:
                 return
@@ -8606,7 +8607,7 @@ class View(QMainWindow):
             now = time.time()
             elapsed = now - self.start_time
             x = elapsed - self._plot_start_delay_seconds
-            plot_gate_open = self._main_plot_gate_open(now) and x >= 0
+            plot_gate_open = self._main_plot_draw_gate(elapsed, now)
             total_calibration_time = self.settings.SETTLING_DURATION + self.settings.BASELINE_DURATION
 
             # Add smoothed RMSSD to Chart
@@ -8631,7 +8632,9 @@ class View(QMainWindow):
                 while len(self._sdnn_smooth_buf) > smooth_n:
                     self._sdnn_smooth_buf.pop(0)
 
-            if plot_gate_open:
+            # Append only on the IBI tick (plot_ibis drain). The 125 ms timer still runs
+            # this function for smoothing/axes/baseline, but must not draw ahead of HR.
+            if plot_gate_open and allow_main_plot_append:
                 self._session_rmssd_values.append(smoothed_rmssd)
                 report_x = self._session_report_time_offset_seconds + x
                 self._session_rmssd_times.append(report_x)
@@ -8698,7 +8701,13 @@ class View(QMainWindow):
                 self.recording_statusbar.set_locked(
                     f"{self.baseline_rmssd:.1f}", hr_val
                 )
-                main_x_lo, main_x_hi = self._compute_main_plot_xrange(x)
+                # Match HR extent: timer-driven x can sit ahead of beat-sampled traces.
+                layout_x = (
+                    max(0.0, float(self._last_main_plot_elapsed_sec))
+                    if self._main_plot_started
+                    else float(x)
+                )
+                main_x_lo, main_x_hi = self._compute_main_plot_xrange(layout_x)
 
                 if not hasattr(self, 'baseline_series'):
                     from PySide6.QtCharts import QLineSeries
@@ -8720,8 +8729,12 @@ class View(QMainWindow):
                     self.baseline_series.append(main_x_lo, self.baseline_rmssd)
                     self.baseline_series.append(main_x_hi, self.baseline_rmssd)
 
-            # CHART VIEWPORT
-            if plot_gate_open and not self._main_plots_frozen:
+            # CHART VIEWPORT (keep in sync with HR; HR plot_ibis sets range when appending)
+            if (
+                plot_gate_open
+                and allow_main_plot_append
+                and not self._main_plots_frozen
+            ):
                 self._last_main_plot_elapsed_sec = max(0.0, float(x))
                 main_x_lo, main_x_hi = self._compute_main_plot_xrange(x)
                 self._set_main_plot_xrange(main_x_lo, main_x_hi, sync_aux=False)
@@ -8734,13 +8747,13 @@ class View(QMainWindow):
         self._latest_hrv_for_chart = hrv_data
         self._chart_update_pending = True
 
-    def _drain_direct_chart_update(self):
+    def _drain_direct_chart_update(self, *, allow_main_plot_append: bool = False):
         if not self._chart_update_pending or self._latest_hrv_for_chart is None:
             return
         payload = self._latest_hrv_for_chart
         self._latest_hrv_for_chart = None
         self._chart_update_pending = False
-        self.direct_chart_update(payload)
+        self.direct_chart_update(payload, allow_main_plot_append=allow_main_plot_append)
 
     def list_addresses(self, addresses: NamedSignal):
         self._is_scanning = False
@@ -9155,15 +9168,19 @@ class View(QMainWindow):
             self.recording_statusbar.set_disconnected()
 
     def _arm_main_plot_warmup(self, clear_series: bool) -> None:
-        self._main_plot_warmup_until = time.time() + float(self._plot_start_delay_seconds)
         if clear_series:
             self._set_main_plot_started(False)
             self.hr_trend_series.clear()
             self.sdnn_series.clear()
             self.hrv_widget.time_series.clear()
 
-    def _main_plot_gate_open(self, now: float) -> bool:
-        return self._main_plot_warmup_until is None or now >= self._main_plot_warmup_until
+    def _main_plot_draw_gate(self, elapsed: float, _now: float) -> bool:
+        """Session-clock delay (MAIN_PLOT_START_SECONDS) plus enough IBIs for SDNN."""
+        if self.start_time is None:
+            return False
+        if elapsed < float(self._plot_start_delay_seconds):
+            return False
+        return len(self.model.ibis_buffer) >= MAIN_PLOT_SYNC_MIN_IBIS
 
     def _set_main_plot_started(self, started: bool) -> None:
         started_bool = bool(started)
@@ -9589,8 +9606,9 @@ class View(QMainWindow):
             if self._session_state == "recording":
                 if self.start_time is not None:
                     now = time.time()
-                    plot_elapsed = (now - self.start_time) - self._plot_start_delay_seconds
-                    if plot_elapsed >= 0 and self._main_plot_gate_open(now):
+                    elapsed = now - self.start_time
+                    if self._main_plot_draw_gate(elapsed, now):
+                        plot_elapsed = elapsed - self._plot_start_delay_seconds
                         self._session_stress_ratio_values.append(float(val))
                         report_elapsed = self._session_report_time_offset_seconds + plot_elapsed
                         self._session_stress_ratio_times.append(report_elapsed)
@@ -9682,7 +9700,6 @@ class View(QMainWindow):
             now = time.time()
             elapsed = now - self.start_time
             self._update_phase_progress_banner(elapsed, source="ibis")
-            plot_elapsed = elapsed - self._plot_start_delay_seconds
 
             w = self.settings.HR_EWMA_WEIGHT
             if self._hr_ewma is None:
@@ -9702,9 +9719,10 @@ class View(QMainWindow):
             elif self.baseline_hr is None and self.baseline_hr_values:
                 self.baseline_hr = sum(self.baseline_hr_values) / len(self.baseline_hr_values)
 
-            if plot_elapsed < 0 or not self._main_plot_gate_open(now):
+            if not self._main_plot_draw_gate(elapsed, now):
                 return
 
+            plot_elapsed = elapsed - self._plot_start_delay_seconds
             self._set_main_plot_started(True)
             self._session_hr_values.append(self._hr_ewma)
             report_elapsed = self._session_report_time_offset_seconds + plot_elapsed
@@ -9764,6 +9782,9 @@ class View(QMainWindow):
                     float(self.ibis_widget.x_axis.min()),
                     float(self.ibis_widget.x_axis.max()),
                 )
+
+            # Same-beat x alignment: HRV was enqueued before this slot (see model).
+            self._drain_direct_chart_update(allow_main_plot_append=True)
 
         except Exception as e:
             print(f"HR Plot Error: {e}")

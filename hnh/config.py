@@ -97,9 +97,16 @@ SETTLING_DURATION: Final[int] = 15  # seconds
 # becomes the user's baseline reference.
 BASELINE_DURATION: Final[int] = 30  # seconds
 
-# Initial warmup: ignore first N seconds of data for plotting and baseline
-# calculations to avoid sensor-stabilization artifacts.
-PLOT_WARMUP_SECONDS: Final[float] = 5.0
+# Seconds after the session clock starts (first valid IBI) before the main
+# HR / RMSSD / SDNN traces append; chart x=0 is at this wall time on that clock.
+MAIN_PLOT_START_SECONDS: Final[float] = 3.0
+
+# Baseline / EWMA logic uses the same pre-roll so artifacts align with plot start.
+PLOT_WARMUP_SECONDS: Final[float] = MAIN_PLOT_START_SECONDS
+
+# HR, RMSSD, and SDNN main plots start appending only once this many IBIs exist
+# so SDNN (needs stdev of ≥3 intervals) begins on the same x as the other two.
+MAIN_PLOT_SYNC_MIN_IBIS: Final[int] = 3
 
 # Export EDF+ session artifact on finalization.
 # Disabled by default to keep baseline recording/export lightweight.
