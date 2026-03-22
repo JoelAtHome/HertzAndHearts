@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 from collections import deque
 from typing import Iterable
 from hnh.utils import get_sensor_address, NamedSignal
+from hnh.ble_diagnostics import ble_diagnostics_log_path
 from hnh.sensor import SensorScanner, SensorClient
 from hnh.logger import Logger
 from hnh.pacer import Pacer
@@ -5247,6 +5248,7 @@ class View(QMainWindow):
         self._suppress_comm_error_popups = False
         self._signal_fault_buffer: list[dict] = []
         self._signal_fault_counts: dict[str, int] = {}
+        self._ble_diag_dialog_shown_session = False
         # Disconnect intervals for manifest/CSV/report (start_ts, end_ts, reason, duration_sec)
         self._disconnect_intervals: list[dict] = []
         self._current_disconnect_start: float | None = None
@@ -5331,6 +5333,7 @@ class View(QMainWindow):
         self.scanner.sensor_update.connect(self.model.update_sensors)
         self.scanner.status_update.connect(self.show_status)
         self.scanner.scanning_state.connect(self._on_scan_state_changed)
+        self.scanner.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
 
         self.sensor = SensorClient()
         self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
@@ -5338,6 +5341,7 @@ class View(QMainWindow):
         self.sensor.ecg_update.connect(self.model.update_ecg_samples)
         self.sensor.status_update.connect(self.show_status)
         self.sensor.battery_update.connect(self._update_battery_display)
+        self.sensor.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
 
         self.ecg_window = EcgWindow()
         self.qtc_window = QtcWindow()
@@ -9419,6 +9423,54 @@ class View(QMainWindow):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path)))
                 except Exception:
                     pass
+
+    @Slot(object)
+    def _on_ble_diagnostic_logged(self, path_obj: object) -> None:
+        path = path_obj if isinstance(path_obj, Path) else Path(path_obj)
+        try:
+            pstr = str(path.resolve())
+        except OSError:
+            pstr = str(path)
+        self.show_status(
+            f"Bluetooth diagnostics saved to {pstr}",
+            print_to_terminal=bool(self.settings.DEBUG),
+        )
+        if self.settings.DEBUG:
+            QTimer.singleShot(0, lambda p=path: self._prompt_ble_diagnostic_file(p))
+            return
+        if not self._ble_diag_dialog_shown_session:
+            self._ble_diag_dialog_shown_session = True
+            QTimer.singleShot(0, lambda p=path: self._prompt_ble_diagnostic_file(p))
+
+    def _prompt_ble_diagnostic_file(self, path: Path) -> None:
+        try:
+            pstr = str(path.resolve())
+        except OSError:
+            pstr = str(path)
+        win_hint = (
+            f"On Windows this is usually under %LOCALAPPDATA%\\Hertz-and-Hearts\\.\n\n"
+            if platform.system() == "Windows"
+            else ""
+        )
+        default_file = ble_diagnostics_log_path()
+        m = QMessageBox(self)
+        m.setIcon(QMessageBox.Information)
+        m.setWindowTitle("Bluetooth diagnostics")
+        m.setText("Bluetooth error details were saved to a log file.")
+        m.setInformativeText(
+            f"{win_hint}"
+            f"Default log path:\n{default_file}\n\n"
+            f"This event:\n{pstr}\n\n"
+            'Use "Open log" to view or attach the file when reporting issues.'
+        )
+        open_btn = m.addButton("Open log", QMessageBox.AcceptRole)
+        m.addButton(QMessageBox.Ok)
+        m.exec()
+        if m.clickedButton() == open_btn:
+            try:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(pstr))
+            except Exception:
+                pass
 
     def update_ui_labels(self, data: NamedSignal):
         # 1. RAW BEAT DATA (Heart Rate & Instant Faults)

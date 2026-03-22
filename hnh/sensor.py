@@ -19,6 +19,7 @@ from typing import Union
 from hnh.utils import get_sensor_address, get_sensor_remote_address
 from hnh.config import COMPATIBLE_SENSORS, DEBUG
 from hnh.perf_probe import get_perf_probe
+from hnh.ble_diagnostics import append_ble_diagnostic
 
 
 def ble_adapter_blocked_message() -> str | None:
@@ -104,6 +105,7 @@ class SensorScanner(QObject):
     sensor_update = Signal(object)
     status_update = Signal(str)
     scanning_state = Signal(bool)
+    diagnostic_logged = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -120,6 +122,12 @@ class SensorScanner(QObject):
         if blocked is not None:
             self.scanning_state.emit(False)
             self.status_update.emit(blocked)
+            p = append_ble_diagnostic(
+                "scanner",
+                "scan_blocked",
+                message=blocked,
+            )
+            self.diagnostic_logged.emit(p)
             return False
         self.scanning_state.emit(True)
         self.status_update.emit("Scanning for BLE sensors...")
@@ -144,6 +152,22 @@ class SensorScanner(QObject):
         if error == QBluetoothDeviceDiscoveryAgent.Error.NoError:
             return
         msg = _discovery_error_message(error)
+        try:
+            code = int(error)
+        except Exception:
+            code = None
+        try:
+            enum_label = error.name
+        except AttributeError:
+            enum_label = str(error)
+        p = append_ble_diagnostic(
+            "scanner",
+            "discovery_error",
+            message=msg or str(error),
+            qt_enum=str(enum_label),
+            qt_code=code,
+        )
+        self.diagnostic_logged.emit(p)
         if msg is not None:
             self.status_update.emit(msg)
         else:
@@ -165,6 +189,7 @@ class SensorClient(QObject):
     status_update = Signal(str)
     battery_update = Signal(int)  # 0-100 percent, or -1 if unknown/unsupported
     verity_limited_support = Signal()
+    diagnostic_logged = Signal(object)
 
     PMD_SERVICE_UUID = QBluetoothUuid(QUuid("{FB005C80-02E7-F387-1CAD-8ACD2D8DF0C8}"))
     PMD_CONTROL_UUID = QBluetoothUuid(QUuid("{FB005C81-02E7-F387-1CAD-8ACD2D8DF0C8}"))
@@ -262,6 +287,13 @@ class SensorClient(QObject):
         blocked = ble_adapter_blocked_message()
         if blocked is not None:
             self.status_update.emit(blocked)
+            p = append_ble_diagnostic(
+                "client",
+                "windows_preflight_blocked",
+                message=blocked,
+                sensor=str(get_sensor_address(sensor)),
+            )
+            self.diagnostic_logged.emit(p)
             return False
         try:
             local = QBluetoothLocalDevice()
@@ -270,9 +302,22 @@ class SensorClient(QObject):
         try:
             pairing_status = local.pairingStatus(sensor.address())
             if pairing_status == QBluetoothLocalDevice.Unpaired:
-                self.status_update.emit(
+                msg = (
                     "Windows requires H10 pairing first. Pair H10 in Windows Bluetooth settings, then retry."
                 )
+                self.status_update.emit(msg)
+                try:
+                    ps = int(pairing_status)
+                except Exception:
+                    ps = None
+                p = append_ble_diagnostic(
+                    "client",
+                    "windows_pairing_required",
+                    message=msg,
+                    sensor=str(get_sensor_address(sensor)),
+                    pairing_status=ps,
+                )
+                self.diagnostic_logged.emit(p)
                 return False
         except Exception:
             # Some Windows BLE stacks do not expose reliable pairing status.
@@ -353,13 +398,27 @@ class SensorClient(QObject):
             s for s in self.client.services() if s == self.HR_SERVICE
         ]
         if not hr_service:
-            print(f"Couldn't find HR service on {self._sensor_address()}.")
+            svc_list = [s.toString() for s in self.client.services()][:32]
+            msg = f"Couldn't find HR service on {self._sensor_address()}."
+            p = append_ble_diagnostic(
+                "client",
+                "hr_service_missing",
+                message=msg,
+                discovered_service_uuids=svc_list,
+            )
+            self.diagnostic_logged.emit(p)
+            print(msg)
             return
         self.hr_service = self.client.createServiceObject(hr_service[0])
         if not self.hr_service:
-            print(
-                f"Couldn't establish connection to HR service on {self._sensor_address()}."
+            msg = f"Couldn't establish connection to HR service on {self._sensor_address()}."
+            p = append_ble_diagnostic(
+                "client",
+                "hr_service_object_failed",
+                message=msg,
             )
+            self.diagnostic_logged.emit(p)
+            print(msg)
             return
         self.hr_service.stateChanged.connect(self._start_hr_notification)
         self.hr_service.characteristicChanged.connect(self._data_handler)
@@ -562,6 +621,22 @@ class SensorClient(QObject):
 
     def _pmd_error(self, error):
         print(f"PMD service error: {error}. ECG will be unavailable.")
+        try:
+            code = int(error)
+        except Exception:
+            code = None
+        try:
+            enum_label = error.name
+        except AttributeError:
+            enum_label = str(error)
+        p = append_ble_diagnostic(
+            "client",
+            "pmd_service_error",
+            message=str(error),
+            qt_code=code,
+            qt_enum=str(enum_label),
+        )
+        self.diagnostic_logged.emit(p)
         self._pmd_ready = False
         self._ecg_streaming = False
         self._ecg_start_pending = False
@@ -684,6 +759,30 @@ class SensorClient(QObject):
 
     def _catch_error(self, error):
         error_text = str(error)
+        try:
+            code = int(error)
+        except Exception:
+            code = None
+        try:
+            enum_label = error.name
+        except AttributeError:
+            enum_label = str(error)
+        addr = None
+        try:
+            if self._pending_sensor is not None:
+                addr = str(get_sensor_address(self._pending_sensor))
+        except Exception:
+            pass
+        p = append_ble_diagnostic(
+            "client",
+            "low_energy_controller_error",
+            message=error_text,
+            qt_code=code,
+            qt_enum=str(enum_label),
+            sensor=addr,
+            platform=platform.system(),
+        )
+        self.diagnostic_logged.emit(p)
         if (
             platform.system() == "Linux"
             and error in (
