@@ -27,6 +27,9 @@ jobs:
       - name: Compile sanity check
         run: python -m compileall -q hnh
 
+      - name: PyInstaller spec excludes allowlist
+        run: python packaging/check_pyinstaller_excludes.py
+
       - name: Run lightweight tests
         run: |
           python -m pytest -q \

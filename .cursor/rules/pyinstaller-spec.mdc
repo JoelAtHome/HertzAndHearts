@@ -1,0 +1,11 @@
+---
+description: PyInstaller spec — avoid risky excludes and lazy-import gaps
+globs: Hertz-and-Hearts.spec
+alwaysApply: false
+---
+
+# `Hertz-and-Hearts.spec`
+
+- **Do not** add standard-library names to `Analysis(excludes=...)` unless you have audited **all** `hnh/` imports and **transitive** deps (e.g. PyQtGraph, `urllib`, `importlib.metadata`, `python-docx`, scientific stack). Stripping `email`, `xml`, `http`, etc. has broken frozen builds before.
+- **Allowlist:** CI enforces `excludes` to be a subset of `tkinter` only (`packaging/check_pyinstaller_excludes.py`). To allow more excludes, update that script’s `ALLOWED_EXCLUDES` after the audit.
+- **Lazy imports** (inside functions / `try:`): add `hiddenimports` or `collect_submodules` as needed; static analysis often misses them.
