@@ -96,12 +96,12 @@ class Model(QObject):
             self.ibi_beats_received_count += 1
             self.current_hr = int(60000 / rr_ms)
             self.rr_intervals.append(rr_ms)
-            
+
             if len(self.rr_intervals) > 1:
                 diffs = np.diff(list(self.rr_intervals))
                 self.rmssd = np.sqrt(np.mean(np.square(diffs)))
                 # print(f"BPM: {self.current_hr} | RMSSD: {self.rmssd:.2f}")
-             
+
         except Exception as e:
             print(f"!!! ERROR: {e}")
 
@@ -155,7 +155,7 @@ class Model(QObject):
             self._ecg_samples_since_qtc = 0
             self._schedule_qtc_compute()
 
-    
+
     @Slot(int)
     def update_breathing_rate(self, breathing_tick: int):
         self.breathing_rate = tick_to_breathing_rate(breathing_tick)
@@ -176,7 +176,7 @@ class Model(QObject):
         )
 
     def validate_ibi(self, ibi: int) -> int:
-        # If the buffer is empty or too small, just return the raw IBI 
+        # If the buffer is empty or too small, just return the raw IBI
         # so we can establish the connection!
         if len(self.ibis_buffer) < self._settings.IBI_MEDIAN_WINDOW:
             return ibi
@@ -291,10 +291,10 @@ class Model(QObject):
                 new_seconds.append(float(val) - seconds)
             except (ValueError, TypeError):
                 continue
-                
+
         # 2. Rebuild the deque
         self.ibis_seconds = deque(new_seconds, maxlen=IBI_BUFFER_SIZE)
-        
+
         # 3. Add the new '0' point for the latest beat
         self.ibis_seconds.append(0.0)
 

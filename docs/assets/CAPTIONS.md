@@ -18,4 +18,3 @@ Keep captures clean and readable:
 - use default/light theme if possible
 - avoid clipped windows and tiny text
 - redact personal details before committing
-

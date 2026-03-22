@@ -2,7 +2,7 @@
 
 # Hertz & Hearts
 
-Desktop HRV biofeedback app for ECG chest straps.  
+Desktop HRV biofeedback app for ECG chest straps.
 Current beta: **1.0.0-beta**.
 
 **Research use only. Not for clinical diagnosis or treatment.**
@@ -97,6 +97,17 @@ Hertz & Hearts is built upon OpenHRV by Jan C. Brammer.
 
 - License: GPL-3.0 (`LICENSE`)
 - Full research-use disclaimer: `hnh/disclaimer.md`
+
+## Development
+
+- Install dev tooling and Git hooks (PyInstaller spec allowlist, `compileall hnh`, YAML/TOML checks, whitespace):
+
+  ```bash
+  python -m pip install -e ".[dev]"
+  pre-commit install
+  ```
+
+  Run all hooks without committing: `pre-commit run --all-files` (same as CI).
 
 ## Contributing, Support, and Feedback
 

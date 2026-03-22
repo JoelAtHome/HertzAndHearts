@@ -95,7 +95,7 @@ class Application(QApplication):
         self._model = Model()
         self._view = View(self._model)
         self._run_startup_recording_purge_if_primary()
-        
+
         # 1. The "Handshake" connection (Fast & Simple)
         self._view.sensor.ibi_update.connect(self._model.hr_handler)
 

@@ -112,4 +112,3 @@ Use this note when validation passes:
 > Verified 1:1 `ibi_update` to `update_ibis_buffer` behavior under live streaming,
 > including connect/reconnect/reset and recording-path smoke checks. No duplicate
 > processing regression observed.
-

@@ -2889,13 +2889,13 @@ class PacerWidget(QChartView):
         self.disk.setColor(color)
         self.disk.setBorderColor(QColor(0, 0, 0, 0))
         self.plot.addSeries(self.disk)
-        
+
         self.x_axis = QValueAxis()
         self.x_axis.setRange(-1, 1)
         self.x_axis.setVisible(False)
         self.plot.addAxis(self.x_axis, Qt.AlignBottom)
         self.disk.attachAxis(self.x_axis)
-        
+
         self.y_axis = QValueAxis()
         self.y_axis.setRange(-1, 1)
         self.y_axis.setVisible(False)
@@ -5198,7 +5198,7 @@ class View(QMainWindow):
         self.baseline_rmssd = None
         self.baseline_hr_values = []
         self.baseline_hr = None
-        self.start_time = None 
+        self.start_time = None
         self._plot_start_delay_seconds = float(PLOT_WARMUP_SECONDS)
         self.is_phase_active = False
         self._fault_active = False
@@ -5546,7 +5546,7 @@ class View(QMainWindow):
         self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_sensor)
-        
+
         self.reset_button = QPushButton("Reset Baseline")
         self.reset_button.setEnabled(False)
         self.reset_button.clicked.connect(self.reset_baseline)
@@ -8553,9 +8553,9 @@ class View(QMainWindow):
             # During fault, do not append new points — preserves chart with break until recovery.
             if self._fault_active:
                 return
-            
+
             raw_y = float(hrv_data.value[1][-1])
-            y = max(0, min(raw_y, 250)) 
+            y = max(0, min(raw_y, 250))
 
             if self.start_time is None:
                 return
@@ -8627,7 +8627,7 @@ class View(QMainWindow):
                 self.hrv_y_axis_right.setRange(sdnn_floor, self._sdnn_axis_ceiling)
 
             # --- CONTINUOUS PHASE ENGINE ---
-            
+
             # PHASE 1: BASELINE COLLECTION (exclude warmup to avoid stabilization artifacts)
             # Only use RMSSD values below noisy threshold; high RMSSD = erratic RR = poor signal.
             if (
@@ -8661,7 +8661,7 @@ class View(QMainWindow):
                     from PySide6.QtCharts import QLineSeries
                     from PySide6.QtGui import QPen
                     from PySide6.QtCore import Qt
-                    
+
                     self.baseline_series = QLineSeries()
                     self.baseline_series.setName("Baseline RMSSD (ms)")
                     pen = QPen(QColor(80, 80, 80))
@@ -8995,10 +8995,10 @@ class View(QMainWindow):
                 self.recording_statusbar.set_error(status)
             else:
                 self.recording_statusbar.set_idle(status)
-        
+
         self.statusbar.showMessage(status)
         self._update_session_actions()
-        
+
         if print_to_terminal and self.settings.DEBUG:
             print(status)
 
@@ -9387,7 +9387,7 @@ class View(QMainWindow):
                 self._data_watchdog.start()
             if len(data.value[1]) > 0:
                 last_ibi_ms = data.value[1][-1]
-                
+
                 hr = 60000.0 / last_ibi_ms
                 display_hr = self._hr_ewma if self._hr_ewma is not None else hr
                 self.current_hr_label.setText(f"HR: {int(display_hr)} bpm")
@@ -9475,7 +9475,7 @@ class View(QMainWindow):
                         self._reset_signal_popup()
                         self._handle_stream_reset(clear_series=False)
                         self._set_signal_indicator("GOOD", "#00FF00")
-        
+
         # 2. FREQUENCY DATA (Stress Ratio)
         elif data.name == "stress_ratio":
             val = data.value[0]
@@ -9521,7 +9521,7 @@ class View(QMainWindow):
             raw_rmssd = float(data.value[1][-1])
             rmssd_val = max(0, min(raw_rmssd, 250))
             self.rmssd_label.setText(f"RMSSD: {rmssd_val:.2f} ms")
-            
+
             if self._fault_active or self._in_settling():
                 return
 
@@ -9660,4 +9660,4 @@ class View(QMainWindow):
                 )
 
         except Exception as e:
-            print(f"HR Plot Error: {e}")    
+            print(f"HR Plot Error: {e}")

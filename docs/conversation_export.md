@@ -74,9 +74,9 @@ When creating the project in Android Studio:
 
 A clean starter shape:
 
-- `ui/` → screens, theme, reusable components  
-- `data/` → API, local storage, repository implementations  
-- `domain/` → models + business logic/use-cases  
+- `ui/` → screens, theme, reusable components
+- `data/` → API, local storage, repository implementations
+- `domain/` → models + business logic/use-cases
 - `di/` → dependency injection setup (Hilt/Koin if you add it)
 
 This keeps app logic from getting tangled as it grows.

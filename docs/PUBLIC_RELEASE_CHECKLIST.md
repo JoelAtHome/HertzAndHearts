@@ -41,5 +41,5 @@ Use this checklist before publishing a public build.
 
 ## Go/No-Go Rule
 
-Release only if all **Must Pass** items are complete.  
+Release only if all **Must Pass** items are complete.
 If any **Must Pass** item fails, mark **No-Go**, fix, and rerun this checklist.

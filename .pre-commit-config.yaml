@@ -1,0 +1,29 @@
+# Install once: pip install -e ".[dev]" && pre-commit install
+# Run manually: pre-commit run --all-files
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: ^Sessions/
+      - id: end-of-file-fixer
+        exclude: ^Sessions/
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-toml
+
+  - repo: local
+    hooks:
+      - id: pyinstaller-excludes-allowlist
+        name: PyInstaller spec excludes allowlist
+        entry: python packaging/check_pyinstaller_excludes.py
+        language: system
+        files: ^Hertz-and-Hearts\.spec$
+        pass_filenames: false
+
+      - id: compileall-hnh
+        name: compileall hnh
+        entry: python -m compileall -q hnh
+        language: system
+        files: ^hnh/.*\.py$
+        pass_filenames: false

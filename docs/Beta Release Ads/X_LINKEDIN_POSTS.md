@@ -31,8 +31,8 @@ The goal of this beta is to validate real-world reliability and usability across
 
 If you are willing to help test:
 
-1) Install the latest beta build  
-2) Run the public release checklist  
+1) Install the latest beta build
+2) Run the public release checklist
 3) Submit findings via issue templates
 
 Project:
