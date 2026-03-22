@@ -20,6 +20,7 @@ _configure_linux_qt_defaults()
 
 from PySide6.QtCore import QLockFile
 from PySide6.QtWidgets import QApplication
+from hnh.data_paths import app_data_root
 from hnh.view import View
 from hnh.model import Model
 
@@ -73,7 +74,7 @@ def _emit_research_use_startup_warning() -> None:
     warning = "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT."
     print(warning, file=sys.stderr)
     try:
-        log_dir = Path.home() / "Hertz-and-Hearts"
+        log_dir = app_data_root()
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "startup.log"
         timestamp = datetime.now().isoformat(timespec="seconds")
@@ -86,7 +87,7 @@ def _emit_research_use_startup_warning() -> None:
 class Application(QApplication):
     def __init__(self, sys_argv):
         super(Application, self).__init__(sys_argv)
-        lock_root = Path.home() / "Hertz-and-Hearts"
+        lock_root = app_data_root()
         lock_root.mkdir(parents=True, exist_ok=True)
         self._instance_lock = QLockFile(str(lock_root / ".app-startup.lock"))
         self._instance_lock.setStaleLockTime(0)

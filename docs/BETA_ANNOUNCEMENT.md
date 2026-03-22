@@ -31,7 +31,7 @@ Then submit:
 ## What To Include In Feedback
 
 - OS version and app version
-- sensor model
+- sensor model (e.g., Polar H10)
 - pass/fail checklist items
 - exact repro steps for any failures
 - screenshots or short clips when possible

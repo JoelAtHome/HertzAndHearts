@@ -1,6 +1,6 @@
 $ErrorActionPreference = "Stop"
 
-$repoPath = "C:\Users\joelb\Hertz-and-Hearts"
+$repoPath = $PSScriptRoot
 $launcherPath = Join-Path $repoPath "Run-HnH.bat"
 $docsPath = Join-Path $repoPath "docs"
 $iconPath = Join-Path $docsPath "hnh_icon.ico"

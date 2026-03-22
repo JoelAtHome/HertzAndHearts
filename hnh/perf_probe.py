@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic, perf_counter_ns
 
+from hnh.data_paths import app_data_root
+
 
 def _as_float(value: object, default: float) -> float:
     try:
@@ -185,7 +187,7 @@ def get_perf_probe() -> PerfProbe:
     if env_log_path:
         log_path = Path(env_log_path).expanduser()
     else:
-        out_dir = Path.home() / "Hertz-and-Hearts" / "perf"
+        out_dir = app_data_root() / "perf"
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         log_path = out_dir / f"perf_probe_{stamp}.jsonl"
 

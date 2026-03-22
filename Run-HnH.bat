@@ -5,6 +5,11 @@ rem Launch Hertz & Hearts from repository root.
 set "ROOT_DIR=%~dp0"
 pushd "%ROOT_DIR%"
 
+rem Self-heal desktop shortcut after folder moves.
+if exist "%ROOT_DIR%Create-Desktop-Shortcut.ps1" (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT_DIR%Create-Desktop-Shortcut.ps1" >nul 2>&1
+)
+
 set "PYTHON_EXE="
 if exist "%ROOT_DIR%venv\Scripts\python.exe" (
     set "PYTHON_EXE=%ROOT_DIR%venv\Scripts\python.exe"

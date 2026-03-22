@@ -8,7 +8,7 @@ Please follow this process so results are consistent and actionable.
 
 - Confirm app version and OS version.
 - Pair your sensor with the OS first.
-- Use realistic session lengths (at least one short and one medium session).
+- Use realistic session lengths: include at least one short session (about 2-5 minutes) and one medium session (about 10-20 minutes).
 
 ## 2) Run The Checklist
 

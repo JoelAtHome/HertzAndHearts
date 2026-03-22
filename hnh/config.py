@@ -105,7 +105,7 @@ PLOT_WARMUP_SECONDS: Final[float] = 5.0
 # Disabled by default to keep baseline recording/export lightweight.
 EXPORT_EDF_PLUS_D: Final[bool] = False
 
-# Folder where finalized sessions are copied. Empty = use default (~/Hertz-and-Hearts).
+# Folder where finalized sessions are copied. Empty = use default app data Sessions/{profile}.
 SESSION_SAVE_PATH: Final[str] = ""
 
 # Open session folder in file manager after Stop & Save.

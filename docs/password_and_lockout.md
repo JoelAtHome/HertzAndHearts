@@ -25,7 +25,7 @@ Once you're in, use **Profile Manager → Set/Reset Password** to clear or chang
 ### 2. Direct SQLite reset
 
 1. Close the app.
-2. Open the profiles database (default: `%LOCALAPPDATA%\Hertz-and-Hearts\profiles.db` or `~/.local/share/Hertz-and-Hearts/profiles.db`).
+2. Open the profiles database (default: `%LOCALAPPDATA%\Hertz-and-Hearts\profiles.db` on Windows, `~/.local/share/hertz-and-hearts/profiles.db` on Linux; legacy `~/Hertz-and-Hearts/profiles.db` may still be used on older installs).
 3. Run:
 
 ```sql

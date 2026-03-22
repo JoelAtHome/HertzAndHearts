@@ -5,11 +5,13 @@ Defaults come from config.py.  User changes are saved to a small JSON
 file in the user's home directory so they survive app restarts.
 """
 import json
+import os
+import shutil
 from collections import OrderedDict
 from pathlib import Path
 
 from PySide6.QtWidgets import (
-    QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
+    QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QPushButton, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel,
     QMessageBox, QScrollArea, QWidget, QLineEdit, QListWidget,
     QInputDialog, QAbstractItemView, QFileDialog,
@@ -17,6 +19,13 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt
 
 from hnh import config as _defaults
+from hnh.data_paths import (
+    APP_DATA_ENV_VAR,
+    app_data_root,
+    default_data_root_tooltip,
+    legacy_data_root,
+    recommended_data_root,
+)
 
 SETTINGS_FILE = Path.home() / ".hnh_settings.json"
 
@@ -62,7 +71,7 @@ REGISTRY = OrderedDict([
         "display": "Session Save Path",
         "tooltip": (
             "Folder where finalized sessions (CSV, report, EDF+) are copied. "
-            "Leave empty to use Hertz-and-Hearts/Sessions/{profile} under your home folder."
+            "Leave empty to use the app data folder's Sessions/{profile} location."
         ),
         "type": str,
         "section": "Session Timing",
@@ -775,11 +784,53 @@ class SettingsDialog(QDialog):
         self._section_groups: list[tuple[QGroupBox, list[str], bool]] = []
         self._pending_disclaimer_reset = "none"
         self._advanced_prev_checked = SettingsDialog._show_advanced
+        self._active_data_root = app_data_root()
+        self._legacy_data_root = legacy_data_root()
+        self._recommended_data_root = recommended_data_root()
 
         self.setWindowTitle("Hertz & Hearts \u2014 Settings")
         self.setMinimumWidth(500)
 
         root = QVBoxLayout(self)
+
+        data_group = QGroupBox("Data")
+        data_form = QFormLayout(data_group)
+        data_form.setLabelAlignment(Qt.AlignRight)
+        self._data_root_display = QLineEdit(str(self._active_data_root))
+        self._data_root_display.setReadOnly(True)
+        self._data_root_display.setCursorPosition(0)
+        self._data_root_display.setStyleSheet(
+            "QLineEdit { background-color: #f2f2f2; color: #555555; }"
+        )
+        self._data_root_display.setToolTip(
+            "Active app data folder for profiles, session index, and diagnostics."
+        )
+        self._copy_data_root_btn = QPushButton("Copy Path")
+        self._copy_data_root_btn.setToolTip("Copy active data folder path to clipboard.")
+        self._copy_data_root_btn.clicked.connect(self._copy_data_root_path)
+        data_row_widget = QWidget()
+        data_row = QHBoxLayout(data_row_widget)
+        data_row.setContentsMargins(0, 0, 0, 0)
+        data_row.setSpacing(6)
+        data_row.addWidget(self._data_root_display, stretch=1)
+        data_row.addWidget(self._copy_data_root_btn)
+        data_label = QLabel("Data Folder")
+        data_label.setToolTip(default_data_root_tooltip())
+        data_form.addRow(data_label, data_row_widget)
+        self._migrate_data_root_btn = QPushButton("Move Data to Recommended Location…")
+        self._migrate_data_root_btn.clicked.connect(self._migrate_data_root)
+        self._migrate_data_root_hint = QLabel("")
+        self._migrate_data_root_hint.setWordWrap(True)
+        migrate_label = QLabel("Data Migration")
+        migrate_row_widget = QWidget()
+        migrate_row = QVBoxLayout(migrate_row_widget)
+        migrate_row.setContentsMargins(0, 0, 0, 0)
+        migrate_row.setSpacing(4)
+        migrate_row.addWidget(self._migrate_data_root_btn)
+        migrate_row.addWidget(self._migrate_data_root_hint)
+        data_form.addRow(migrate_label, migrate_row_widget)
+        self._refresh_data_migration_ui()
+        root.addWidget(data_group)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -1010,6 +1061,123 @@ class SettingsDialog(QDialog):
     def _open_annotation_manager(self):
         dlg = AnnotationEditorDialog(self._settings, parent=self)
         dlg.exec()
+
+    def _copy_data_root_path(self):
+        app = QApplication.instance()
+        if app is None:
+            return
+        clipboard = app.clipboard()
+        if clipboard is None:
+            return
+        path_text = self._data_root_display.text().strip()
+        if not path_text:
+            return
+        clipboard.setText(path_text)
+
+    def _refresh_data_migration_ui(self):
+        active = self._active_data_root.resolve()
+        legacy = self._legacy_data_root.resolve()
+        recommended = self._recommended_data_root.resolve()
+        env_override = os.environ.get(APP_DATA_ENV_VAR, "").strip()
+
+        # Only offer one-click migration for Windows legacy -> LocalAppData.
+        can_offer = (
+            os.name == "nt"
+            and not env_override
+            and active == legacy
+            and recommended != legacy
+            and legacy.exists()
+            and not recommended.exists()
+        )
+
+        self._migrate_data_root_btn.setEnabled(can_offer)
+        if can_offer:
+            self._migrate_data_root_btn.setToolTip(
+                f"Copy data from {legacy} to {recommended}. "
+                "Restart the app after migration to switch paths."
+            )
+            self._migrate_data_root_hint.setText(
+                "Recommended for dual-boot setups. Copies your data to a Windows-local path "
+                "and keeps the current folder as backup until you confirm the switch."
+            )
+            return
+
+        self._migrate_data_root_btn.setToolTip(
+            "Migration unavailable in the current configuration."
+        )
+        if env_override:
+            self._migrate_data_root_hint.setText(
+                f"Migration disabled because {APP_DATA_ENV_VAR} is set in this environment."
+            )
+        elif os.name != "nt":
+            self._migrate_data_root_hint.setText(
+                "No migration needed on this platform. Linux uses the XDG data path by default."
+            )
+        elif active == recommended:
+            self._migrate_data_root_hint.setText(
+                f"You are already using the recommended location: {recommended}"
+            )
+        elif active == legacy and recommended.exists():
+            self._migrate_data_root_hint.setText(
+                f"Recommended location already exists: {recommended}. Restart to switch if needed."
+            )
+        else:
+            self._migrate_data_root_hint.setText(
+                "Migration is not available for the current data-path state."
+            )
+
+    def _migrate_data_root(self):
+        self._refresh_data_migration_ui()
+        if not self._migrate_data_root_btn.isEnabled():
+            return
+
+        source = self._legacy_data_root
+        destination = self._recommended_data_root
+        reply = QMessageBox.question(
+            self,
+            "Move Data to Recommended Location",
+            (
+                "Copy app data to the recommended Windows location now?\n\n"
+                f"Source:\n{source}\n\n"
+                f"Destination:\n{destination}\n\n"
+                "Notes:\n"
+                "- Source data is kept as a backup.\n"
+                "- Restart the app after migration to use the new location."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, destination, dirs_exist_ok=False)
+        except Exception as exc:
+            try:
+                if destination.exists():
+                    shutil.rmtree(destination, ignore_errors=True)
+            except Exception:
+                pass
+            QMessageBox.warning(
+                self,
+                "Data Migration Failed",
+                f"Could not copy data to the recommended location:\n{exc}",
+            )
+            self._refresh_data_migration_ui()
+            return
+
+        self._refresh_data_migration_ui()
+        QMessageBox.information(
+            self,
+            "Data Migration Complete",
+            (
+                "Data was copied successfully.\n\n"
+                f"New location on next launch:\n{destination}\n\n"
+                "Please restart Hertz & Hearts now. "
+                "After restart, verify Session History and reports, then remove the old folder if desired."
+            ),
+        )
 
     def _queue_disclaimer_reset(self):
         msg = QMessageBox(self)

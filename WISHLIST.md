@@ -68,6 +68,14 @@ Raw ideas go here first.
 - Status: idea
 - Notes: Include troubleshooting guidance for "scan sees device but connect fails" and clarify that this startup behavior is Linux-specific.
 
+### Data folder & dual-boot guidance in Help/F1 screens
+- Problem: Users on dual-boot/shared-drive setups can accidentally split session data across multiple paths without realizing it.
+- Proposed approach: Add a short help section (Settings + startup/user guide references) explaining default data paths per OS, `HNH_DATA_DIR`, and when to use `Move Data to Recommended Location…`.
+- Effort: S
+- Impact: High
+- Status: idea
+- Notes: Keep language practical and non-technical; include a one-minute verification checklist ("open Settings -> Data", confirm active path, restart after migration).
+
 ### Dynamic Relock tooltip for QTc trend window
 - Problem: The QTc trend `Relock` button tooltip is static, so users may miss that behavior changes by state (locked vs manual vs frozen/resume path).
 - Proposed approach: Mirror ECG tooltip behavior in QTc window with dynamic text updates tied to freeze/manual/relock transitions.
@@ -83,6 +91,14 @@ Raw ideas go here first.
 - Impact: High
 - Status: idea
 - Notes: Cap included snapshots per report (e.g., 3-5) to control document size and keep layout readable.
+
+### [UX] Zoom/pan controls for two main live plots (HR + RMSSD/SDNN)
+- Problem: During live monitoring, users cannot inspect recent details on the two main charts because view ranges are auto-driven and there is no direct zoom/pan interaction.
+- Proposed approach: Add mouse-wheel zoom and drag pan to both main live plots with an explicit viewport mode model (`AUTO_FOLLOW` vs `MANUAL_VIEW`) and a `Relock/Reset View` control to return to auto-follow.
+- Effort: M
+- Impact: Med
+- Status: idea
+- Notes: Medium priority. Main risk is regression from auto-range logic fighting manual viewport changes, especially around `Freeze Two Main Plots`, `Freeze All`, baseline reset, reconnect, and long-session pruning. Keep implementation event-driven/throttled to avoid redraw churn. Acceptance checks: (1) no jitter/snap-back while manually zoomed, (2) relock restores current auto behavior, (3) no measurable UI slowdown in long sessions, (4) no behavior change when users never interact with zoom/pan.
 
 Help content template (per screen):
 - Title: `<Screen Name> — Quick Guide`
@@ -106,6 +122,30 @@ Complexity review checklist:
 - [ ] Can this be merged into an existing interaction pattern instead of introducing a new mode/panel?
 - [ ] Is there usage evidence to justify promotion to default visibility?
 - [ ] Does this release still have one clearly dominant primary user outcome?
+
+### [Roadmap] Progressive trend interpretation (feature tiers)
+- Problem: Rich HRV/trend features can overwhelm the default workflow or read as a “Swiss army knife” if everything ships at full visibility.
+- Proposed approach: Ship interpretation aids in tiers—**Tier 1** minimal surface on main + Trends, **Tier 2** opt-in overlays and insight cards, **Tier 3** advanced/research panels—using progressive disclosure and the complexity checklist above.
+- Effort: L (ongoing program, small per tier)
+- Impact: High
+- Status: triaged
+- Notes: Tier 1 completed 2026-03-18 (see Done). Prefer one dominant outcome per release; keep advanced tools behind explicit entry points.
+
+### [Tier 2] Confounder log overlays, trend reliability score, metric-pair insight cards
+- Problem: Users still infer “what changed?” manually; optional depth would help without crowding Tier 1.
+- Proposed approach: Lightweight confounder tags on trend charts; per-session or rolling “reliability” hint from protocol + artifact cues; one-line paired-metric insight cards (non-diagnostic).
+- Effort: M
+- Impact: Med
+- Status: idea
+- Notes: Depends on clear SQI/protocol signals; keep off main dashboard by default (e.g. Trends sub-panel or “More detail”).
+
+### [Tier 3] Artifact integrity panel, resonance breathing session type, full HRV interpretation hub
+- Problem: Power users and research contexts want deeper signal QA and education without forcing it on everyone.
+- Proposed approach: Dedicated artifact/ectopic summary; optional guided breathing protocol mode; in-app doc hub (or deep F1) for LF/HF, RMSSD, caveats—aligned with non-diagnostic guardrails.
+- Effort: L
+- Impact: Med
+- Status: idea
+- Notes: Consider Help/F1 and export/report cross-links rather than new always-visible chrome.
 
 ### Generate report from past session (post-stop)
 - Problem: Users who end sessions with Stop (not Save) get CSV + manifest but no reports. Once the session is no longer active, there is no way to generate the DOCX/PDF report from the stored data.
@@ -442,6 +482,11 @@ Implementation checklist:
 ## Done
 
 Completed items. Include completion date and optional version reference.
+
+### [Tier 1] Morning baseline protocol + RMSSD recovery zones + “Why?” explainers
+- Completed: 2026-03-18
+- Outcome: **Main window:** per-profile “Morning baseline” checkbox; when enabled, an in-session protocol banner appears while recording; preference stored as `tier1_morning_baseline_protocol`. Session manifest includes top-level `trend_guidance.morning_baseline_protocol`. **Trends (Trend Plots):** linked RMSSD-only strip under the main plot with green/amber/red horizontal bands vs a personal baseline from the last *N* sessions (default 14, pref `tier1_recovery_baseline_sessions`); summary line for latest session; “Why these zones?” dialog (non-diagnostic).
+- Notes: Implementation: `hnh/view.py` (`TrendsWindow`, `View`). Zones compare latest session mean RMSSD to mean/SD of prior sessions in the baseline window—not a clinical threshold.
 
 ### [F24] Import connectors (common RR/ECG formats)
 - Completed: 2026-03-08

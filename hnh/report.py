@@ -15,6 +15,7 @@ import numpy as np
 from hnh.config import (
     ECG_QRS_UNCERTAINTY_PCT,
     ECG_QTc_UNCERTAINTY_PCT,
+    RMSSD_NOISY_MS,
     SETTLING_DURATION,
 )
 from docx import Document
@@ -23,6 +24,9 @@ from docx.oxml.ns import qn
 from docx.shared import Inches, Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_TAB_ALIGNMENT
 from docx.enum.table import WD_TABLE_ALIGNMENT
+
+
+_REPORT_RMSSD_HRV_STABILIZE_SECONDS = 60.0
 
 
 def _add_heading(doc: Document, text: str, level: int = 2, *, compact: bool = False):
@@ -201,6 +205,75 @@ def _fmt_signed(val, precision: int = 1) -> str:
     return f"{num:+.{precision}f}"
 
 
+def _values_after_settling(
+    values: list[float],
+    times_sec: list[float],
+    settling_sec: float,
+    reset_markers_sec: list[float] | None = None,
+) -> list[float]:
+    """Return values outside settling windows at session start and resets."""
+    if settling_sec <= 0:
+        return list(values)
+    if not values:
+        return []
+    if len(values) == len(times_sec) and times_sec:
+        segment_starts = [0.0]
+        if reset_markers_sec:
+            segment_starts.extend(
+                sorted({float(t) for t in reset_markers_sec if t is not None and float(t) >= 0.0})
+            )
+
+        kept: list[float] = []
+        for value, t in zip(values, times_sec):
+            in_settling = False
+            for start in segment_starts:
+                if start <= t < (start + settling_sec):
+                    in_settling = True
+                    break
+            if not in_settling:
+                kept.append(value)
+        return kept
+    # If timing metadata is unavailable/misaligned, keep original values.
+    return list(values)
+
+
+def _report_metric_settling_seconds(metric: str, base_settling_sec: float) -> float:
+    """Return report settling window per metric."""
+    base = max(0.0, float(base_settling_sec))
+    if metric in {"rmssd", "hrv"}:
+        return max(base, _REPORT_RMSSD_HRV_STABILIZE_SECONDS)
+    return base
+
+
+def _filter_rmssd_outliers(values: list[float]) -> list[float]:
+    """Return RMSSD values with report-facing outliers removed.
+
+    We keep filtering conservative:
+    - hard upper bound at the noisy-signal threshold
+    - robust upper bound using Tukey's rule (Q3 + 1.5*IQR) when enough data exists
+    """
+    cleaned = [float(v) for v in values if v is not None and float(v) >= 0.0]
+    if not cleaned:
+        return []
+
+    # First pass: reject obvious poor-signal spikes.
+    bounded = [v for v in cleaned if v <= float(RMSSD_NOISY_MS)]
+    if not bounded:
+        return [min(cleaned)]
+    if len(bounded) < 8:
+        return bounded
+
+    arr = np.asarray(bounded, dtype=float)
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = max(0.0, float(q3 - q1))
+    if iqr <= 0.0:
+        return bounded
+
+    upper = float(q3 + 1.5 * iqr)
+    filtered = [v for v in bounded if v <= upper]
+    return filtered or bounded
+
+
 def _fmt_qtc_session_value(qtc_data: dict) -> str:
     value = qtc_data.get("session_value_ms")
     if value is None:
@@ -307,15 +380,22 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
 
     output_dir.mkdir(parents=True, exist_ok=True)
     hr_values = [float(v) for v in (data.get("hr_values") or []) if v is not None]
-    rmssd_values = [float(v) for v in (data.get("rmssd_values") or []) if v is not None]
+    rmssd_values = _filter_rmssd_outliers(
+        [float(v) for v in (data.get("rmssd_values") or []) if v is not None]
+    )
     hrv_values = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
     hr_time_seconds = [float(v) for v in (data.get("hr_time_seconds") or []) if v is not None]
     rmssd_time_seconds = [float(v) for v in (data.get("rmssd_time_seconds") or []) if v is not None]
     hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
+    session_reset_markers_seconds = [
+        float(v) for v in (data.get("session_reset_markers_seconds") or []) if v is not None
+    ]
 
     # Truncate trend data to skip initial settling transient (~SETTLING_DURATION)
     # so plots don't falsely show near-zero starting values.
     truncate_sec = float(data.get("settling_duration_seconds", SETTLING_DURATION))
+    rmssd_truncate_sec = _report_metric_settling_seconds("rmssd", truncate_sec)
+    hrv_truncate_sec = _report_metric_settling_seconds("hrv", truncate_sec)
 
     def _truncate_settling(
         values: list[float], times_sec: list[float], min_sec: float
@@ -332,12 +412,18 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
         hr_values, hr_time_seconds = _truncate_settling(
             hr_values, hr_time_seconds, truncate_sec
         )
+    if rmssd_truncate_sec > 0:
         rmssd_values, rmssd_time_seconds = _truncate_settling(
-            rmssd_values, rmssd_time_seconds, truncate_sec
+            rmssd_values, rmssd_time_seconds, rmssd_truncate_sec
         )
+    if hrv_truncate_sec > 0:
         hrv_values, hrv_time_seconds = _truncate_settling(
-            hrv_values, hrv_time_seconds, truncate_sec
+            hrv_values, hrv_time_seconds, hrv_truncate_sec
         )
+    if truncate_sec > 0:
+        session_reset_markers_seconds = [
+            t for t in session_reset_markers_seconds if t >= truncate_sec
+        ]
 
     ecg_values = [float(v) for v in (data.get("ecg_samples") or []) if v is not None]
     ecg_rate = int(data.get("ecg_sample_rate_hz") or 130)
@@ -391,6 +477,20 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
             ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
         for axis in (ax_hr, ax_rmssd, ax_hrv):
             axis.tick_params(axis="both", labelsize=7)
+        for idx, t_reset in enumerate(session_reset_markers_seconds):
+            x_reset_min = max(0.0, t_reset) / 60.0
+            label = "Baseline reset" if idx == 0 else None
+            for axis in (ax_hr, ax_rmssd, ax_hrv):
+                axis.axvline(
+                    x=x_reset_min,
+                    color="#6B7280",
+                    linestyle="--",
+                    linewidth=0.8,
+                    alpha=0.7,
+                    label=label if axis is ax_hr else None,
+                )
+        if session_reset_markers_seconds:
+            ax_hr.legend(loc="upper left", fontsize=6, frameon=False)
         fig.tight_layout(h_pad=0.5)
         canvas.print_png(str(trend_path))
         visuals["trend"] = trend_path
@@ -498,14 +598,33 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     qtc_data = data.get("qtc", {}) or {}
     disclaimer = data.get("disclaimer", {}) or {}
     warning = str(disclaimer.get("warning", "")).strip()
+    settling_sec = float(data.get("settling_duration_seconds", SETTLING_DURATION))
+    hrv_settling_sec = _report_metric_settling_seconds("hrv", settling_sec)
+    reset_markers_sec = [
+        float(v) for v in (data.get("session_reset_markers_seconds") or []) if v is not None
+    ]
 
-    hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
+    hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
+    hrv_vals = _values_after_settling(
+        [float(v) for v in (data.get("hrv_values") or []) if v is not None],
+        hrv_time_seconds,
+        hrv_settling_sec,
+        reset_markers_sec,
+    )
     hrv_avg = f"{sum(hrv_vals)/len(hrv_vals):.1f} ms" if hrv_vals else "--"
     delta_hrv = "--"
     if len(hrv_vals) >= 2 and hrv_vals[0] > 0:
         pct = ((hrv_vals[-1] - hrv_vals[0]) / hrv_vals[0]) * 100
         delta_hrv = f"{pct:+.1f}%"
-    stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
+    stress_time_seconds = [
+        float(v) for v in (data.get("stress_ratio_time_seconds") or []) if v is not None
+    ]
+    stress_vals = _values_after_settling(
+        [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None],
+        stress_time_seconds,
+        settling_sec,
+        reset_markers_sec,
+    )
     lf_hf_avg = f"{sum(stress_vals)/len(stress_vals):.2f}" if stress_vals else "--"
     metrics_rows = [
         ["Metric", "Value"],
@@ -680,7 +799,8 @@ def generate_session_report(path: str, data: dict) -> None:
         session_start (datetime), session_end (datetime),
         csv_path,
         annotations  -- list of (timestamp_str, text)
-        hr_values, rmssd_values, snr_values  -- lists of floats for stats
+        hr_values, rmssd_values, stress_ratio_values, snr_values  -- lists of floats for stats
+        hr_time_seconds, rmssd_time_seconds, hrv_time_seconds, stress_ratio_time_seconds -- timeline arrays
         notes  -- str from user
         disclaimer -- dict with warning/text/source/hash/ack metadata
     """
@@ -713,6 +833,43 @@ def generate_session_report(path: str, data: dict) -> None:
     duration_min = "--"
     if start and now:
         duration_min = f"{(now - start).total_seconds() / 60:.1f}"
+    settling_sec = float(data.get("settling_duration_seconds", SETTLING_DURATION))
+    rmssd_settling_sec = _report_metric_settling_seconds("rmssd", settling_sec)
+    hrv_settling_sec = _report_metric_settling_seconds("hrv", settling_sec)
+    reset_markers_sec = [
+        float(v) for v in (data.get("session_reset_markers_seconds") or []) if v is not None
+    ]
+    hr_time_seconds = [float(v) for v in (data.get("hr_time_seconds") or []) if v is not None]
+    rmssd_time_seconds = [float(v) for v in (data.get("rmssd_time_seconds") or []) if v is not None]
+    hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
+    stress_time_seconds = [
+        float(v) for v in (data.get("stress_ratio_time_seconds") or []) if v is not None
+    ]
+    hr_vals_settled = _values_after_settling(
+        [float(v) for v in (data.get("hr_values") or []) if v is not None],
+        hr_time_seconds,
+        settling_sec,
+        reset_markers_sec,
+    )
+    rmssd_vals_settled = _values_after_settling(
+        [float(v) for v in (data.get("rmssd_values") or []) if v is not None],
+        rmssd_time_seconds,
+        rmssd_settling_sec,
+        reset_markers_sec,
+    )
+    rmssd_vals_settled = _filter_rmssd_outliers(rmssd_vals_settled)
+    hrv_vals_settled = _values_after_settling(
+        [float(v) for v in (data.get("hrv_values") or []) if v is not None],
+        hrv_time_seconds,
+        hrv_settling_sec,
+        reset_markers_sec,
+    )
+    stress_vals_settled = _values_after_settling(
+        [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None],
+        stress_time_seconds,
+        settling_sec,
+        reset_markers_sec,
+    )
 
     report_date = doc.add_paragraph(f"Report generated: {format_datetime_for_display(now)}")
     report_date.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -743,9 +900,8 @@ def generate_session_report(path: str, data: dict) -> None:
     # Section 3: Post-Session Readings
     _add_heading(doc, "Post-Session Readings", compact=True)
     qtc_data = data.get("qtc", {}) or {}
-    hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
-    last_hrv = hrv_vals[-1] if hrv_vals else None
-    stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
+    last_hrv = hrv_vals_settled[-1] if hrv_vals_settled else None
+    stress_vals = stress_vals_settled
     last_lf_hf = stress_vals[-1] if stress_vals else None
     _add_key_value_table(doc, [
         ("Heart Rate (latest)", _fmt(data.get("last_hr"), "bpm", 0)),
@@ -780,9 +936,20 @@ def generate_session_report(path: str, data: dict) -> None:
 
     # Section 4: Session Statistics
     _add_heading(doc, "Session Statistics", compact=True)
-    hr_vals = data.get("hr_values", [])
-    rmssd_vals = data.get("rmssd_values", [])
+    hr_vals = hr_vals_settled
+    rmssd_vals = rmssd_vals_settled
     stats_rows = []
+    if settling_sec > 0:
+        if (rmssd_settling_sec > settling_sec) or (hrv_settling_sec > settling_sec):
+            stats_rows.append((
+                "Stats Window",
+                (
+                    f"HR/LF-HF after settling ({settling_sec:.0f}s after start/resets); "
+                    f"RMSSD/HRV after {max(rmssd_settling_sec, hrv_settling_sec):.0f}s startup stabilization"
+                ),
+            ))
+        else:
+            stats_rows.append(("Stats Window", f"After settling ({settling_sec:.0f}s after start/resets)"))
     baseline_hr = _to_float(data.get("baseline_hr"))
     baseline_rmssd = _to_float(data.get("baseline_rmssd"))
     last_hr_val = _to_float(data.get("last_hr"))
@@ -813,7 +980,7 @@ def generate_session_report(path: str, data: dict) -> None:
         stats_rows.append(("\u0394 RMSSD from Baseline", delta_rmssd))
     else:
         stats_rows.append(("RMSSD", "No data recorded"))
-    hrv_vals = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
+    hrv_vals = hrv_vals_settled
     if hrv_vals:
         hrv_avg = sum(hrv_vals) / len(hrv_vals)
         stats_rows.extend([
@@ -828,7 +995,7 @@ def generate_session_report(path: str, data: dict) -> None:
         stats_rows.append(("\u0394 HRV(SDNN) (first\u2192last)", delta_hrv))
     else:
         stats_rows.append(("HRV(SDNN)", "No data recorded"))
-    stress_vals = [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None]
+    stress_vals = stress_vals_settled
     if stress_vals:
         stats_rows.extend([
             ("LF/HF Min", f"{min(stress_vals):.2f}"),

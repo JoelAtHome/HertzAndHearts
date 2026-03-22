@@ -1,6 +1,8 @@
 # Changelog
 
 ### Unreleased
++ docs: Extended `docs/USER_GUIDE.md` with Tier 1 morning baseline protocol, Session Trends / Compare / Tag Insights, and RMSSD recovery zones.
++ enhancement: Tier 1 trend guidance—morning baseline protocol (checkbox, in-session banner, `session_manifest.json` → `trend_guidance.morning_baseline_protocol`), RMSSD recovery zone strip under Session Trends with configurable baseline window and “Why these zones?” explainer (`hnh/view.py`; prefs `tier1_morning_baseline_protocol`, `tier1_recovery_baseline_sessions`).
 + release: Set project pre-release version to `1.0.0b0` (public label: `1.0.0-beta`) and added beta launch collateral/templates.
 + enhancement: Added in-app Support Development flow under More menu with two donation methods (GitHub Sponsors and Buy Me a Coffee), including profile-aware post-session prompts and guest-safe behavior.
 + enhancement: Added a richer support dialog with clickable links and QR display support (with graceful fallback when QR generation is unavailable).

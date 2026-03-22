@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit,
     QTabWidget, QListWidget, QListWidgetItem, QSplitter,
-    QToolButton, QMenu,
+    QToolButton, QMenu, QSpinBox,
 )
 from collections import deque
 from typing import Iterable
@@ -76,8 +76,10 @@ from hnh.edf_export import export_session_edf_plus
 from hnh.profile_store import ProfileStore
 from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correlations
 from hnh.perf_probe import get_perf_probe
+from hnh.data_paths import app_data_root
 from hnh.session_report_rebuild import generate_reports_for_session_dir
 from hnh import __version__ as version, resources  # noqa
+from hnh import update_check
 import warnings
 
 try:
@@ -94,6 +96,10 @@ GREEN = QColor(0, 255, 0)
 YELLOW = QColor(255, 255, 0)
 RED = QColor(255, 0, 0)
 PACER_WIDGET_SIZE = 134
+
+# Tier 1 trend-guidance prefs (per profile; see WISHLIST progressive disclosure roadmap)
+TIER1_PREF_MORNING_BASELINE = "tier1_morning_baseline_protocol"
+TIER1_PREF_RECOVERY_SESSIONS = "tier1_recovery_baseline_sessions"
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
 
@@ -644,6 +650,10 @@ class ProfileSelectionDialog(QDialog):
     def showEvent(self, event):
         super().showEvent(event)
         self._center_on_screen()
+        # Ensure Enter activates Continue on first show, not the profile dropdown.
+        QTimer.singleShot(
+            0, lambda: self._continue_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+        )
 
     def _center_on_screen(self):
         screen = self.screen()
@@ -1522,6 +1532,44 @@ class TrendsWindow(QMainWindow):
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
         tab1_layout.addWidget(self._plot_widget)
 
+        # Tier 1: RMSSD recovery zones (personal baseline vs latest session; research context only)
+        tier1_row = QHBoxLayout()
+        self._tier1_why_btn = QPushButton("Why these zones?")
+        self._tier1_why_btn.setToolTip(
+            "Plain-language notes on how zones are computed (not medical advice)."
+        )
+        self._tier1_why_btn.clicked.connect(self._on_tier1_why_clicked)
+        tier1_row.addWidget(self._tier1_why_btn)
+        tier1_row.addSpacing(12)
+        tier1_row.addWidget(QLabel("Baseline window:"))
+        self._recovery_sessions_spin = QSpinBox()
+        self._recovery_sessions_spin.setRange(3, 60)
+        self._recovery_sessions_spin.setSuffix(" sessions")
+        self._recovery_sessions_spin.setToolTip(
+            "Number of prior sessions used to estimate your RMSSD average and spread "
+            "(most recent session is compared to the ones before it)."
+        )
+        self._recovery_sessions_spin.valueChanged.connect(self._on_recovery_sessions_changed)
+        tier1_row.addWidget(self._recovery_sessions_spin)
+        tier1_row.addStretch()
+        tab1_layout.addLayout(tier1_row)
+
+        self._recovery_zone_label = QLabel("")
+        self._recovery_zone_label.setWordWrap(True)
+        self._recovery_zone_label.setStyleSheet("font-size: 11px; color: #2c3e50;")
+        tab1_layout.addWidget(self._recovery_zone_label)
+
+        recovery_date_axis = pg.DateAxisItem(orientation="bottom")
+        self._rmssd_recovery_plot = pg.PlotWidget(
+            axisItems={"bottom": recovery_date_axis}
+        )
+        self._rmssd_recovery_plot.setLabel("left", "RMSSD (ms)")
+        self._rmssd_recovery_plot.setMaximumHeight(170)
+        self._rmssd_recovery_plot.showGrid(x=True, y=True, alpha=0.25)
+        self._rmssd_recovery_plot.setXLink(self._plot_widget)
+        tab1_layout.addWidget(self._rmssd_recovery_plot)
+        self._rmssd_recovery_items: list = []
+
         self._hover_label = QLabel(self._plot_widget)
         self._hover_label.setStyleSheet(
             "background: rgba(255,255,255,0.92); padding: 6px 8px; "
@@ -1723,6 +1771,18 @@ class TrendsWindow(QMainWindow):
 
     def _refresh_plot(self):
         profile = self._profile_combo.currentText().strip() or self._active_profile
+        raw_rs = self._profile_store.get_profile_pref(
+            profile, TIER1_PREF_RECOVERY_SESSIONS, "14"
+        )
+        try:
+            rs_val = max(3, min(60, int(str(raw_rs).strip())))
+        except (TypeError, ValueError):
+            rs_val = 14
+        if self._recovery_sessions_spin.value() != rs_val:
+            self._recovery_sessions_spin.blockSignals(True)
+            self._recovery_sessions_spin.setValue(rs_val)
+            self._recovery_sessions_spin.blockSignals(False)
+
         rows = self._profile_store.list_session_trends(profile, span="year")
         if not self._show_hidden_sessions:
             visible_sessions = self._profile_store.list_sessions(
@@ -1739,6 +1799,9 @@ class TrendsWindow(QMainWindow):
         self._plot_widget.clear()
         self._trend_data = {}
         if not rows:
+            self._clear_rmssd_recovery_plot()
+            self._recovery_zone_label.setText("")
+            self._rmssd_recovery_plot.hide()
             return
         x = []
         hr_y, rmssd_y, sdnn_y, qtc_y = [], [], [], []
@@ -1753,6 +1816,9 @@ class TrendsWindow(QMainWindow):
             sdnn_y.append(r.get("avg_sdnn") if r.get("avg_sdnn") is not None else float("nan"))
             qtc_y.append(r.get("qtc_ms") if r.get("qtc_ms") is not None else float("nan"))
         if not x:
+            self._clear_rmssd_recovery_plot()
+            self._recovery_zone_label.setText("")
+            self._rmssd_recovery_plot.hide()
             return
         self._trend_data = {"x": x, "hr": hr_y, "rmssd": rmssd_y, "sdnn": sdnn_y, "qtc": qtc_y}
         _dotted = Qt.PenStyle.DotLine
@@ -1802,6 +1868,169 @@ class TrendsWindow(QMainWindow):
         )
         self._plot_widget.addItem(self._cursor_line)
         self._cursor_line.sigPositionChanged.connect(self._on_cursor_line_moved)
+
+        self._refresh_rmssd_recovery_plot(profile, x, rmssd_y)
+
+    def _clear_rmssd_recovery_plot(self) -> None:
+        for item in self._rmssd_recovery_items:
+            try:
+                self._rmssd_recovery_plot.removeItem(item)
+            except Exception:
+                pass
+        self._rmssd_recovery_items.clear()
+
+    def _on_recovery_sessions_changed(self, value: int) -> None:
+        profile = self._profile_combo.currentText().strip() or self._active_profile
+        self._profile_store.set_profile_pref(
+            profile, TIER1_PREF_RECOVERY_SESSIONS, str(int(value))
+        )
+        self._refresh_plot()
+
+    def _on_tier1_why_clicked(self) -> None:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Why these RMSSD zones?")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(
+            "These bands are a simple, personal baseline view—not a diagnosis."
+        )
+        msg.setInformativeText(
+            "How it works:\n"
+            "• We use your recent sessions (see Baseline window) to estimate a typical "
+            "RMSSD level and how much it usually varies.\n"
+            "• The latest session’s average RMSSD is compared to that history.\n"
+            "• Green ≈ close to your recent norm. Amber ≈ noticeably lower. "
+            "Red ≈ much lower than your recent norm.\n\n"
+            "Important:\n"
+            "• RMSSD is sensitive to posture, sleep, caffeine, stress, breathing, "
+            "and signal quality.\n"
+            "• Use the same time of day and setup when tracking trends.\n"
+            "• This app is for research and wellness context only—not for clinical "
+            "decisions."
+        )
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
+        msg.exec()
+
+    def _refresh_rmssd_recovery_plot(
+        self, profile: str, x_list: list[float], rmssd_list: list[float]
+    ) -> None:
+        self._clear_rmssd_recovery_plot()
+        pairs: list[tuple[float, float]] = []
+        for i in range(min(len(x_list), len(rmssd_list))):
+            yv = rmssd_list[i]
+            if yv is None or yv != yv:
+                continue
+            try:
+                pairs.append((float(x_list[i]), float(yv)))
+            except (TypeError, ValueError):
+                continue
+        if len(pairs) < 2:
+            self._recovery_zone_label.setText(
+                "RMSSD recovery view: record at least two sessions with RMSSD data "
+                "to see zones and a latest-session summary."
+            )
+            self._rmssd_recovery_plot.hide()
+            return
+
+        self._rmssd_recovery_plot.show()
+        pairs.sort(key=lambda p: p[0])
+        window = max(3, min(60, self._recovery_sessions_spin.value()))
+        tail = pairs[-min(len(pairs), window) :]
+        latest_x, latest_val = tail[-1]
+        baseline_vals = [p[1] for p in tail[:-1]]
+        if not baseline_vals:
+            self._recovery_zone_label.setText(
+                "RMSSD recovery view: need one prior session in the baseline window "
+                "to classify the latest session."
+            )
+            curve = self._rmssd_recovery_plot.plot(
+                [p[0] for p in pairs],
+                [p[1] for p in pairs],
+                pen=pg.mkPen("b", width=2),
+                symbol="o",
+                symbolSize=7,
+                symbolBrush="b",
+                symbolPen="b",
+            )
+            self._rmssd_recovery_items.append(curve)
+            return
+
+        m = float(statistics.mean(baseline_vals))
+        if len(baseline_vals) > 1:
+            s = float(statistics.stdev(baseline_vals))
+        else:
+            s = max(abs(m) * 0.12, 5.0)
+        if s <= 0:
+            s = max(abs(m) * 0.12, 5.0)
+
+        red_edge = m - 1.5 * s
+        amb_edge = m - 0.5 * s
+        y_min = max(0.0, min(latest_val, red_edge, amb_edge) * 0.88)
+        y_max = max(latest_val, m + s, amb_edge + s) * 1.12
+        y_max = max(y_max, m + 10.0)
+
+        def _add_h_band(y0: float, y1: float, rgba: tuple[int, int, int, int]) -> None:
+            if y1 <= y0:
+                return
+            try:
+                region = pg.LinearRegionItem(
+                    values=(y0, y1),
+                    orientation="horizontal",
+                    brush=pg.mkBrush(*rgba),
+                    movable=False,
+                )
+            except TypeError:
+                return
+            region.setZValue(-20)
+            self._rmssd_recovery_plot.addItem(region)
+            self._rmssd_recovery_items.append(region)
+
+        # Low RMSSD (red) → mid (amber) → higher (green); thresholds red_edge < amb_edge.
+        if red_edge > y_min:
+            _add_h_band(y_min, min(red_edge, y_max), (255, 80, 80, 55))
+        a0, a1 = max(y_min, red_edge), min(y_max, amb_edge)
+        if a1 > a0:
+            _add_h_band(a0, a1, (255, 200, 80, 50))
+        if y_max > max(y_min, amb_edge):
+            _add_h_band(max(y_min, amb_edge), y_max, (80, 200, 120, 45))
+
+        curve = self._rmssd_recovery_plot.plot(
+            [p[0] for p in pairs],
+            [p[1] for p in pairs],
+            pen=pg.mkPen("b", width=2),
+            symbol="o",
+            symbolSize=7,
+            symbolBrush="b",
+            symbolPen="b",
+        )
+        self._rmssd_recovery_items.append(curve)
+
+        mark = self._rmssd_recovery_plot.plot(
+            [latest_x],
+            [latest_val],
+            pen=None,
+            symbol="star",
+            symbolSize=14,
+            symbolBrush=(255, 140, 0),
+            symbolPen="w",
+        )
+        self._rmssd_recovery_items.append(mark)
+
+        if latest_val < red_edge:
+            zone = "Red"
+            hint = "Latest session RMSSD is much lower than your recent baseline."
+        elif latest_val < amb_edge:
+            zone = "Amber"
+            hint = "Latest session RMSSD is below your typical recent range."
+        else:
+            zone = "Green"
+            hint = "Latest session RMSSD is within your typical recent range."
+
+        self._recovery_zone_label.setText(
+            f"RMSSD recovery (vs last {len(baseline_vals)} baseline session(s), "
+            f"mean {m:.1f} ms, SD {s:.1f} ms): <b>{zone}</b> — {hint} "
+            f"(Research / wellness context only.)"
+        )
 
     def _nearest_point_index_within_pixels(self, line_x: float, hit_radius_px: float = 30) -> int | None:
         """Return index of nearest data point if cursor is within hit_radius_px (x-axis) in screen space."""
@@ -2123,6 +2352,7 @@ class TrendsWindow(QMainWindow):
         self._profile_combo.setEnabled(self._is_admin)
         self._compare_profile_combo.setEnabled(self._is_admin)
         self._tag_profile_combo.setEnabled(self._is_admin)
+        self._refresh_plot()
         self._refresh_compare_session_list()
         self._refresh_tag_insights()
 
@@ -2682,6 +2912,8 @@ class PacerWidget(QChartView):
 
 
 class XYSeriesWidget(QChartView):
+    xRangeInteracted = Signal(float, float)
+
     def __init__(self, x_values, y_values, line_color=QColor(0, 0, 0)):
         super().__init__()
         self.setViewport(QWidget())
@@ -2710,9 +2942,106 @@ class XYSeriesWidget(QChartView):
         self.plot.addAxis(self.y_axis, Qt.AlignLeft)
         self.time_series.attachAxis(self.y_axis)
         self.setChart(self.plot)
+        self.setMouseTracking(True)
+        self._manual_x_enabled = False
+        self._manual_x_bounds = (0.0, 60.0)
+        self._min_manual_span_sec = 2.0
+        self._wheel_zoom_factor = 1.15
+        self._dragging = False
+        self._last_drag_pos: QPoint | None = None
 
     def update_series(self, x_values, y_values):
         self.time_series.replace([QPointF(x, y) for x, y in zip(x_values, y_values)])
+
+    def set_manual_x_interaction(self, enabled: bool) -> None:
+        self._manual_x_enabled = bool(enabled)
+        if not self._manual_x_enabled:
+            self._dragging = False
+            self._last_drag_pos = None
+            self.setCursor(Qt.ArrowCursor)
+        else:
+            self.setCursor(Qt.OpenHandCursor)
+
+    def set_manual_x_bounds(self, x_lo: float, x_hi: float) -> None:
+        lo = float(min(x_lo, x_hi))
+        hi = float(max(x_lo, x_hi))
+        if hi - lo < 1.0:
+            hi = lo + 1.0
+        self._manual_x_bounds = (lo, hi)
+
+    def _apply_manual_xrange(self, x_lo: float, x_hi: float, *, emit: bool = True) -> None:
+        lo_bound, hi_bound = self._manual_x_bounds
+        bound_span = max(self._min_manual_span_sec, hi_bound - lo_bound)
+        min_span = self._min_manual_span_sec
+        lo = float(min(x_lo, x_hi))
+        hi = float(max(x_lo, x_hi))
+        span = max(min_span, hi - lo)
+        span = min(span, bound_span)
+        lo = max(lo_bound, min(lo, hi_bound - span))
+        hi = lo + span
+        self.x_axis.setRange(lo, hi)
+        if emit:
+            self.xRangeInteracted.emit(float(lo), float(hi))
+
+    def wheelEvent(self, event):
+        if not self._manual_x_enabled:
+            super().wheelEvent(event)
+            return
+        delta_y = event.angleDelta().y()
+        if delta_y == 0:
+            event.accept()
+            return
+        x_lo = float(self.x_axis.min())
+        x_hi = float(self.x_axis.max())
+        span = max(self._min_manual_span_sec, x_hi - x_lo)
+        factor = (1.0 / self._wheel_zoom_factor) if delta_y > 0 else self._wheel_zoom_factor
+        new_span = span * factor
+        lo_bound, hi_bound = self._manual_x_bounds
+        new_span = max(self._min_manual_span_sec, min(new_span, hi_bound - lo_bound))
+        area = self.chart().plotArea()
+        if area.width() <= 1.0:
+            ratio = 0.5
+        else:
+            ratio = (float(event.position().x()) - area.left()) / area.width()
+            ratio = max(0.0, min(1.0, ratio))
+        center = x_lo + (ratio * span)
+        new_lo = center - (ratio * new_span)
+        new_hi = new_lo + new_span
+        self._apply_manual_xrange(new_lo, new_hi, emit=True)
+        event.accept()
+
+    def mousePressEvent(self, event):
+        if self._manual_x_enabled and event.button() == Qt.LeftButton:
+            self._dragging = True
+            self._last_drag_pos = event.pos()
+            self.setCursor(Qt.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._manual_x_enabled and self._dragging and self._last_drag_pos is not None:
+            dx = float(event.pos().x() - self._last_drag_pos.x())
+            self._last_drag_pos = event.pos()
+            area = self.chart().plotArea()
+            width = max(1.0, float(area.width()))
+            x_lo = float(self.x_axis.min())
+            x_hi = float(self.x_axis.max())
+            span = max(self._min_manual_span_sec, x_hi - x_lo)
+            shift = -(dx / width) * span
+            self._apply_manual_xrange(x_lo + shift, x_hi + shift, emit=True)
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._manual_x_enabled and event.button() == Qt.LeftButton:
+            self._dragging = False
+            self._last_drag_pos = None
+            self.setCursor(Qt.OpenHandCursor if self._manual_x_enabled else Qt.ArrowCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class EcgWindow(QMainWindow):
@@ -2944,6 +3273,7 @@ class EcgWindow(QMainWindow):
         self._refresh_timer = QTimer()
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
         self._refresh_timer.timeout.connect(self._redraw)
+        self._update_zoom_button_states()
 
     def start(self):
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
@@ -2983,6 +3313,7 @@ class EcgWindow(QMainWindow):
             self._statusbar.showMessage("ECG streaming...")
         else:
             self._statusbar.showMessage("Waiting for ECG data from sensor\u2026")
+        self._update_zoom_button_states()
 
     def clear(self):
         self._refresh_timer.stop()
@@ -3007,6 +3338,7 @@ class EcgWindow(QMainWindow):
         self._curve.setData([], [])
         self._statusbar.showMessage("Waiting for ECG data...")
         self._redraw_ms_ema = 0.0
+        self._update_zoom_button_states()
 
     def stop(self):
         self._refresh_timer.stop()
@@ -3016,6 +3348,7 @@ class EcgWindow(QMainWindow):
         self._apply_interaction_mode()
         self._statusbar.showMessage("ECG stopped.")
         self._redraw_ms_ema = 0.0
+        self._update_zoom_button_states()
 
     def _toggle_freeze(self):
         self.set_stream_frozen(not self._frozen)
@@ -3063,6 +3396,7 @@ class EcgWindow(QMainWindow):
             self._freeze_button.setText("Resume")
             self._freeze_button.setToolTip("Resume ECG streaming and hide cursor tools.")
             self._apply_interaction_mode()
+            self._render_snapshot_for_frozen_view()
             self._auto_zoom_for_frozen_view()
             self._enable_cursors_for_frozen_view()
             self._refresh_relock_tooltip()
@@ -3085,11 +3419,24 @@ class EcgWindow(QMainWindow):
             self._statusbar.showMessage(
                 "ECG streaming..." if self._got_first_data else "Waiting for ECG data..."
             )
+        self._update_zoom_button_states()
 
     def _apply_interaction_mode(self):
         # Manual mode mirrors Poincare-style drag+wheel on X.
         manual_mode = not self._follow_main_xrange
         self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
+        # Avoid redundant controls while frozen: Resume is the primary action.
+        self._relock_button.setVisible(not self._frozen)
+
+    def _render_snapshot_for_frozen_view(self):
+        """Ensure buffered trace is visible when freezing before next timer redraw."""
+        if len(self._times) < 2 or len(self._values) < 2:
+            return
+        self._curve.setData(self._times, self._values)
+        y_lo = float(min(self._values))
+        y_hi = float(max(self._values))
+        margin = max(0.1, (y_hi - y_lo) * 0.15)
+        self._set_yrange_if_needed(y_lo - margin, y_hi + margin)
 
     def _set_cursor_controls_enabled(self, enabled: bool):
         enabled = bool(enabled)
@@ -3105,13 +3452,19 @@ class EcgWindow(QMainWindow):
 
     def _refresh_relock_tooltip(self):
         if self._frozen:
-            self._relock_button.setToolTip(
-                "Resume streaming and relock this chart to the main plot time range."
-            )
+            self._relock_button.setToolTip("Relock is available while streaming/manual view.")
         elif self._follow_main_xrange:
             self._relock_button.setToolTip("Chart is already locked to the main plot time range.")
         else:
             self._relock_button.setToolTip("Relock this chart to the main plot time range.")
+
+    def _update_zoom_button_states(self):
+        eps = 1e-6
+        min_span = 0.5
+        current = max(min_span, float(self._view_sec))
+        max_span = max(min_span, float(self._max_view_sec))
+        self._zoom_in_button.setEnabled(current > (min_span + eps))
+        self._zoom_out_button.setEnabled(current < (max_span - eps))
 
     def _estimate_rr_seconds_from_trace(self) -> float | None:
         if len(self._times) < 12 or len(self._values) < 12:
@@ -3492,6 +3845,7 @@ class EcgWindow(QMainWindow):
             self._apply_interaction_mode()
         self._view_sec = max(0.5, self._view_sec / 1.4)
         self._refresh_frozen_view()
+        self._update_zoom_button_states()
 
     def _zoom_out(self):
         if self._follow_main_xrange:
@@ -3505,6 +3859,7 @@ class EcgWindow(QMainWindow):
             self._apply_interaction_mode()
         self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
         self._refresh_frozen_view()
+        self._update_zoom_button_states()
 
     def _reset_zoom(self):
         self._view_sec = float(self._display_sec)
@@ -3512,6 +3867,7 @@ class EcgWindow(QMainWindow):
             self._relock_to_main_xrange()
         else:
             self._refresh_frozen_view()
+        self._update_zoom_button_states()
 
     def _relock_to_main_xrange(self):
         if self._frozen:
@@ -3524,6 +3880,7 @@ class EcgWindow(QMainWindow):
         if self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
             self._set_follow_main_xrange(x_lo, x_hi)
+        self._update_zoom_button_states()
 
     def _set_follow_main_xrange(self, x_lo: float, x_hi: float):
         # Keep ECG right edge aligned to the main plots while using ECG's own zoom span.
@@ -3622,6 +3979,9 @@ class EcgWindow(QMainWindow):
 
     def set_synced_xrange(self, x_lo: float, x_hi: float):
         self._synced_xrange = (float(x_lo), float(x_hi))
+        if self._follow_main_xrange:
+            synced_span = max(0.5, float(x_hi) - float(x_lo))
+            self._view_sec = min(self._max_view_sec, synced_span)
         if self._follow_main_xrange and self._times:
             target_right = float(x_hi) - 2.0
             latest = float(self._times[-1])
@@ -3635,6 +3995,7 @@ class EcgWindow(QMainWindow):
                 self._timeline_offset_sec += delta
         if self._follow_main_xrange:
             self._set_follow_main_xrange(float(x_lo), float(x_hi))
+        self._update_zoom_button_states()
 
     def _on_manual_range_changed(self, *_args):
         if self._suppress_manual_range_signal or self._follow_main_xrange:
@@ -3642,6 +4003,7 @@ class EcgWindow(QMainWindow):
         x_rng = self._plot_widget.viewRange()[0]
         self._view_sec = max(0.5, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
         self._refresh_relock_tooltip()
+        self._update_zoom_button_states()
 
     def _redraw(self):
         if self._frozen:
@@ -3737,6 +4099,7 @@ class EcgWindow(QMainWindow):
 
 class QtcWindow(QMainWindow):
     closed = Signal()
+    image_captured = Signal(object)  # QPixmap
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -3812,7 +4175,7 @@ class QtcWindow(QMainWindow):
         self._zoom_in_button.clicked.connect(self._zoom_in)
         self._zoom_reset_button = QPushButton("Reset")
         self._zoom_reset_button.setFixedWidth(56)
-        self._zoom_reset_button.setToolTip("Reset manual zoom to 60 seconds.")
+        self._zoom_reset_button.setToolTip("Reset manual zoom to current display window.")
         self._zoom_reset_button.clicked.connect(self._reset_zoom)
         self._relock_button = QPushButton("Relock")
         self._relock_button.setFixedWidth(64)
@@ -3831,8 +4194,13 @@ class QtcWindow(QMainWindow):
         self._info_button.setToolTip("How to interpret QTc trend and uncertainty.")
         self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
         self._info_button.clicked.connect(self._show_info)
+        self._capture_image_button = QPushButton("Capture Image")
+        self._capture_image_button.setFixedWidth(100)
+        self._capture_image_button.setToolTip("Save a snapshot of this QTc plot to the session folder.")
+        self._capture_image_button.clicked.connect(self._capture_plot_image)
         self._freeze_button = QPushButton("Freeze")
         self._freeze_button.setFixedWidth(74)
+        self._freeze_button.setToolTip("Freeze QTc stream for manual timeline inspection.")
         self._freeze_button.clicked.connect(self._toggle_freeze)
         self._statusbar.addPermanentWidget(zoom_label)
         self._statusbar.addPermanentWidget(self._zoom_out_button)
@@ -3841,6 +4209,7 @@ class QtcWindow(QMainWindow):
         self._statusbar.addPermanentWidget(self._relock_button)
         self._statusbar.addPermanentWidget(self._pin_button)
         self._statusbar.addPermanentWidget(self._info_button)
+        self._statusbar.addPermanentWidget(self._capture_image_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
         self.setStatusBar(self._statusbar)
         self._statusbar.showMessage(
@@ -3849,6 +4218,7 @@ class QtcWindow(QMainWindow):
 
         self.setCentralWidget(self._plot_widget)
         self._frozen = False
+        self._pre_freeze_view_sec: float | None = None
         self._timeline_offset_sec = 0.0
         self._synced_xrange: tuple[float, float] | None = None
         self._history_sec = 20 * 60
@@ -3869,6 +4239,39 @@ class QtcWindow(QMainWindow):
         view_box = self._plot_widget.getViewBox()
         if hasattr(view_box, "sigRangeChangedManually"):
             view_box.sigRangeChangedManually.connect(self._on_manual_range_changed)
+
+    def _capture_plot_image(self):
+        """Grab QTc plot widget and emit for saving to session folder."""
+        pixmap = self._plot_widget.grab()
+        if pixmap.isNull():
+            self._statusbar.showMessage("QTc image capture failed.")
+            return
+        self.image_captured.emit(pixmap)
+        central = self.centralWidget()
+        if central is None:
+            return
+        overlay = QWidget(central)
+        overlay.setGeometry(self._plot_widget.geometry())
+        overlay.setStyleSheet("background-color: white;")
+        overlay.raise_()
+        overlay.show()
+        effect = QGraphicsOpacityEffect(overlay)
+        overlay.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity")
+        anim.setDuration(250)
+        anim.setStartValue(0.9)
+        anim.setEndValue(0.0)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+
+        def cleanup():
+            overlay.deleteLater()
+            anim.deleteLater()
+
+        anim.finished.connect(cleanup)
+        anim.start(QAbstractAnimation.DeletionPolicy.KeepWhenStopped)
+
+    def set_image_capture_enabled(self, enabled: bool) -> None:
+        self._capture_image_button.setEnabled(bool(enabled))
 
     @staticmethod
     def _format_formula_label(payload: dict) -> str:
@@ -3933,6 +4336,7 @@ class QtcWindow(QMainWindow):
         self._view_sec = 60.0
         self._last_x_range = None
         self._relock_button.setEnabled(False)
+        self._refresh_relock_tooltip()
         self._apply_interaction_mode()
         self._median_curve.setData([], [])
         self._low_quality_curve.setData([], [])
@@ -3942,14 +4346,18 @@ class QtcWindow(QMainWindow):
 
     def start(self):
         self._frozen = False
-        self._freeze_button.setText("Freeze QTc")
+        self._freeze_button.setText("Freeze")
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
+        self._freeze_button.setToolTip("Freeze QTc stream for manual timeline inspection.")
+        self._refresh_relock_tooltip()
         self._apply_interaction_mode()
 
     def stop(self):
         self._frozen = False
-        self._freeze_button.setText("Freeze QTc")
+        self._freeze_button.setText("Freeze")
+        self._freeze_button.setToolTip("Freeze QTc stream for manual timeline inspection.")
+        self._refresh_relock_tooltip()
         self._apply_interaction_mode()
 
     def _toggle_freeze(self):
@@ -3986,21 +4394,52 @@ class QtcWindow(QMainWindow):
                 self.activateWindow()
 
     def set_stream_frozen(self, frozen: bool):
+        was_frozen = self._frozen
         self._frozen = bool(frozen)
-        if self._frozen and self._follow_main_xrange:
-            self._follow_main_xrange = False
-            self._relock_button.setEnabled(True)
-        self._freeze_button.setText("Resume" if self._frozen else "Freeze")
-        self._apply_interaction_mode()
         if self._frozen:
-            self._statusbar.showMessage("QTc view frozen.")
+            if not was_frozen:
+                self._pre_freeze_view_sec = float(self._view_sec)
+            if self._follow_main_xrange:
+                self._follow_main_xrange = False
+                self._relock_button.setEnabled(True)
+            self._freeze_button.setText("Resume")
+            self._freeze_button.setToolTip("Resume QTc streaming and relock to main timeline.")
+            self._apply_interaction_mode()
+            self._refresh_relock_tooltip()
+            self._statusbar.showMessage("QTc frozen — drag to pan, scroll wheel or +/- to zoom.")
         else:
-            self._statusbar.showMessage("QTc streaming.")
+            if was_frozen and self._pre_freeze_view_sec is not None:
+                self._view_sec = float(self._pre_freeze_view_sec)
+            self._follow_main_xrange = True
+            self._relock_button.setEnabled(False)
+            self._freeze_button.setText("Freeze")
+            self._freeze_button.setToolTip("Freeze QTc stream for manual timeline inspection.")
+            self._apply_interaction_mode()
+            if self._synced_xrange is not None:
+                x_lo, x_hi = self._synced_xrange
+                self._set_xrange_if_needed(float(x_lo), float(x_hi))
+            self._refresh_relock_tooltip()
+            if self._times:
+                self._statusbar.showMessage(
+                    f"QTc streaming. {self._formula_label}. {self._formula_reason_label} "
+                    "For trend context only; clinical interpretation requires review."
+                )
+            else:
+                self._statusbar.showMessage("Waiting for QTc trend points...")
             self._redraw()
 
     def _apply_interaction_mode(self):
         manual_mode = not self._follow_main_xrange
         self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
+        self._relock_button.setVisible(not self._frozen)
+
+    def _refresh_relock_tooltip(self):
+        if self._frozen:
+            self._relock_button.setToolTip("Relock is available while streaming/manual view.")
+        elif self._follow_main_xrange:
+            self._relock_button.setToolTip("Chart is already locked to the main plot time range.")
+        else:
+            self._relock_button.setToolTip("Relock this chart to the main plot time range.")
 
     def _set_xrange_if_needed(self, x_lo: float, x_hi: float):
         target = (float(x_lo), float(x_hi))
@@ -4021,6 +4460,7 @@ class QtcWindow(QMainWindow):
                 self._view_sec = min(self._max_view_sec, max(2.0, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         self._view_sec = max(2.0, self._view_sec / 1.4)
         self._refresh_manual_view()
@@ -4033,6 +4473,7 @@ class QtcWindow(QMainWindow):
                 self._view_sec = min(self._max_view_sec, max(2.0, current_span))
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
         self._refresh_manual_view()
@@ -4045,8 +4486,12 @@ class QtcWindow(QMainWindow):
             self._refresh_manual_view()
 
     def _relock_to_main_xrange(self):
+        if self._frozen:
+            # Relock doubles as Resume for faster workflow.
+            self.set_stream_frozen(False)
         self._follow_main_xrange = True
         self._relock_button.setEnabled(False)
+        self._refresh_relock_tooltip()
         self._apply_interaction_mode()
         if self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
@@ -4074,6 +4519,7 @@ class QtcWindow(QMainWindow):
         if self._follow_main_xrange:
             self._follow_main_xrange = False
             self._relock_button.setEnabled(True)
+            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         x_rng = self._plot_widget.viewRange()[0]
         self._view_sec = max(2.0, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
@@ -4537,10 +4983,12 @@ class PSDWindow(QMainWindow):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Hertz & Hearts — PSD (Vagal Resonance)")
-        self.setMinimumSize(560, 420)
-        self.resize(800, 500)
+        self.setMinimumSize(525, 440)
+        self.resize(705, 560)
         self._vagal_lo, self._vagal_hi = PSD_VAGAL_BAND
-        self._default_x_range = (0.0, 0.5)
+        self._min_x_span = 0.2
+        self._max_x_span = 0.6
+        self._default_x_range = (0.0, self._max_x_span)
         self._zoom_factor = 1.4
 
         central = QWidget()
@@ -4553,19 +5001,16 @@ class PSDWindow(QMainWindow):
         self._zoom_out_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._zoom_out_button.setFixedWidth(28)
         self._zoom_out_button.clicked.connect(self._zoom_out)
-        header.addWidget(self._zoom_out_button)
         self._zoom_in_button = QPushButton("+")
         self._zoom_in_button.setToolTip("Zoom in (narrower frequency range).")
         self._zoom_in_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._zoom_in_button.setFixedWidth(28)
         self._zoom_in_button.clicked.connect(self._zoom_in)
-        header.addWidget(self._zoom_in_button)
         self._zoom_reset_button = QPushButton("Reset")
         self._zoom_reset_button.setToolTip("Reset view to default 0–0.5 Hz range.")
         self._zoom_reset_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._zoom_reset_button.setMinimumWidth(52)
         self._zoom_reset_button.clicked.connect(self._reset_zoom)
-        header.addWidget(self._zoom_reset_button)
         header.addStretch()
         self._info_button = QPushButton("i")
         self._info_button.setFixedWidth(22)
@@ -4592,7 +5037,8 @@ class PSDWindow(QMainWindow):
         self._plot.getAxis("bottom").setTextPen("k")
         self._plot.getAxis("left").setPen(pg.mkPen("k"))
         self._plot.getAxis("bottom").setPen(pg.mkPen("k"))
-        self._plot.setMouseEnabled(x=True, y=True)
+        # Keep PSD origin locked at 0 Hz (allow Y pan only).
+        self._plot.setMouseEnabled(x=False, y=True)
         self._plot.hideButtons()
         self._plot.setXRange(*self._default_x_range, padding=0)
 
@@ -4618,9 +5064,16 @@ class PSDWindow(QMainWindow):
         )
         metrics_row.addWidget(self._peak_label)
         metrics_row.addStretch()
+        zoom_label = QLabel("Zoom:")
+        zoom_label.setStyleSheet("font-size: 11px;")
+        metrics_row.addWidget(zoom_label)
+        metrics_row.addWidget(self._zoom_out_button)
+        metrics_row.addWidget(self._zoom_in_button)
+        metrics_row.addWidget(self._zoom_reset_button)
         layout.addLayout(metrics_row)
 
         self.setCentralWidget(central)
+        self._update_zoom_button_states()
         self.statusBar().showMessage("Waiting for R-R data...")
         self._pinned = False
         self._update_pin_button_visual()
@@ -4646,34 +5099,35 @@ class PSDWindow(QMainWindow):
         if vb is None:
             return
         rng = vb.viewRange()
-        x_lo, x_hi = rng[0][0], rng[0][1]
-        center = (x_lo + x_hi) / 2.0
-        span = (x_hi - x_lo) / self._zoom_factor
-        span = max(0.01, min(span, self._default_x_range[1] - self._default_x_range[0]))
-        nlo = center - span / 2
-        nhi = center + span / 2
-        nlo = max(self._default_x_range[0], min(nlo, self._default_x_range[1] - span))
-        nhi = nlo + span
-        vb.setXRange(nlo, nhi, padding=0)
+        span = (rng[0][1] - rng[0][0]) / self._zoom_factor
+        self._set_psd_x_span(span)
 
     def _zoom_out(self):
         vb = self._plot.getViewBox()
         if vb is None:
             return
         rng = vb.viewRange()
-        x_lo, x_hi = rng[0][0], rng[0][1]
-        center = (x_lo + x_hi) / 2.0
-        span = (x_hi - x_lo) * self._zoom_factor
-        span = min(span, self._default_x_range[1] - self._default_x_range[0])
-        nlo = center - span / 2
-        nhi = center + span / 2
-        nlo = max(self._default_x_range[0], nlo)
-        nhi = min(self._default_x_range[1], nhi)
-        vb.setXRange(nlo, nhi, padding=0)
+        span = (rng[0][1] - rng[0][0]) * self._zoom_factor
+        self._set_psd_x_span(span)
 
     def _reset_zoom(self):
-        self._plot.setXRange(*self._default_x_range, padding=0)
-        self.statusBar().showMessage("View reset to 0–0.5 Hz.")
+        self._set_psd_x_span(self._max_x_span)
+        self.statusBar().showMessage("View reset to 0–0.6 Hz.")
+
+    def _set_psd_x_span(self, span: float) -> None:
+        clamped = max(self._min_x_span, min(float(span), self._max_x_span))
+        self._plot.setXRange(0.0, clamped, padding=0)
+        self._update_zoom_button_states()
+
+    def _update_zoom_button_states(self) -> None:
+        vb = self._plot.getViewBox()
+        if vb is None:
+            return
+        rng = vb.viewRange()
+        span = float(rng[0][1] - rng[0][0])
+        eps = 1e-6
+        self._zoom_in_button.setEnabled(span > (self._min_x_span + eps))
+        self._zoom_out_button.setEnabled(span < (self._max_x_span - eps))
 
     def clear(self):
         self._psd_curve.setData([], [])
@@ -4698,7 +5152,7 @@ class PSDWindow(QMainWindow):
         else:
             self._peak_label.setText("0.1 Hz band: no data in range")
         self.statusBar().showMessage(
-            "Drag to pan, scroll or +/- to zoom. Shaded band = Vagal Resonance (0.07–0.13 Hz)."
+            "X-axis locked to 0 Hz origin. Use +/- to zoom X (0.2–0.6 Hz). Drag to pan Y. Mouse wheel to zoom Y."
         )
 
     def closeEvent(self, event):
@@ -4713,7 +5167,15 @@ class ViewSignals(QObject):
     annotation = Signal(tuple)
     start_recording = Signal(str)
     save_recording = Signal()
-    request_buffer_reset = Signal() 
+    request_buffer_reset = Signal()
+
+
+class _UpdateCheckThread(QThread):
+    finished_with_result = Signal(object)
+
+    def run(self) -> None:
+        self.finished_with_result.emit(update_check.check_github_for_update())
+
 
 class View(QMainWindow):
     def __init__(self, model: Model):
@@ -4754,6 +5216,7 @@ class View(QMainWindow):
         self._sdnn_axis_floor = None
         self._sdnn_axis_ceiling = None
         self._main_plot_warmup_until: float | None = None
+        self._main_plot_started = False
         self._main_plots_frozen = False
         self._all_plots_frozen = False
         self._phase_debug_last_second = -1
@@ -4763,6 +5226,19 @@ class View(QMainWindow):
         self._sdnn_smooth_buf = []
         self._rmssd_smooth_post_warmup = False
         self._main_plot_visible_sec = 60.0
+        self._timeline_right_pad_sec = 2.0
+        self._timeline_span_options: list[tuple[str, float | None]] = [
+            ("15 s", 15.0),
+            ("30 s", 30.0),
+            ("60 s", 60.0),
+            ("120 s", 120.0),
+            ("240 s", 240.0),
+            ("Full", None),
+        ]
+        self._main_zoom_factor = 1.4
+        self._main_plot_span_seconds: float | None = self._main_plot_visible_sec
+        self._last_main_plot_elapsed_sec = 0.0
+        self._suppress_main_manual_sync = False
         self._main_plot_guard_sec = 12.0
         self._series_prune_stride = 32
         self._latest_hrv_for_chart: NamedSignal | None = None
@@ -4782,6 +5258,8 @@ class View(QMainWindow):
         self._hr_segments: list = []
         self._rmssd_segments: list = []
         self._sdnn_segments: list = []
+        self._update_check_thread: QThread | None = None
+        self._update_banner_release: update_check.ReleaseInfo | None = None
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         self._session_annotations: list[tuple[str, str]] = []
         self._session_hr_values: list[float] = []
@@ -4790,7 +5268,10 @@ class View(QMainWindow):
         self._session_rmssd_times: list[float] = []
         self._session_hrv_values: list[float] = []
         self._session_hrv_times: list[float] = []
+        self._session_reset_markers_seconds: list[float] = []
+        self._session_report_time_offset_seconds: float = 0.0
         self._session_stress_ratio_values: list[float] = []
+        self._session_stress_ratio_times: list[float] = []
         self._session_snr_values: list[float] = []
         self._session_qtc_payload: dict = default_qtc_payload()
         self._last_qtc_diag_logged: tuple = ()  # (method, qrs_source) for DEBUG throttle
@@ -4798,7 +5279,7 @@ class View(QMainWindow):
         self._session_bundle: SessionBundle | None = None
         self._disclaimer_acknowledged_at: str | None = None
         self._disclaimer_ack_mode = "not_recorded"
-        self._session_root = Path.home() / "Hertz-and-Hearts"
+        self._session_root = app_data_root()
         self._profile_store = ProfileStore(self._session_root)
         self._session_profile_id = (
             self._profile_store.get_last_active_profile() or "Admin"
@@ -4864,6 +5345,7 @@ class View(QMainWindow):
         self.sensor.ecg_update.connect(self.ecg_window.append_samples)
         self.ecg_window.cursor_measurement_captured.connect(self._on_ecg_cursor_measurement)
         self.ecg_window.image_captured.connect(self._on_ecg_image_captured)
+        self.qtc_window.image_captured.connect(self._on_qtc_image_captured)
         self.sensor.ecg_ready.connect(self._on_ecg_ready)
         self.ecg_window.closed.connect(self._on_ecg_window_closed)
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
@@ -4968,6 +5450,8 @@ class View(QMainWindow):
         self._disconnect_overlay_hrv = self._make_disconnect_overlay(self.hrv_widget)
         self.ibis_widget.installEventFilter(self)
         self.hrv_widget.installEventFilter(self)
+        self.ibis_widget.xRangeInteracted.connect(self._on_main_hr_xrange_interacted)
+        self.hrv_widget.xRangeInteracted.connect(self._on_main_hrv_xrange_interacted)
 
         self._connect_pulse_timer = QTimer()
         self._connect_pulse_timer.setInterval(500)
@@ -4981,6 +5465,10 @@ class View(QMainWindow):
         self._connect_pulse_on = False
         self._connect_pulse_active = False
         self._scan_pulse_active = False
+        self._freeze_resume_pulse_timer = QTimer(self)
+        self._freeze_resume_pulse_timer.setInterval(650)
+        self._freeze_resume_pulse_timer.timeout.connect(self._pulse_freeze_resume_button)
+        self._freeze_resume_pulse_on = False
         self._is_scanning = False
         self._received_ibi_since_connect = False
         self._preserve_good_on_reset = False
@@ -5068,6 +5556,28 @@ class View(QMainWindow):
         self.freeze_two_main_plots_button.clicked.connect(self._toggle_two_main_plots_freeze)
         self.freeze_all_button = QPushButton("Freeze All")
         self.freeze_all_button.clicked.connect(self._toggle_freeze_all)
+        self.timeline_span_label = QLabel("Timeline:")
+        self.timeline_span_label.setStyleSheet("font-size: 11px;")
+        self.timeline_span_combo = QComboBox()
+        self.timeline_span_combo.setStyleSheet("font-size: 11px;")
+        for label, span in self._timeline_span_options:
+            self.timeline_span_combo.addItem(label, span)
+        self.timeline_span_combo.setCurrentText("60 s")
+        self.timeline_span_combo.currentIndexChanged.connect(self._on_timeline_span_changed)
+        self.main_zoom_label = QLabel("Zoom:")
+        self.main_zoom_label.setStyleSheet("font-size: 11px;")
+        self.main_zoom_out_button = QPushButton("\u2212")
+        self.main_zoom_out_button.setFixedWidth(28)
+        self.main_zoom_out_button.clicked.connect(self._main_zoom_out)
+        self.main_zoom_in_button = QPushButton("+")
+        self.main_zoom_in_button.setFixedWidth(28)
+        self.main_zoom_in_button.clicked.connect(self._main_zoom_in)
+        self.main_zoom_reset_button = QPushButton("Reset")
+        self.main_zoom_reset_button.setFixedWidth(56)
+        self.main_zoom_reset_button.clicked.connect(self._main_zoom_reset)
+        self.main_capture_button = QPushButton("Capture Image")
+        self.main_capture_button.setFixedWidth(100)
+        self.main_capture_button.clicked.connect(self._capture_main_plots_image)
 
         self.ecg_button = QPushButton("ECG (no sensor)")
         self.ecg_button.setEnabled(False)
@@ -5090,12 +5600,12 @@ class View(QMainWindow):
         self.logout_button.setToolTip("Switch user profile (same popup as startup).")
         self.logout_button.clicked.connect(self._on_logout_clicked)
 
-        # More menu — History, Trends, Profiles, Switch User, Settings, Import
+        # More menu — History, Trends, Profiles, Switch User, Settings, Import, Help, About
         self._more_button = QToolButton()
         self._more_button.setText("More")
         self._more_button.setToolTip(
             "Additional actions: History, Trends, Profiles, Settings, "
-            "Support Development, Import."
+            "Support Development, Import, Help, About."
         )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
@@ -5107,6 +5617,11 @@ class View(QMainWindow):
         self._more_menu.addAction("Support Development…", self._open_support_options)
         self._more_menu.addSeparator()
         self._import_action = self._more_menu.addAction("Import session…", self._on_import_session)
+        self._more_menu.addSeparator()
+        self._help_menu = QMenu("Help", self._more_menu)
+        self._help_menu.addAction("Check for Updates…", self._check_for_updates)
+        self._more_menu.addMenu(self._help_menu)
+        self._more_menu.addAction("About Hertz && Hearts…", self._show_about_dialog)
         self._more_button.setMenu(self._more_menu)
 
         # History, Trends, Profiles moved to More menu
@@ -5147,6 +5662,15 @@ class View(QMainWindow):
         self.reset_axes_button.setToolTip("Restore both chart Y-axes to sensible baseline-centered ranges.")
         self.freeze_two_main_plots_button.setToolTip("Freeze/resume only the two main trend plots.")
         self.freeze_all_button.setToolTip("Freeze/resume the main, ECG, and QTc plots.")
+        self.timeline_span_combo.setToolTip(
+            "Live timeline span for synced plots (main + aux while not frozen)."
+        )
+        self.main_zoom_out_button.setToolTip("Zoom out frozen main timeline.")
+        self.main_zoom_in_button.setToolTip("Zoom in frozen main timeline.")
+        self.main_zoom_reset_button.setToolTip("Reset frozen main timeline zoom.")
+        self.main_capture_button.setToolTip(
+            "Save a snapshot of the two main plots to the session folder."
+        )
         self.ecg_button.setToolTip("Open/close the live ECG monitor window.")
         self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
         self.poincare_button.setToolTip("Open the live Poincare RR scatter window.")
@@ -5176,6 +5700,37 @@ class View(QMainWindow):
         self.vlayout0 = QVBoxLayout(central)
         self.vlayout0.setSpacing(2)
 
+        self._update_banner_frame = QFrame()
+        self._update_banner_frame.setVisible(False)
+        self._update_banner_frame.setStyleSheet(
+            "QFrame#updateBanner { background: #e8f4fc; border: 1px solid #9ccae8; "
+            "border-radius: 4px; }"
+        )
+        self._update_banner_frame.setObjectName("updateBanner")
+        _ub_layout = QHBoxLayout(self._update_banner_frame)
+        _ub_layout.setContentsMargins(10, 6, 10, 6)
+        self._update_banner_label = QLabel()
+        self._update_banner_label.setWordWrap(True)
+        self._update_banner_label.setTextFormat(Qt.TextFormat.RichText)
+        self._update_banner_label.setStyleSheet("font-size: 12px; color: #1a5270;")
+        _ub_layout.addWidget(self._update_banner_label, stretch=1)
+        self._update_banner_download = QPushButton("Download")
+        self._update_banner_download.setStyleSheet(
+            "QPushButton { font-size: 11px; padding: 4px 12px; }"
+        )
+        self._update_banner_download.clicked.connect(self._on_update_banner_download)
+        _ub_layout.addWidget(self._update_banner_download)
+        self._update_banner_later = QPushButton("Later")
+        self._update_banner_later.setToolTip(
+            "Hide this notice until a newer release is published."
+        )
+        self._update_banner_later.setStyleSheet(
+            "QPushButton { font-size: 11px; padding: 4px 12px; }"
+        )
+        self._update_banner_later.clicked.connect(self._on_update_banner_dismiss)
+        _ub_layout.addWidget(self._update_banner_later)
+        self.vlayout0.addWidget(self._update_banner_frame)
+
         # Header row: center active profile over plot column, keep controls on right.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
@@ -5198,8 +5753,8 @@ class View(QMainWindow):
             "border-radius: 3px; padding: 1px 6px;"
         )
         self._debug_mode_badge.setVisible(False)
-        profile_zone = QWidget()
-        profile_zone_layout = QHBoxLayout(profile_zone)
+        self.profile_zone = QWidget()
+        profile_zone_layout = QHBoxLayout(self.profile_zone)
         profile_zone_layout.setContentsMargins(0, 0, 0, 0)
         profile_zone_layout.setSpacing(8)
         profile_zone_layout.addStretch()
@@ -5208,22 +5763,23 @@ class View(QMainWindow):
         profile_zone_layout.addWidget(self.logout_button, alignment=Qt.AlignVCenter)
         profile_zone_layout.addWidget(self._debug_mode_badge, alignment=Qt.AlignVCenter)
         profile_zone_layout.addStretch()
-        controls_zone = QWidget()
-        controls_zone_layout = QHBoxLayout(controls_zone)
+        self.controls_zone = QWidget()
+        controls_zone_layout = QHBoxLayout(self.controls_zone)
         controls_zone_layout.setContentsMargins(0, 0, 0, 0)
         controls_zone_layout.setSpacing(8)
         controls_zone_layout.addWidget(self._disclaimer_link, alignment=Qt.AlignVCenter)
         controls_zone_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-        header_row.addWidget(profile_zone, stretch=1)
-        header_row.addWidget(controls_zone)
+        header_row.addWidget(self.profile_zone, stretch=1)
+        header_row.addWidget(self.controls_zone)
         self._top_bar = QWidget()
         self._top_bar.setLayout(header_row)
         self.vlayout0.addWidget(self._top_bar)
         for _w in (
             self._top_bar,
-            profile_zone,
-            controls_zone,
+            self.profile_zone,
+            self.controls_zone,
             self.profile_header_label,
+            self.logout_button,
             self._disclaimer_link,
             self._debug_mode_badge,
             self._more_button,
@@ -5243,6 +5799,13 @@ class View(QMainWindow):
         freeze_row = QHBoxLayout()
         freeze_row.setSpacing(0)
         freeze_row.addStretch()
+        span_group = QHBoxLayout()
+        span_group.setSpacing(6)
+        span_group.addWidget(self.timeline_span_label)
+        self.timeline_span_combo.setFixedWidth(84)
+        span_group.addWidget(self.timeline_span_combo)
+        freeze_row.addLayout(span_group)
+        freeze_row.addSpacing(16)
         freeze_group = QHBoxLayout()
         freeze_group.setSpacing(8)
         self.freeze_two_main_plots_button.setFixedWidth(160)
@@ -5250,7 +5813,16 @@ class View(QMainWindow):
         self.freeze_all_button.setFixedWidth(92)
         freeze_group.addWidget(self.freeze_all_button)
         freeze_row.addLayout(freeze_group)
-        freeze_row.addSpacing(24)
+        freeze_row.addSpacing(16)
+        zoom_group = QHBoxLayout()
+        zoom_group.setSpacing(6)
+        zoom_group.addWidget(self.main_zoom_label)
+        zoom_group.addWidget(self.main_zoom_out_button)
+        zoom_group.addWidget(self.main_zoom_in_button)
+        zoom_group.addWidget(self.main_zoom_reset_button)
+        zoom_group.addWidget(self.main_capture_button)
+        freeze_row.addLayout(zoom_group)
+        freeze_row.addSpacing(16)
         reset_group = QHBoxLayout()
         reset_group.setSpacing(8)
         self.reset_axes_button.setFixedWidth(108)
@@ -5275,6 +5847,34 @@ class View(QMainWindow):
         pacer_container.setLayout(pacer_column)
         self.content_row.addWidget(pacer_container, stretch=0, alignment=Qt.AlignTop)
         self.vlayout0.addLayout(self.content_row, stretch=90)
+
+        # Tier 1: Morning baseline protocol banner (shown only while recording when enabled)
+        self._morning_baseline_banner = QFrame()
+        self._morning_baseline_banner.setStyleSheet(
+            "QFrame { background: #e8f4fc; border: 1px solid #9ccae8; "
+            "border-radius: 4px; padding: 4px; }"
+        )
+        _mb_layout = QVBoxLayout(self._morning_baseline_banner)
+        _mb_layout.setContentsMargins(8, 6, 8, 6)
+        self._morning_baseline_banner_text = QLabel(
+            "<b>Morning baseline protocol</b><br>"
+            "• Aim for 3–5 minutes · Use the same posture each day · Before caffeine when possible · "
+            "Right after waking is ideal for comparable trends.<br>"
+            "<span style='color:#555;'>Research / wellness context only—not for diagnosis or treatment.</span>"
+        )
+        self._morning_baseline_banner_text.setWordWrap(True)
+        self._morning_baseline_banner_text.setStyleSheet("font-size: 11px;")
+        _mb_layout.addWidget(self._morning_baseline_banner_text)
+        self._morning_baseline_why_btn = QPushButton("Why this protocol?")
+        self._morning_baseline_why_btn.setFlat(True)
+        self._morning_baseline_why_btn.setCursor(Qt.PointingHandCursor)
+        self._morning_baseline_why_btn.setStyleSheet(
+            "font-size: 10px; color: #1b6ec2; text-align: left; padding: 2px;"
+        )
+        self._morning_baseline_why_btn.clicked.connect(self._on_morning_baseline_why_clicked)
+        _mb_layout.addWidget(self._morning_baseline_why_btn, alignment=Qt.AlignLeft)
+        self._morning_baseline_banner.hide()
+        self.vlayout0.addWidget(self._morning_baseline_banner)
 
         # BOTTOM ROW 1: Full-width status banner + reset
         progress_row = QHBoxLayout()
@@ -5318,6 +5918,14 @@ class View(QMainWindow):
 
         toolbar.addWidget(self.start_recording_button)
         toolbar.addWidget(self.stop_save_button)
+        self._morning_baseline_cb = QCheckBox("Morning baseline")
+        self._morning_baseline_cb.setToolTip(
+            "When checked, a short protocol reminder appears while recording and the "
+            "session manifest notes this mode (for trend consistency)."
+        )
+        self._morning_baseline_cb.stateChanged.connect(self._on_morning_baseline_toggled)
+        toolbar.addWidget(self._morning_baseline_cb)
+
         toolbar.addWidget(self._more_button)
 
         _sep1 = QFrame()
@@ -5384,8 +5992,10 @@ class View(QMainWindow):
         self._apply_connect_ready_state()
         self._start_connect_hints()
         self._update_session_actions()
+        self._load_tier1_morning_baseline_pref()
         self._focus_scan_if_needed()
         QTimer.singleShot(0, self._run_startup_flow)
+        QTimer.singleShot(3500, self._schedule_background_update_check)
 
         # Set Axis Labels
         self.ibis_widget.x_axis.setTitleText("Seconds")
@@ -5489,6 +6099,54 @@ class View(QMainWindow):
                 limit=200,
             )
             self._history_window.set_context(self._session_profile_id, sessions)
+        self._load_tier1_morning_baseline_pref()
+
+    def _load_tier1_morning_baseline_pref(self) -> None:
+        if not getattr(self, "_morning_baseline_cb", None):
+            return
+        pid = self._session_profile_id
+        if not pid:
+            return
+        raw = self._profile_store.get_profile_pref(pid, TIER1_PREF_MORNING_BASELINE, "0")
+        on = str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        self._morning_baseline_cb.blockSignals(True)
+        self._morning_baseline_cb.setChecked(on)
+        self._morning_baseline_cb.blockSignals(False)
+        self._update_morning_baseline_banner_visibility()
+
+    def _on_morning_baseline_toggled(self, _state: int) -> None:
+        if self._session_profile_id:
+            self._profile_store.set_profile_pref(
+                self._session_profile_id,
+                TIER1_PREF_MORNING_BASELINE,
+                "1" if self._morning_baseline_cb.isChecked() else "0",
+            )
+        self._update_morning_baseline_banner_visibility()
+
+    def _update_morning_baseline_banner_visibility(self) -> None:
+        if not getattr(self, "_morning_baseline_banner", None):
+            return
+        show = self._session_state == "recording" and self._morning_baseline_cb.isChecked()
+        self._morning_baseline_banner.setVisible(show)
+
+    def _on_morning_baseline_why_clicked(self) -> None:
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Why use a morning baseline protocol?")
+        msg.setIcon(QMessageBox.Information)
+        msg.setText(
+            "A fixed routine makes day-to-day trends easier to compare."
+        )
+        msg.setInformativeText(
+            "HRV metrics move with posture, caffeine, sleep, stress, and breathing. "
+            "Measuring at a similar time and body position—often right after waking, "
+            "before coffee, for a few minutes—reduces that “noise” so changes you see "
+            "are more likely to reflect real shifts in recovery or load.\n\n"
+            "This is for research and personal wellness context only—not for "
+            "diagnosis, treatment, or medical decisions."
+        )
+        msg.setStandardButtons(QMessageBox.Ok)
+        msg.setDefaultButton(QMessageBox.Ok)
+        msg.exec()
 
     def _should_show_disclaimer_for_profile(self, profile_id: str) -> bool:
         hide_value = self._profile_store.get_profile_pref(
@@ -5736,6 +6394,8 @@ class View(QMainWindow):
         annotation_available = is_recording
         self.start_recording_button.setEnabled(connected and not is_recording)
         self.stop_save_button.setEnabled(is_recording)
+        if getattr(self, "_morning_baseline_cb", None):
+            self._morning_baseline_cb.setEnabled(True)
         self._import_action.setEnabled(not is_recording)
         self.annotation.setEnabled(annotation_available)
         self.annotation_button.setEnabled(annotation_available)
@@ -5779,6 +6439,8 @@ class View(QMainWindow):
         self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
         self.ecg_window.set_image_capture_enabled(self._session_bundle is not None)
+        self.qtc_window.set_image_capture_enabled(self._session_bundle is not None)
+        self._update_morning_baseline_banner_visibility()
 
     def _current_sensor_label(self) -> str:
         text = self.address_menu.currentText().strip()
@@ -5907,7 +6569,9 @@ class View(QMainWindow):
             "rmssd_time_seconds": list(self._session_rmssd_times),
             "hrv_values": list(self._session_hrv_values),
             "hrv_time_seconds": list(self._session_hrv_times),
+            "session_reset_markers_seconds": list(self._session_reset_markers_seconds),
             "stress_ratio_values": list(self._session_stress_ratio_values),
+            "stress_ratio_time_seconds": list(self._session_stress_ratio_times),
             "snr_values": list(self._session_snr_values),
             "ecg_samples": ecg_samples,
             "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
@@ -5985,6 +6649,12 @@ class View(QMainWindow):
             "disconnect_intervals": disc_intervals,
             "disconnect_total_seconds": total_disc_sec,
             "disclaimer": self._current_disclaimer_payload(),
+            "trend_guidance": {
+                "morning_baseline_protocol": bool(
+                    getattr(self, "_morning_baseline_cb", None)
+                    and self._morning_baseline_cb.isChecked()
+                ),
+            },
             "artifacts": {
                 "csv": {"path": str(bundle.csv_path), "exists": bundle.csv_path.exists()},
                 "docx_final": {
@@ -6049,7 +6719,10 @@ class View(QMainWindow):
         self._session_rmssd_times = []
         self._session_hrv_values = []
         self._session_hrv_times = []
+        self._session_reset_markers_seconds = []
+        self._session_report_time_offset_seconds = 0.0
         self._session_stress_ratio_values = []
+        self._session_stress_ratio_times = []
         self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._last_qtc_diag_logged = ()
@@ -6222,6 +6895,7 @@ class View(QMainWindow):
             self.baseline_rmssd = None
             self.baseline_hr_values = []
             self.baseline_hr = None
+            self._set_main_plot_started(False)
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -6249,7 +6923,10 @@ class View(QMainWindow):
         self._session_rmssd_times = []
         self._session_hrv_values = []
         self._session_hrv_times = []
+        self._session_reset_markers_seconds = []
+        self._session_report_time_offset_seconds = 0.0
         self._session_stress_ratio_values = []
+        self._session_stress_ratio_times = []
         self._session_snr_values = []
         self._session_qtc_payload = default_qtc_payload()
         self._last_qtc_diag_logged = ()
@@ -6615,10 +7292,13 @@ class View(QMainWindow):
         if (
             obj in {
                 getattr(self, "_top_bar", None),
+                getattr(self, "profile_zone", None),
+                getattr(self, "controls_zone", None),
                 getattr(self, "profile_header_label", None),
+                getattr(self, "logout_button", None),
                 getattr(self, "_disclaimer_link", None),
                 getattr(self, "_debug_mode_badge", None),
-                getattr(self, "_settings_button", None),
+                getattr(self, "_more_button", None),
             }
             and event.type() == QEvent.Type.MouseButtonPress
         ):
@@ -6766,6 +7446,116 @@ class View(QMainWindow):
         root.addLayout(actions)
 
         dlg.exec()
+
+    def _schedule_background_update_check(self) -> None:
+        self._start_update_check(background=True)
+
+    def _start_update_check(self, *, background: bool) -> None:
+        if self._update_check_thread is not None and self._update_check_thread.isRunning():
+            if not background:
+                _info_ok(self, "Check for Updates", "An update check is already in progress.")
+            return
+        if background and update_check.should_skip_background_check():
+            return
+        thr = _UpdateCheckThread(self)
+        self._update_check_thread = thr
+        thr.finished_with_result.connect(
+            lambda res, bg=background: self._on_update_check_finished(res, bg)
+        )
+        thr.finished.connect(thr.deleteLater)
+        thr.start()
+
+    def _on_update_check_finished(self, result: object, background: bool) -> None:
+        self._update_check_thread = None
+        if not isinstance(result, update_check.UpdateCheckResult):
+            return
+        update_check.record_check_finished()
+        if background:
+            if result.outcome == "newer" and result.release is not None:
+                dismissed = update_check.get_dismissed_version_key()
+                if result.release.version_key != dismissed:
+                    self._show_update_banner(result.release)
+            return
+        self._present_manual_update_result(result)
+
+    def _show_update_banner(self, info: update_check.ReleaseInfo) -> None:
+        self._update_banner_release = info
+        self._update_banner_label.setText(
+            f"A newer version of Hertz & Hearts is available: "
+            f"<b>{info.version_display}</b>. "
+            "Download the latest release from GitHub."
+        )
+        self._update_banner_frame.setVisible(True)
+
+    def _hide_update_banner(self) -> None:
+        self._update_banner_frame.setVisible(False)
+        self._update_banner_release = None
+
+    def _on_update_banner_download(self) -> None:
+        rel = self._update_banner_release
+        if rel is not None:
+            QDesktopServices.openUrl(QUrl(rel.html_url))
+
+    def _on_update_banner_dismiss(self) -> None:
+        rel = self._update_banner_release
+        if rel is not None:
+            update_check.set_dismissed_version_key(rel.version_key)
+        self._hide_update_banner()
+
+    def _present_manual_update_result(self, result: update_check.UpdateCheckResult) -> None:
+        if result.outcome == "newer" and result.release is not None:
+            rel = result.release
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Icon.Information)
+            msg.setWindowTitle("Update Available")
+            msg.setText(result.user_message)
+            msg.setInformativeText(
+                "Open the GitHub release page to download the latest build for your platform."
+            )
+            open_btn = msg.addButton(
+                "Open release page…", QMessageBox.ButtonRole.ActionRole
+            )
+            msg.addButton(QMessageBox.StandardButton.Ok)
+            msg.setDefaultButton(QMessageBox.StandardButton.Ok)
+            _ensure_linux_window_decorations(msg)
+            msg.exec()
+            if msg.clickedButton() == open_btn:
+                QDesktopServices.openUrl(QUrl(rel.html_url))
+            return
+        if result.outcome == "current":
+            _info_ok(self, "Check for Updates", result.user_message)
+            return
+        if result.outcome == "no_releases":
+            _info_ok(self, "Check for Updates", result.user_message)
+            return
+        detail = (result.detail or "").strip()
+        text = result.user_message
+        if detail:
+            text = f"{text}\n\n{detail}"
+        _warning_ok(self, "Check for Updates", text)
+
+    def _check_for_updates(self) -> None:
+        self._start_update_check(background=False)
+
+    def _show_about_dialog(self) -> None:
+        v = _display_version_label(version)
+        msg = QMessageBox(self)
+        msg.setWindowTitle("About Hertz & Hearts")
+        msg.setIcon(QMessageBox.Icon.Information)
+        app_icon = QApplication.windowIcon()
+        if not app_icon.isNull():
+            msg.setIconPixmap(app_icon.pixmap(QSize(64, 64)))
+        msg.setTextFormat(Qt.TextFormat.RichText)
+        msg.setText(
+            "<p style='margin-top:0'><b>Hertz & Hearts</b></p>"
+            f"<p>Version {v}</p>"
+            f"<p>{_RESEARCH_USE_WARNING}</p>"
+            f"<p>Developed by {_SUPPORT_BRAND_NAME}.</p>"
+        )
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.setDefaultButton(QMessageBox.StandardButton.Ok)
+        _ensure_linux_window_decorations(msg)
+        msg.exec()
 
     def _should_show_post_session_support_prompt(self) -> bool:
         profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
@@ -6973,14 +7763,26 @@ class View(QMainWindow):
     _SCAN_GLOW_CSS = (
         "QPushButton { "
         "font-size: 11px; padding: 2px 6px; "
-        "font-weight: 700; color: #2d3436; "
-        "background: #ffeaa7; border: 2px solid #e17055; border-radius: 3px; "
+        "font-weight: 700; color: #1f3a2d; "
+        "background: #d4edda; border: 2px solid #28a745; border-radius: 3px; "
         "}"
     )
     _SCAN_NORMAL_CSS = (
         "QPushButton { "
         "font-size: 11px; padding: 2px 6px; "
         "background: transparent; border: 2px solid transparent; border-radius: 3px; "
+        "}"
+    )
+    _FREEZE_RESUME_PULSE_CSS_A = (
+        "QPushButton { "
+        "font-size: 11px; padding: 2px 6px; font-weight: 700; "
+        "color: #0f3854; background: #e6f7ff; border: 2px solid #7fc8f8; border-radius: 3px; "
+        "}"
+    )
+    _FREEZE_RESUME_PULSE_CSS_B = (
+        "QPushButton { "
+        "font-size: 11px; padding: 2px 6px; font-weight: 700; "
+        "color: #0f3854; background: #d8efff; border: 2px solid #5db5f2; border-radius: 3px; "
         "}"
     )
 
@@ -7047,6 +7849,45 @@ class View(QMainWindow):
                 self.scan_button.setStyleSheet(self._SCAN_GLOW_CSS)
             else:
                 self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+
+    def _freeze_resume_pulse_target_button(self):
+        if self._all_plots_frozen:
+            return self.freeze_all_button
+        if self._main_plots_frozen:
+            return self.freeze_two_main_plots_button
+        return None
+
+    def _refresh_freeze_resume_pulse_state(self):
+        target = self._freeze_resume_pulse_target_button()
+        if target is None:
+            if self._freeze_resume_pulse_timer.isActive():
+                self._freeze_resume_pulse_timer.stop()
+            self._freeze_resume_pulse_on = False
+            self.freeze_two_main_plots_button.setStyleSheet("")
+            self.freeze_all_button.setStyleSheet("")
+            return
+        if not self._freeze_resume_pulse_timer.isActive():
+            self._freeze_resume_pulse_on = False
+            self._freeze_resume_pulse_timer.start()
+        self._apply_freeze_resume_pulse_style(target)
+
+    def _apply_freeze_resume_pulse_style(self, target):
+        self.freeze_two_main_plots_button.setStyleSheet("")
+        self.freeze_all_button.setStyleSheet("")
+        style = (
+            self._FREEZE_RESUME_PULSE_CSS_A
+            if self._freeze_resume_pulse_on
+            else self._FREEZE_RESUME_PULSE_CSS_B
+        )
+        target.setStyleSheet(style)
+
+    def _pulse_freeze_resume_button(self):
+        target = self._freeze_resume_pulse_target_button()
+        if target is None:
+            self._refresh_freeze_resume_pulse_state()
+            return
+        self._freeze_resume_pulse_on = not self._freeze_resume_pulse_on
+        self._apply_freeze_resume_pulse_style(target)
 
     def _open_settings(self):
         prev_linux_pmd = bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False))
@@ -7319,6 +8160,26 @@ class View(QMainWindow):
         except Exception as exc:
             self.show_status(f"ECG snapshot save failed: {exc}")
 
+    @Slot(object)
+    def _on_qtc_image_captured(self, pixmap: object):
+        """Save QTc plot snapshot to session folder."""
+        if self._session_bundle is None:
+            self.show_status("No active session — cannot save QTc image.")
+            return
+        if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
+            self.show_status("QTc image capture failed.")
+            return
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = self._session_bundle.session_dir / f"qtc_snapshot_{timestamp}.png"
+            ok = pixmap.save(str(path))
+            if ok:
+                self.show_status(f"QTc snapshot saved: {path.name}")
+            else:
+                self.show_status("Failed to save QTc snapshot.")
+        except Exception as exc:
+            self.show_status(f"QTc snapshot save failed: {exc}")
+
     def _refresh_annotation_list(self):
         self.annotation.clear()
         for item in self.settings.get_all_annotations():
@@ -7330,6 +8191,17 @@ class View(QMainWindow):
         was_good = "GOOD" in self.health_label.text()
         self._preserve_good_on_reset = was_good
         self.reset_button.setEnabled(False)
+        latest_session_time = 0.0
+        for series_times in (
+            self._session_hr_times,
+            self._session_rmssd_times,
+            self._session_hrv_times,
+        ):
+            if series_times:
+                latest_session_time = max(latest_session_time, float(series_times[-1]))
+        if latest_session_time > 0:
+            self._session_reset_markers_seconds.append(latest_session_time)
+            self._session_report_time_offset_seconds = latest_session_time
         self.start_time = None
         self.baseline_rmssd = None
         self.baseline_values = []
@@ -7391,7 +8263,9 @@ class View(QMainWindow):
             series.removePoints(0, drop)
 
     def _prune_main_chart_series(self, current_x: float) -> None:
-        prune_before = current_x - (self._main_plot_visible_sec + self._main_plot_guard_sec)
+        if self._main_plot_span_seconds is None:
+            return
+        prune_before = current_x - (float(self._main_plot_span_seconds) + self._main_plot_guard_sec)
         if prune_before <= 0:
             return
         self._prune_series_before(self.hr_trend_series, prune_before)
@@ -7716,13 +8590,14 @@ class View(QMainWindow):
 
             if plot_gate_open:
                 self._session_rmssd_values.append(smoothed_rmssd)
-                self._session_rmssd_times.append(x)
+                report_x = self._session_report_time_offset_seconds + x
+                self._session_rmssd_times.append(report_x)
                 if not self._main_plots_frozen:
                     self.hrv_widget.time_series.append(x, smoothed_rmssd)
                 if sdnn is not None and len(self._sdnn_smooth_buf) > 0:
                     smoothed_sdnn = sum(self._sdnn_smooth_buf) / len(self._sdnn_smooth_buf)
                     self._session_hrv_values.append(smoothed_sdnn)
-                    self._session_hrv_times.append(x)
+                    self._session_hrv_times.append(report_x)
                     if self._session_state == "recording":
                         self.signals.annotation.emit(NamedSignal("SDNN", float(smoothed_sdnn)))
                     self.sdnn_label.setText(f"SDNN: {sdnn:6.2f} ms")
@@ -7780,6 +8655,7 @@ class View(QMainWindow):
                 self.recording_statusbar.set_locked(
                     f"{self.baseline_rmssd:.1f}", hr_val
                 )
+                main_x_lo, main_x_hi = self._compute_main_plot_xrange(x)
 
                 if not hasattr(self, 'baseline_series'):
                     from PySide6.QtCharts import QLineSeries
@@ -7798,12 +8674,14 @@ class View(QMainWindow):
 
                 if not self._main_plots_frozen:
                     self.baseline_series.clear()
-                    self.baseline_series.append(x - 60, self.baseline_rmssd)
-                    self.baseline_series.append(x + 2, self.baseline_rmssd)
+                    self.baseline_series.append(main_x_lo, self.baseline_rmssd)
+                    self.baseline_series.append(main_x_hi, self.baseline_rmssd)
 
             # CHART VIEWPORT
             if plot_gate_open and not self._main_plots_frozen:
-                self.hrv_widget.x_axis.setRange(x - 60, x + 2)
+                self._last_main_plot_elapsed_sec = max(0.0, float(x))
+                main_x_lo, main_x_hi = self._compute_main_plot_xrange(x)
+                self._set_main_plot_xrange(main_x_lo, main_x_hi, sync_aux=False)
 
         except Exception as e:
             print(f"Direct Chart Error: {e}")
@@ -7878,12 +8756,138 @@ class View(QMainWindow):
             return
         self.hrv_widget.y_axis.setRange(0, target.value)
 
+    def _compute_main_plot_xrange(self, elapsed_sec: float) -> tuple[float, float]:
+        x_hi = max(0.0, float(elapsed_sec)) + self._timeline_right_pad_sec
+        span = self._main_plot_span_seconds
+        if span is None:
+            return 0.0, x_hi
+        return max(0.0, x_hi - float(span)), x_hi
+
+    def _set_main_plot_xrange(self, x_lo: float, x_hi: float, *, sync_aux: bool) -> None:
+        lo = float(min(x_lo, x_hi))
+        hi = float(max(x_lo, x_hi))
+        self.ibis_widget.x_axis.setRange(lo, hi)
+        self.hrv_widget.x_axis.setRange(lo, hi)
+        if sync_aux:
+            self._sync_aux_windows_to_main_xrange(lo, hi)
+
+    def _main_manual_bounds(self) -> tuple[float, float]:
+        latest_hi = max(0.0, float(self._last_main_plot_elapsed_sec)) + self._timeline_right_pad_sec
+        if self._main_plot_span_seconds is None:
+            return 0.0, max(1.0, latest_hi)
+        span = float(self._main_plot_span_seconds)
+        return 0.0, max(span + self._timeline_right_pad_sec, latest_hi)
+
+    def _apply_main_plot_interaction_mode(self) -> None:
+        manual_mode = bool(self._main_plots_frozen)
+        bounds = self._main_manual_bounds()
+        for widget in (self.ibis_widget, self.hrv_widget):
+            widget.set_manual_x_bounds(*bounds)
+            widget.set_manual_x_interaction(manual_mode)
+        self.main_zoom_label.setEnabled(manual_mode)
+        self.main_zoom_out_button.setEnabled(manual_mode)
+        self.main_zoom_in_button.setEnabled(manual_mode)
+        self.main_zoom_reset_button.setEnabled(manual_mode)
+
+    def _on_main_hr_xrange_interacted(self, x_lo: float, x_hi: float) -> None:
+        self._on_main_plot_xrange_interacted(source="hr", x_lo=x_lo, x_hi=x_hi)
+
+    def _on_main_hrv_xrange_interacted(self, x_lo: float, x_hi: float) -> None:
+        self._on_main_plot_xrange_interacted(source="hrv", x_lo=x_lo, x_hi=x_hi)
+
+    def _on_main_plot_xrange_interacted(self, source: str, x_lo: float, x_hi: float) -> None:
+        if self._suppress_main_manual_sync or not self._main_plots_frozen:
+            return
+        lo = float(min(x_lo, x_hi))
+        hi = float(max(x_lo, x_hi))
+        self._suppress_main_manual_sync = True
+        if source != "hr":
+            self.ibis_widget.x_axis.setRange(lo, hi)
+        if source != "hrv":
+            self.hrv_widget.x_axis.setRange(lo, hi)
+        self._suppress_main_manual_sync = False
+        self._last_main_plot_elapsed_sec = max(
+            0.0, hi - self._timeline_right_pad_sec
+        )
+        self._sync_aux_windows_to_main_xrange(lo, hi)
+
+    def _on_timeline_span_changed(self, _index: int) -> None:
+        selected = self.timeline_span_combo.currentData()
+        self._main_plot_span_seconds = None if selected is None else float(selected)
+        if self._main_plot_span_seconds is not None:
+            self._main_plot_visible_sec = float(self._main_plot_span_seconds)
+        if self._main_plots_frozen:
+            self._apply_main_plot_interaction_mode()
+            self.show_status("Timeline span updated. It will apply after Resume/Relock.")
+            return
+        x_lo, x_hi = self._compute_main_plot_xrange(self._last_main_plot_elapsed_sec)
+        self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
+        self._apply_main_plot_interaction_mode()
+
+    def _main_zoom_in(self) -> None:
+        self._adjust_main_frozen_zoom(1.0 / float(self._main_zoom_factor))
+
+    def _main_zoom_out(self) -> None:
+        self._adjust_main_frozen_zoom(float(self._main_zoom_factor))
+
+    def _main_zoom_reset(self) -> None:
+        if not self._main_plots_frozen:
+            return
+        x_lo, x_hi = self._compute_main_plot_xrange(self._last_main_plot_elapsed_sec)
+        self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
+
+    def _capture_main_plots_image(self) -> None:
+        """Save a stitched snapshot of the two main plots to session folder."""
+        if self._session_bundle is None:
+            self.show_status("No active session — cannot save main plots image.")
+            return
+        top = self.ibis_widget.grab()
+        bottom = self.hrv_widget.grab()
+        if top.isNull() or bottom.isNull():
+            self.show_status("Main plots image capture failed.")
+            return
+        width = max(top.width(), bottom.width())
+        height = top.height() + bottom.height()
+        composite = QPixmap(width, height)
+        composite.fill(Qt.GlobalColor.white)
+        painter = QPainter(composite)
+        painter.drawPixmap(0, 0, top)
+        painter.drawPixmap(0, top.height(), bottom)
+        painter.end()
+        try:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = self._session_bundle.session_dir / f"main_plots_snapshot_{timestamp}.png"
+            ok = composite.save(str(path))
+            if ok:
+                self.show_status(f"Main plots snapshot saved: {path.name}")
+            else:
+                self.show_status("Failed to save main plots snapshot.")
+        except Exception as exc:
+            self.show_status(f"Main plots snapshot save failed: {exc}")
+
+    def _adjust_main_frozen_zoom(self, factor: float) -> None:
+        if not self._main_plots_frozen:
+            return
+        x_lo = float(self.ibis_widget.x_axis.min())
+        x_hi = float(self.ibis_widget.x_axis.max())
+        span = max(2.0, x_hi - x_lo)
+        center = (x_lo + x_hi) / 2.0
+        bounds_lo, bounds_hi = self._main_manual_bounds()
+        max_span = max(2.0, bounds_hi - bounds_lo)
+        new_span = max(2.0, min(span * float(factor), max_span))
+        new_lo = center - (new_span / 2.0)
+        new_hi = center + (new_span / 2.0)
+        new_lo = max(bounds_lo, min(new_lo, bounds_hi - new_span))
+        new_hi = new_lo + new_span
+        self._set_main_plot_xrange(new_lo, new_hi, sync_aux=True)
+
     def _sync_aux_windows_to_main_xrange(self, x_lo: float, x_hi: float):
         self.ecg_window.set_synced_xrange(x_lo, x_hi)
         self.qtc_window.set_synced_xrange(x_lo, x_hi)
 
     def _apply_freeze_button_states(self):
         connected = self._is_sensor_connected()
+        plot_controls_ready = connected and self._main_plot_started
         self.freeze_two_main_plots_button.setText(
             "Resume Two Main Plots"
             if self._main_plots_frozen
@@ -7893,15 +8897,27 @@ class View(QMainWindow):
             "Resume All" if self._all_plots_frozen else "Freeze All"
         )
         self.freeze_two_main_plots_button.setEnabled(
-            connected and not self._all_plots_frozen
+            plot_controls_ready and not self._all_plots_frozen
         )
-        self.freeze_all_button.setEnabled(connected)
-        self.reset_axes_button.setEnabled(connected)
+        self.freeze_all_button.setEnabled(plot_controls_ready)
+        self.reset_axes_button.setEnabled(plot_controls_ready)
+        timeline_enabled = not self._main_plots_frozen
+        self.timeline_span_label.setEnabled(timeline_enabled)
+        self.timeline_span_combo.setEnabled(timeline_enabled)
+        self.main_capture_button.setEnabled(plot_controls_ready and self._session_bundle is not None)
+        self._refresh_freeze_resume_pulse_state()
+        self._apply_main_plot_interaction_mode()
 
     def _toggle_two_main_plots_freeze(self):
         if self._all_plots_frozen:
             return
         self._main_plots_frozen = not self._main_plots_frozen
+        if not self._main_plots_frozen:
+            x_lo, x_hi = self._compute_main_plot_xrange(self._last_main_plot_elapsed_sec)
+            self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
+            self.show_status("Main plots resumed — relocked to live timeline.")
+        else:
+            self.show_status("Main plots frozen — drag to pan, scroll wheel or +/- to zoom.")
         self._apply_freeze_button_states()
 
     def _toggle_freeze_all(self):
@@ -7910,10 +8926,14 @@ class View(QMainWindow):
             self._main_plots_frozen = True
             self.ecg_window.set_stream_frozen(True)
             self.qtc_window.set_stream_frozen(True)
+            self.show_status("All plots frozen — use pan/zoom controls for inspection.")
         else:
             self._main_plots_frozen = False
             self.ecg_window.set_stream_frozen(False)
             self.qtc_window.set_stream_frozen(False)
+            x_lo, x_hi = self._compute_main_plot_xrange(self._last_main_plot_elapsed_sec)
+            self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
+            self.show_status("All plots resumed — synchronized live timeline restored.")
         self._apply_freeze_button_states()
 
     def toggle_pacer(self):
@@ -7935,38 +8955,7 @@ class View(QMainWindow):
     def show_recording_status(self, status: int):
         self.recording_statusbar.setRange(0, max(status, 1))
 
-    def _copy_text_to_clipboard(self, text: str) -> bool:
-        try:
-            clipboard = QApplication.clipboard()
-            if clipboard is None:
-                return False
-            clipboard.setText(text)
-            return True
-        except Exception:
-            return False
-
     def show_status(self, status: str, print_to_terminal=True):
-        report_file_prefix = "Saved report file: "
-        if status.startswith(report_file_prefix):
-            report_path = status[len(report_file_prefix):].strip()
-            if self._copy_text_to_clipboard(report_path):
-                status = f"Report path saved to clipboard: {report_path}"
-
-        recording_path = None
-        recording_file_prefix = "Saved recording file: "
-        recording_saved_prefix = "Saved recording at "
-        if status.startswith(recording_file_prefix):
-            recording_path = status[len(recording_file_prefix):].strip()
-        elif status.startswith(recording_saved_prefix):
-            # Backward-compatible parsing for legacy status text.
-            recording_path = status[len(recording_saved_prefix):].rstrip(".").strip()
-
-        if recording_path:
-            if self._session_bundle is not None and Path(recording_path) == self._session_bundle.session_dir:
-                recording_path = str(self._session_bundle.csv_path)
-            if self._copy_text_to_clipboard(recording_path):
-                status = f"Recording path saved to clipboard: {recording_path}"
-
         if status.startswith("Scanning for BLE sensors..."):
             self._on_scan_state_changed(True)
         elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
@@ -8122,12 +9111,20 @@ class View(QMainWindow):
     def _arm_main_plot_warmup(self, clear_series: bool) -> None:
         self._main_plot_warmup_until = time.time() + float(self._plot_start_delay_seconds)
         if clear_series:
+            self._set_main_plot_started(False)
             self.hr_trend_series.clear()
             self.sdnn_series.clear()
             self.hrv_widget.time_series.clear()
 
     def _main_plot_gate_open(self, now: float) -> bool:
         return self._main_plot_warmup_until is None or now >= self._main_plot_warmup_until
+
+    def _set_main_plot_started(self, started: bool) -> None:
+        started_bool = bool(started)
+        if self._main_plot_started == started_bool:
+            return
+        self._main_plot_started = started_bool
+        self._apply_freeze_button_states()
 
     def _check_data_timeout(self):
         if self._last_data_time is None:
@@ -8335,7 +9332,7 @@ class View(QMainWindow):
         """Write in-memory fault log to disk; clear buffer; optionally prompt in DEBUG."""
         if not self._signal_fault_buffer:
             return
-        log_path = Path.home() / "Hertz-and-Hearts" / "signal_diag.log"
+        log_path = self._session_root / "signal_diag.log"
         try:
             log_dir = log_path.parent
             log_dir.mkdir(parents=True, exist_ok=True)
@@ -8484,7 +9481,13 @@ class View(QMainWindow):
             val = data.value[0]
             self.stress_ratio_label.setText(f"LF/HF: {val:.2f}")
             if self._session_state == "recording":
-                self._session_stress_ratio_values.append(float(val))
+                if self.start_time is not None:
+                    now = time.time()
+                    plot_elapsed = (now - self.start_time) - self._plot_start_delay_seconds
+                    if plot_elapsed >= 0 and self._main_plot_gate_open(now):
+                        self._session_stress_ratio_values.append(float(val))
+                        report_elapsed = self._session_report_time_offset_seconds + plot_elapsed
+                        self._session_stress_ratio_times.append(report_elapsed)
 
         # 2b. QTc payload updates from ECG delineation/calculation pipeline.
         elif data.name == "qtc":
@@ -8596,8 +9599,10 @@ class View(QMainWindow):
             if plot_elapsed < 0 or not self._main_plot_gate_open(now):
                 return
 
+            self._set_main_plot_started(True)
             self._session_hr_values.append(self._hr_ewma)
-            self._session_hr_times.append(plot_elapsed)
+            report_elapsed = self._session_report_time_offset_seconds + plot_elapsed
+            self._session_hr_times.append(report_elapsed)
             if not self._main_plots_frozen:
                 self.hr_trend_series.append(plot_elapsed, self._hr_ewma)
                 if self.hr_trend_series.count() % self._series_prune_stride == 0:
@@ -8615,9 +9620,10 @@ class View(QMainWindow):
                     self.hr_baseline_series.attachAxis(self.ibis_widget.x_axis)
                     self.hr_baseline_series.attachAxis(self.ibis_widget.y_axis)
                 if not self._main_plots_frozen:
+                    main_x_lo, main_x_hi = self._compute_main_plot_xrange(plot_elapsed)
                     self.hr_baseline_series.clear()
-                    self.hr_baseline_series.append(plot_elapsed - 60, self.baseline_hr)
-                    self.hr_baseline_series.append(plot_elapsed + 2, self.baseline_hr)
+                    self.hr_baseline_series.append(main_x_lo, self.baseline_hr)
+                    self.hr_baseline_series.append(main_x_hi, self.baseline_hr)
 
             # Expand-only Y-axis
             min_span = 40
@@ -8643,12 +9649,10 @@ class View(QMainWindow):
                 self._hr_axis_ceiling = self._hr_axis_floor + min_span
 
             if not self._main_plots_frozen:
+                self._last_main_plot_elapsed_sec = max(0.0, float(plot_elapsed))
+                main_x_lo, main_x_hi = self._compute_main_plot_xrange(plot_elapsed)
                 self.ibis_widget.y_axis.setRange(self._hr_axis_floor, self._hr_axis_ceiling)
-                self.ibis_widget.x_axis.setRange(plot_elapsed - 60, plot_elapsed + 2)
-                self._sync_aux_windows_to_main_xrange(
-                    plot_elapsed - 60,
-                    plot_elapsed + 2,
-                )
+                self._set_main_plot_xrange(main_x_lo, main_x_hi, sync_aux=True)
             else:
                 self._sync_aux_windows_to_main_xrange(
                     float(self.ibis_widget.x_axis.min()),
