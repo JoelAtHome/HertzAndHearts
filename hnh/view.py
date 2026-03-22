@@ -6824,7 +6824,9 @@ class View(QMainWindow):
         if not self.model.sensors and self.sensor.client is None:
             self._pending_connect_target = (name, address)
             self._set_scan_in_progress(True)
-            self.scanner.scan()
+            if not self.scanner.scan():
+                self._set_scan_in_progress(False)
+                self._pending_connect_target = None
             return
         self._do_connect(name, address)
 
@@ -7654,7 +7656,6 @@ class View(QMainWindow):
             self.show_status("Support reminder disabled for this profile.")
 
     def _on_scan_clicked(self):
-        self._on_scan_state_changed(True)
         self.scanner.scan()
 
     def _on_scan_state_changed(self, active: bool):

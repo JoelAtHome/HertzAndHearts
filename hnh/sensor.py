@@ -21,6 +21,71 @@ from hnh.config import COMPATIBLE_SENSORS, DEBUG
 from hnh.perf_probe import get_perf_probe
 
 
+def ble_adapter_blocked_message() -> str | None:
+    """
+    If scanning / BLE cannot work, return a short user-facing reason; else None.
+
+    Uses Qt's local adapter view (same stack as discovery). Some platforms may
+    still start discovery when the radio is off; discovery errors are handled
+    separately in SensorScanner._handle_scan_error.
+    """
+    try:
+        addresses = QBluetoothLocalDevice.allDevices()
+    except Exception:
+        return None
+    if not addresses:
+        return (
+            "No Bluetooth adapter was found. Use a PC with Bluetooth (or a USB "
+            "adapter), then try Scan again."
+        )
+    try:
+        local = QBluetoothLocalDevice()
+    except Exception:
+        return None
+    if not local.isValid():
+        return (
+            "Bluetooth adapter is not available. Check Bluetooth in system settings, "
+            "then try Scan again."
+        )
+    try:
+        if local.hostMode() == QBluetoothLocalDevice.HostPoweredOff:
+            return (
+                "Bluetooth is turned off. Turn it on in system settings, then try Scan again."
+            )
+    except Exception:
+        pass
+    return None
+
+
+def _discovery_error_message(error: QBluetoothDeviceDiscoveryAgent.Error) -> str | None:
+    if error == QBluetoothDeviceDiscoveryAgent.Error.NoError:
+        return None
+    if error == QBluetoothDeviceDiscoveryAgent.Error.PoweredOffError:
+        return (
+            "Bluetooth appears off or unavailable. Turn it on in system settings, "
+            "then try Scan again."
+        )
+    if error == QBluetoothDeviceDiscoveryAgent.Error.InvalidBluetoothAdapterError:
+        return "No usable Bluetooth adapter was found. Check hardware and drivers, then retry."
+    if error == QBluetoothDeviceDiscoveryAgent.Error.LocationServiceTurnedOffError:
+        return (
+            "Location services are off. On macOS, enable Location Services for Bluetooth "
+            "scanning, then try again."
+        )
+    if error == QBluetoothDeviceDiscoveryAgent.Error.MissingPermissionsError:
+        return (
+            "Bluetooth permission is missing. Allow Bluetooth for this app in system "
+            "settings, then try Scan again."
+        )
+    if error == QBluetoothDeviceDiscoveryAgent.Error.UnsupportedDiscoveryMethod:
+        return "This Bluetooth adapter does not support BLE scanning."
+    if error == QBluetoothDeviceDiscoveryAgent.Error.UnsupportedPlatformError:
+        return "Bluetooth scanning is not supported on this platform build."
+    if error == QBluetoothDeviceDiscoveryAgent.Error.InputOutputError:
+        return "Bluetooth scan failed (I/O error). Toggle Bluetooth off/on and try again."
+    return f"Bluetooth scan failed (code {int(error)}). Check Bluetooth, then retry."
+
+
 def _decode_pmd_ecg_samples(raw_payload: bytes) -> list[float]:
     sample_bytes = (len(raw_payload) // 3) * 3
     if sample_bytes == 0:
@@ -47,13 +112,19 @@ class SensorScanner(QObject):
         self.scanner.finished.connect(self._handle_scan_result)
         self.scanner.errorOccurred.connect(self._handle_scan_error)
 
-    def scan(self):
+    def scan(self) -> bool:
         if self.scanner.isActive():
             self.status_update.emit("Already searching for sensors.")
-            return
+            return False
+        blocked = ble_adapter_blocked_message()
+        if blocked is not None:
+            self.scanning_state.emit(False)
+            self.status_update.emit(blocked)
+            return False
         self.scanning_state.emit(True)
         self.status_update.emit("Scanning for BLE sensors...")
         self.scanner.start(QBluetoothDeviceDiscoveryAgent.LowEnergyMethod)
+        return True
 
     def _handle_scan_result(self):
         self.scanning_state.emit(False)
@@ -68,9 +139,15 @@ class SensorScanner(QObject):
         self.sensor_update.emit(sensors)
         self.status_update.emit(f"Found {len(sensors)} sensor(s).")
 
-    def _handle_scan_error(self, error):
+    def _handle_scan_error(self, error: QBluetoothDeviceDiscoveryAgent.Error) -> None:
         self.scanning_state.emit(False)
-        print(error)
+        if error == QBluetoothDeviceDiscoveryAgent.Error.NoError:
+            return
+        msg = _discovery_error_message(error)
+        if msg is not None:
+            self.status_update.emit(msg)
+        else:
+            print(error)
 
 
 class SensorClient(QObject):
@@ -182,16 +259,14 @@ class SensorClient(QObject):
     def _windows_ble_preflight(self, sensor: QBluetoothDeviceInfo) -> bool:
         if platform.system() != "Windows":
             return True
+        blocked = ble_adapter_blocked_message()
+        if blocked is not None:
+            self.status_update.emit(blocked)
+            return False
         try:
             local = QBluetoothLocalDevice()
         except Exception:
             return True
-        try:
-            if local.hostMode() == QBluetoothLocalDevice.HostPoweredOff:
-                self.status_update.emit("Windows Bluetooth appears off. Turn Bluetooth on, then retry.")
-                return False
-        except Exception:
-            pass
         try:
             pairing_status = local.pairingStatus(sensor.address())
             if pairing_status == QBluetoothLocalDevice.Unpaired:

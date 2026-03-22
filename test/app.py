@@ -43,11 +43,13 @@ class MockSensor:
 class MockSensorScanner(QObject):
     sensor_update = Signal(object)
     status_update = Signal(str)
+    scanning_state = Signal(bool)
 
-    def scan(self):
+    def scan(self) -> bool:
         polar_sensors = [MockSensor() for _ in range(3)]
         self.sensor_update.emit(polar_sensors)
         self.status_update.emit(f"Found {len(polar_sensors)} sensor(s).")
+        return True
 
 
 class MockSensorClient(QObject):
