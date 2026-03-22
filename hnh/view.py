@@ -5662,7 +5662,10 @@ class View(QMainWindow):
         self.address_menu.setToolTip("Select the sensor to connect.")
         self.connect_button.setToolTip("Connect to the selected sensor.")
         self.disconnect_button.setToolTip("Disconnect from the current sensor.")
-        self.reset_button.setToolTip("Reset baseline detection and clear trend buffers.")
+        self.reset_button.setToolTip(
+            "Reset baseline detection and clear trend buffers. "
+            "Disabled while the two main plots are frozen (unfreeze first)."
+        )
         self.reset_axes_button.setToolTip("Restore both chart Y-axes to sensible baseline-centered ranges.")
         self.freeze_two_main_plots_button.setToolTip("Freeze/resume only the two main trend plots.")
         self.freeze_all_button.setToolTip("Freeze/resume the main, ECG, and QTc plots.")
@@ -8243,6 +8246,7 @@ class View(QMainWindow):
             self.baseline_series.clear()
         if hasattr(self, 'hr_baseline_series'):
             self.hr_baseline_series.clear()
+        self._apply_freeze_button_states()
         if not self._main_plots_frozen:
             x_lo, x_hi = self._compute_main_plot_xrange(0.0)
             self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
@@ -8679,7 +8683,7 @@ class View(QMainWindow):
             # PHASE 2: CALCULATE AVERAGES
             elif self.baseline_rmssd is None and self.baseline_values:
                 self.baseline_rmssd = sum(self.baseline_values) / len(self.baseline_values)
-                self.reset_button.setEnabled(True)
+                self.reset_button.setEnabled(not self._main_plots_frozen)
                 hr_text = f"{self.baseline_hr:.0f}" if self.baseline_hr is not None else "--"
                 self.statusbar.showMessage(
                     f"Baselines locked \u2014 RMSSD: {self.baseline_rmssd:.1f} ms, HR: {hr_text} bpm"
@@ -8944,6 +8948,9 @@ class View(QMainWindow):
         self.timeline_span_label.setEnabled(timeline_enabled)
         self.timeline_span_combo.setEnabled(timeline_enabled)
         self.main_capture_button.setEnabled(plot_controls_ready and self._session_bundle is not None)
+        self.reset_button.setEnabled(
+            self.baseline_rmssd is not None and not self._main_plots_frozen
+        )
         self._refresh_freeze_resume_pulse_state()
         self._apply_main_plot_interaction_mode()
 
