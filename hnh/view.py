@@ -9275,10 +9275,14 @@ class View(QMainWindow):
         top = sorted_types[0][0] if sorted_types else ""
         second = sorted_types[1][0] if len(sorted_types) > 1 else ""
         recs = []
-        if top in ("L1_DROPOUT", "WATCHDOG_LOST"):
+        if top == "L1_DROPOUT":
             recs.append("Increase Data Timeout (Settings > Signal Quality)")
-            if top == "L1_DROPOUT":
-                recs.append("Increase Dropout IBI Threshold (Advanced)")
+            recs.append("Increase Dropout IBI Threshold (Advanced)")
+        if top == "WATCHDOG_LOST":
+            recs.append(
+                "No heart-rate packets: check strap, sensor battery, Bluetooth, and that no phone app "
+                "is using the sensor; optionally increase Data Timeout (Settings > Signal Quality)"
+            )
         if "L2_NOISE_HIGH" in (top, second) or "L2_NOISE" == top:
             recs.append("Increase Noise Ceiling IBI (Advanced)")
         if "L2_NOISE_LOW" in (top, second):
@@ -9312,9 +9316,17 @@ class View(QMainWindow):
             suggested = min(10000, current + 1000)
             return f"Raise Dropout IBI Threshold from {current} to {suggested} ms (Settings > Advanced)"
         if top == "WATCHDOG_LOST" and records:
-            current = self.settings.DATA_TIMEOUT_SECONDS
-            suggested = min(30.0, current + 5.0)
-            return f"Raise Data Timeout from {current} to {suggested} s (Settings > Signal Quality)"
+            current = float(self.settings.DATA_TIMEOUT_SECONDS)
+            max_silence = max(
+                (float(r.get("silence_sec", 0)) for r in records),
+                default=current,
+            )
+            # Watchdog runs every 5s, so logged silence_sec can exceed threshold slightly.
+            suggested = min(30.0, max(current + 5.0, max_silence + 2.0))
+            return (
+                f"Raise Data Timeout from {current} to {suggested} s (Settings > Signal Quality); "
+                "if faults continue, fix connectivity first (strap, BT, exclusive sensor use)"
+            )
         if top == "L2_NOISE_HIGH" and records:
             max_ibi = max(r.get("last_ibi_ms", 0) for r in records if "last_ibi_ms" in r)
             current = self.settings.NOISE_IBI_HIGH_MS
