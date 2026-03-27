@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QGroupBox, QFormLayout,
     QPushButton, QSpinBox, QDoubleSpinBox, QCheckBox, QLabel,
     QMessageBox, QScrollArea, QWidget, QLineEdit, QListWidget,
-    QInputDialog, QAbstractItemView, QFileDialog,
+    QInputDialog, QAbstractItemView, QFileDialog, QSizePolicy, QComboBox,
 )
 from PySide6.QtCore import Qt, Signal
 
@@ -29,6 +29,9 @@ from hnh.data_paths import (
 )
 
 SETTINGS_FILE = Path.home() / ".hnh_settings.json"
+TIMELINE_PREF_MAIN_SPAN = "main_timeline_span"
+TIMELINE_SPAN_DEFAULT_LABEL = "60 s"
+TIMELINE_SPAN_LABELS: tuple[str, ...] = ("15 s", "30 s", "60 s", "120 s", "240 s", "Full")
 
 # ──────────────────────────────────────────────────────────────────────
 #  Registry of user-facing settings
@@ -425,13 +428,16 @@ class PathEditWidget(QWidget):
 
     def __init__(self, current: str = "", parent=None):
         super().__init__(parent)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self._edit = QLineEdit()
+        self._edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self._edit.setText(current)
         self._edit.textChanged.connect(self.textChanged.emit)
         layout.addWidget(self._edit)
         browse = QPushButton("Browse…")
+        browse.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         browse.clicked.connect(self._browse)
         layout.addWidget(browse)
 
@@ -830,6 +836,8 @@ class SettingsDialog(QDialog):
         self._active_data_root = app_data_root()
         self._legacy_data_root = legacy_data_root()
         self._recommended_data_root = recommended_data_root()
+        self._timeline_default_label: QLabel | None = None
+        self._timeline_default_combo: QComboBox | None = None
 
         self.setWindowTitle("Hertz & Hearts \u2014 Settings")
         self.setMinimumWidth(500)
@@ -891,10 +899,13 @@ class SettingsDialog(QDialog):
             group = QGroupBox(section_name)
             form = QFormLayout(group)
             form.setLabelAlignment(Qt.AlignRight)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             section_keys: list[str] = []
             for key, meta in items:
                 widget = self._create_widget(key, meta)
                 label = QLabel(self._build_label(meta))
+                if key == "SESSION_SAVE_PATH":
+                    label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
                 full_tip = self._compose_setting_tooltip(key, meta)
                 label.setToolTip(full_tip)
                 widget.setToolTip(full_tip)
@@ -903,6 +914,39 @@ class SettingsDialog(QDialog):
                 self._labels[key] = label
                 self._base_tooltips[key] = full_tip
                 section_keys.append(key)
+            if section_name == "Session Timing":
+                has_profile_context = bool(self._profile_store is not None and self._profile_id)
+                timeline_label = QLabel("Default Timeline Width [Profile]")
+                timeline_tip = (
+                    "Per-user default live timeline span for the two main plots. "
+                    f"Default: {TIMELINE_SPAN_DEFAULT_LABEL}."
+                )
+                timeline_label.setToolTip(timeline_tip)
+                timeline_combo = QComboBox()
+                timeline_combo.setMinimumWidth(96)
+                for option in TIMELINE_SPAN_LABELS:
+                    timeline_combo.addItem(option)
+                saved_span = TIMELINE_SPAN_DEFAULT_LABEL
+                if has_profile_context:
+                    raw = self._profile_store.get_profile_pref(
+                        self._profile_id,
+                        TIMELINE_PREF_MAIN_SPAN,
+                        TIMELINE_SPAN_DEFAULT_LABEL,
+                    )
+                    normalized = str(raw).strip()
+                    if normalized in TIMELINE_SPAN_LABELS:
+                        saved_span = normalized
+                timeline_combo.setCurrentText(saved_span)
+                if has_profile_context:
+                    timeline_combo.setToolTip(timeline_tip)
+                else:
+                    timeline_combo.setEnabled(False)
+                    timeline_combo.setToolTip(
+                        "Available when an active profile context is present."
+                    )
+                form.addRow(timeline_label, timeline_combo)
+                self._timeline_default_label = timeline_label
+                self._timeline_default_combo = timeline_combo
             self._form_layout.addWidget(group)
             if is_advanced:
                 group.setVisible(False)
@@ -1251,6 +1295,19 @@ class SettingsDialog(QDialog):
                     f"setting:{key}",
                     str(val),
                 )
+        if (
+            self._timeline_default_combo is not None
+            and self._profile_store is not None
+            and self._profile_id
+        ):
+            selected = str(self._timeline_default_combo.currentText()).strip()
+            if selected not in TIMELINE_SPAN_LABELS:
+                selected = TIMELINE_SPAN_DEFAULT_LABEL
+            self._profile_store.set_profile_pref(
+                self._profile_id,
+                TIMELINE_PREF_MAIN_SPAN,
+                selected,
+            )
         self._settings.save(exclude_keys=scoped_profile)
         self.accept()
 
@@ -1311,6 +1368,8 @@ class SettingsDialog(QDialog):
         if reply == QMessageBox.Yes:
             self._settings.reset_defaults()
             self._write_widgets()
+            if self._timeline_default_combo is not None:
+                self._timeline_default_combo.setCurrentText(TIMELINE_SPAN_DEFAULT_LABEL)
             self._refresh_all_default_highlights()
             self._baseline_values = self._normalized_read_widgets()
 

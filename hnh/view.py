@@ -173,6 +173,7 @@ TIER1_PREF_RECOVERY_SESSIONS = "tier1_recovery_baseline_sessions"
 CONNECTION_PREF_MODE = "connection_mode"
 CONNECTION_PREF_PHONE_HOST = "phone_bridge_host"
 CONNECTION_PREF_PHONE_PORT = "phone_bridge_port"
+TIMELINE_PREF_MAIN_SPAN = "main_timeline_span"
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
 
@@ -6283,6 +6284,7 @@ class View(QMainWindow):
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
         self.profile_header_label.setText(f"User: {self._session_profile_id}")
         self._apply_profile_scoped_settings(self._session_profile_id)
+        self._load_timeline_span_pref(self._session_profile_id)
         saved_rate = self._profile_store.get_profile_pref(
             self._session_profile_id, "breathing_rate", "6"
         )
@@ -6366,6 +6368,25 @@ class View(QMainWindow):
             CONNECTION_PREF_PHONE_PORT,
             str(int(self.bridge_port_spin.value())),
         )
+
+    def _load_timeline_span_pref(self, profile_id: str) -> None:
+        if not getattr(self, "timeline_span_combo", None):
+            return
+        raw_label = self._profile_store.get_profile_pref(
+            profile_id,
+            TIMELINE_PREF_MAIN_SPAN,
+            "60 s",
+        )
+        preferred_label = str(raw_label).strip() or "60 s"
+        idx = self.timeline_span_combo.findText(preferred_label, Qt.MatchFixedString)
+        if idx < 0:
+            idx = self.timeline_span_combo.findText("60 s", Qt.MatchFixedString)
+        if idx < 0:
+            idx = 0
+        self.timeline_span_combo.blockSignals(True)
+        self.timeline_span_combo.setCurrentIndex(idx)
+        self.timeline_span_combo.blockSignals(False)
+        self._on_timeline_span_changed(idx)
 
     def _load_tier1_morning_baseline_pref(self) -> None:
         if not getattr(self, "_morning_baseline_cb", None):
@@ -6950,8 +6971,8 @@ class View(QMainWindow):
                 )
         self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
-        self.ecg_window.set_image_capture_enabled(self._session_bundle is not None)
-        self.qtc_window.set_image_capture_enabled(self._session_bundle is not None)
+        self.ecg_window.set_image_capture_enabled(True)
+        self.qtc_window.set_image_capture_enabled(True)
         self._update_morning_baseline_banner_visibility()
 
     def _current_sensor_label(self) -> str:
@@ -6980,18 +7001,56 @@ class View(QMainWindow):
                 return self._session_root / "Sessions" / profile_slug
         return candidate
 
+    def _image_capture_target_dir(self) -> Path | None:
+        """Return snapshot target directory, creating a dated '_images' folder when idle."""
+        # Only treat the regular session folder as capture target while actively recording.
+        if self._session_state == "recording" and self._session_bundle is not None:
+            return self._session_bundle.session_dir
+        base_root = self._session_save_path_from_settings()
+        now = datetime.now()
+        base = (
+            base_root
+            / now.strftime("%Y")
+            / now.strftime("%Y-%m-%d")
+        )
+        try:
+            base.mkdir(parents=True, exist_ok=True)
+            stem = f"{now.strftime('%Y%m%d-%H%M%S')}_images"
+            candidate = base / stem
+            if candidate.exists():
+                for idx in range(1, 1000):
+                    alt = base / f"{stem}_{idx:02d}"
+                    if not alt.exists():
+                        candidate = alt
+                        break
+                else:
+                    raise RuntimeError("Unable to allocate image capture directory.")
+            candidate.mkdir(parents=False, exist_ok=False)
+            self.show_status(f"No active session. Created image folder: {candidate}")
+            return candidate
+        except Exception as exc:
+            self.show_status(f"Could not create image capture folder: {exc}")
+            return None
+
     def _copy_session_folder_to(self, destination_root: Path) -> Path | None:
         if self._session_bundle is None:
             return None
         source = self._session_bundle.session_dir
         if not source.exists():
             return None
-        target = destination_root / source.name
+        started = self._session_bundle.started_at
+        dated_root = (
+            destination_root
+            / started.strftime("%Y")
+            / started.strftime("%Y-%m-%d")
+        )
+        dated_root.mkdir(parents=True, exist_ok=True)
+        target = dated_root / source.name
         if target.resolve() == source.resolve():
             return target
         if target.exists():
             for idx in range(1, 1000):
-                candidate = destination_root / f"{source.name}_{idx:02d}"
+                candidate = dated_root / f"{source.name}_{idx:02d}"
                 if not candidate.exists():
                     target = candidate
                     break
@@ -7001,7 +7060,13 @@ class View(QMainWindow):
     def _copy_selected_artifacts_to(self, destination_root: Path, paths: list[Path]) -> Path | None:
         if self._session_bundle is None:
             return None
-        out_dir = destination_root / self._session_bundle.session_id
+        started = self._session_bundle.started_at
+        out_dir = (
+            destination_root
+            / started.strftime("%Y")
+            / started.strftime("%Y-%m-%d")
+            / self._session_bundle.session_id
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         copied_any = False
         for path in paths:
@@ -8447,6 +8512,7 @@ class View(QMainWindow):
             profile_id=self._session_profile_id,
         )
         if dlg.exec() == QDialog.Accepted:
+            self._load_timeline_span_pref(self._session_profile_id)
             self._set_debug_mode(bool(self.settings.DEBUG), announce=False)
             if platform.system() == "Linux":
                 current_linux_pmd = bool(
@@ -8692,18 +8758,18 @@ class View(QMainWindow):
     @Slot(object)
     def _on_ecg_image_captured(self, pixmap: object):
         """Save ECG plot snapshot to session folder."""
-        if self._session_bundle is None:
-            self.show_status("No active session — cannot save ECG image.")
+        target_dir = self._image_capture_target_dir()
+        if target_dir is None:
             return
         if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
             self.show_status("ECG image capture failed.")
             return
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = self._session_bundle.session_dir / f"ecg_snapshot_{timestamp}.png"
+            path = target_dir / f"ecg_snapshot_{timestamp}.png"
             ok = pixmap.save(str(path))
             if ok:
-                self.show_status(f"ECG snapshot saved: {path.name}")
+                self.show_status(f"ECG snapshot saved: {path}")
             else:
                 self.show_status("Failed to save ECG snapshot.")
         except Exception as exc:
@@ -8712,18 +8778,18 @@ class View(QMainWindow):
     @Slot(object)
     def _on_qtc_image_captured(self, pixmap: object):
         """Save QTc plot snapshot to session folder."""
-        if self._session_bundle is None:
-            self.show_status("No active session — cannot save QTc image.")
+        target_dir = self._image_capture_target_dir()
+        if target_dir is None:
             return
         if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
             self.show_status("QTc image capture failed.")
             return
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = self._session_bundle.session_dir / f"qtc_snapshot_{timestamp}.png"
+            path = target_dir / f"qtc_snapshot_{timestamp}.png"
             ok = pixmap.save(str(path))
             if ok:
-                self.show_status(f"QTc snapshot saved: {path.name}")
+                self.show_status(f"QTc snapshot saved: {path}")
             else:
                 self.show_status("Failed to save QTc snapshot.")
         except Exception as exc:
@@ -9422,8 +9488,8 @@ class View(QMainWindow):
 
     def _capture_main_plots_image(self) -> None:
         """Save a stitched snapshot of the two main plots to session folder."""
-        if self._session_bundle is None:
-            self.show_status("No active session — cannot save main plots image.")
+        target_dir = self._image_capture_target_dir()
+        if target_dir is None:
             return
         top = self.ibis_widget.grab()
         bottom = self.hrv_widget.grab()
@@ -9440,10 +9506,10 @@ class View(QMainWindow):
         painter.end()
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = self._session_bundle.session_dir / f"main_plots_snapshot_{timestamp}.png"
+            path = target_dir / f"main_plots_snapshot_{timestamp}.png"
             ok = composite.save(str(path))
             if ok:
-                self.show_status(f"Main plots snapshot saved: {path.name}")
+                self.show_status(f"Main plots snapshot saved: {path}")
             else:
                 self.show_status("Failed to save main plots snapshot.")
         except Exception as exc:
