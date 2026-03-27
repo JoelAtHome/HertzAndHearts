@@ -38,14 +38,25 @@ Cardiac theory notes (QRS + HRV compendium, Markdown):
 - Prebuilt artifacts are published in GitHub Releases:
   - https://github.com/JoelAtHome/HertzAndHearts/releases
 
-## Phone Bridge (Android)
+## Phone Bridge (Android, optional)
 
-- Setup guide:
-  - `docs/PHONE_BRIDGE_QUICKSTART.md`
-- Download the latest bridge APK from GitHub Actions:
-  - https://github.com/JoelAtHome/HertzAndHearts/actions/workflows/android-bridge.yml
-- Artifact name to download from a successful run:
-  - `PolarH10Bridge-debug-apk` (contains `app-debug.apk`)
+Most users can connect the strap directly with **PC BLE**. **Phone Bridge** is optional, but it can be much more stable when your computer’s Bluetooth stack struggles (scan failures, frequent disconnects, choppy streaming). In that setup your **phone** keeps the BLE link to the strap and forwards live data to Hertz & Hearts on the PC over **Wi‑Fi** (same LAN as the PC).
+
+**Download and install the bridge app**
+
+1. Open **Releases** (same page as the desktop downloads):  
+   https://github.com/JoelAtHome/HertzAndHearts/releases  
+2. On the release you are using, download **`PolarH10Bridge-debug-<tag>.apk`** (debug build of the Polar H10-to-PC bridge app).
+3. Copy the APK to your Android phone (USB, cloud storage, etc.).
+4. On the phone, allow installation from your file manager or browser if prompted (“unknown apps”), then open the APK and install.
+
+If you need a build from **`main`** that is not on a release yet, use **Actions** → workflow **`android-bridge`** → artifact **`PolarH10Bridge-debug-apk`** (`app-debug.apk` inside the zip):  
+https://github.com/JoelAtHome/HertzAndHearts/actions/workflows/android-bridge.yml
+
+**Use it with Hertz & Hearts**
+
+- In Hertz & Hearts, set **Connection Mode** to **Phone Bridge**, enter your **phone’s Wi‑Fi IP address** and port (**8765** by default), then **Connect**. The bridge app shows the address to use (your numbers will differ from any screenshot).
+- Full walkthrough, permissions (Bluetooth, location for BLE scan), and troubleshooting: **`docs/PHONE_BRIDGE_QUICKSTART.md`**.
 
 ## Compatible Sensors
 
@@ -92,6 +103,18 @@ Cardiac theory notes (QRS + HRV compendium, Markdown):
 **6) ECG monitor (frozen view with cursor measurement)**
 
 ![ECG monitor frozen view with cursor-based interval measurement](./docs/pics/ecg_frozen.png)
+
+**7) Polar H10-to-PC Bridge — main screen (tap to find sensors, PC IP:port hint)**
+
+![Polar H10-to-PC Bridge main screen with data path and tap to find sensors](./docs/pics/phone_bridge/polar_h10_bridge_main_tap_to_find_sensors.jpg)
+
+**8) Polar H10-to-PC Bridge — connected (Bluetooth to phone, Wi‑Fi to Hertz & Hearts)**
+
+![Polar H10-to-PC Bridge connected status with data path and addresses](./docs/pics/phone_bridge/polar_h10_bridge_connected_status.jpg)
+
+**9) Polar H10-to-PC Bridge — connection settings (port, network, background keep‑alive)**
+
+![Polar H10-to-PC Bridge: connection settings modal over main screen (bridge port 8765, background keep‑alive on)](./docs/pics/phone_bridge/polar_h10_bridge_connection_settings_dialog.jpg)
 
 For reusable caption text, see `docs/assets/CAPTIONS.md`.
 

@@ -46,3 +46,5 @@ The GitHub Actions workflow `.github/workflows/build.yml` builds packages on:
 - macOS 14
 
 On release events, the workflow uploads artifacts directly to the GitHub Release.
+
+The **android-bridge** workflow (`.github/workflows/android-bridge.yml`) also runs on **`release` (published)** and attaches **`PolarH10Bridge-debug-<tag>.apk`** to the same release, so the phone bridge download stays alongside the desktop packages.

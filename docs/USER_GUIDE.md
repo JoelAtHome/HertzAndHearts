@@ -42,7 +42,7 @@ When to use this mode:
 - Existing apps can connect to H10 and record/forward data (for example MQTT-oriented logger apps), but compatibility with HnH's live protocol is not guaranteed out of the box.
 - Recommended path: test an existing Android app first; if live RR/ECG forwarding into HnH is not stable, use a dedicated lightweight Android bridge built with Polar BLE SDK.
 - The in-repo reference project is `Android Bridge App/PolarH10Bridge`.
-- Install/download options are in `docs/PHONE_BRIDGE_QUICKSTART.md` (GitHub Actions artifact or local build).
+- Install/download options are in `docs/PHONE_BRIDGE_QUICKSTART.md` (GitHub Releases APK, optional Actions artifact, or local build).
 
 ## 2) Start and Run a Session
 

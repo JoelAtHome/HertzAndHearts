@@ -2,6 +2,9 @@ name: android-bridge
 
 on:
   workflow_dispatch:
+  release:
+    types:
+      - published
   push:
     branches:
       - main
@@ -47,3 +50,25 @@ jobs:
         with:
           name: PolarH10Bridge-debug-apk
           path: Android Bridge App/PolarH10Bridge/app/build/outputs/apk/debug/app-debug.apk
+
+  upload-to-release:
+    needs: build-debug-apk
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download debug APK artifact
+        uses: actions/download-artifact@v7
+        with:
+          name: PolarH10Bridge-debug-apk
+          path: apk
+
+      - name: Attach APK to GitHub release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          test -f apk/app-debug.apk
+          cp apk/app-debug.apk "PolarH10Bridge-debug-${{ github.ref_name }}.apk"
+          gh release upload "${{ github.ref_name }}" "PolarH10Bridge-debug-${{ github.ref_name }}.apk" --clobber

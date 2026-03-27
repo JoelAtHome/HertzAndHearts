@@ -19,16 +19,21 @@ This guide gets `Phone Bridge` mode running with the least friction.
 
 Choose one route:
 
-### A) Download prebuilt APK from GitHub Actions (recommended for most users)
+### A) Download prebuilt APK from GitHub Releases (recommended for most users)
+
+1. Open [Releases](https://github.com/JoelAtHome/HertzAndHearts/releases).
+2. Choose the release you are matching to Hertz & Hearts on the PC.
+3. Download **`PolarH10Bridge-debug-<tag>.apk`**.
+4. Copy it to your phone and install (enable install from unknown sources for your file manager or browser if Android asks).
+
+### B) Download from GitHub Actions (bleeding-edge / not on a release yet)
 
 1. Open the repo Actions tab and select workflow `android-bridge`.
 2. Open the latest successful run for `main`.
 3. Download artifact `PolarH10Bridge-debug-apk`.
-4. Extract and copy `app-debug.apk` to your phone.
-5. On Android, enable install from unknown sources for your file manager/browser.
-6. Install the APK.
+4. Extract and copy `app-debug.apk` to your phone, then install as above.
 
-### B) Build locally from source
+### C) Build locally from source
 
 1. Open `Android Bridge App/PolarH10Bridge` in Android Studio.
 2. Let Gradle sync finish.
