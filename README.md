@@ -38,6 +38,15 @@ Cardiac theory notes (QRS + HRV compendium, Markdown):
 - Prebuilt artifacts are published in GitHub Releases:
   - https://github.com/JoelAtHome/HertzAndHearts/releases
 
+## Phone Bridge (Android)
+
+- Setup guide:
+  - `docs/PHONE_BRIDGE_QUICKSTART.md`
+- Download the latest bridge APK from GitHub Actions:
+  - https://github.com/JoelAtHome/HertzAndHearts/actions/workflows/android-bridge.yml
+- Artifact name to download from a successful run:
+  - `PolarH10Bridge-debug-apk` (contains `app-debug.apk`)
+
 ## Compatible Sensors
 
 - Polar H7, H9, H10
