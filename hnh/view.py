@@ -5687,7 +5687,8 @@ class View(QMainWindow):
         self.address_menu = QComboBox()
         self.bridge_host_combo = QComboBox()
         self.bridge_host_combo.setEditable(True)
-        self.bridge_host_combo.setMinimumWidth(180)
+        self.bridge_host_combo.setMinimumWidth(360)
+        self.bridge_host_combo.setMaximumWidth(360)
         self.bridge_host_combo.setEditText(
             (self._saved_bridge_host or "").strip() or PHONE_BRIDGE_HOST_DEFAULT
         )
