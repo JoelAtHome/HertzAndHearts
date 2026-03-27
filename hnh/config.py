@@ -117,6 +117,11 @@ SESSION_SAVE_PATH: Final[str] = ""
 # Open session folder in file manager after Stop & Save.
 OPEN_SESSION_FOLDER_ON_SAVE: Final[bool] = True
 
+# Live connection source for the toolbar selector: "ble" or "phone".
+CONNECTION_MODE_DEFAULT: Final[str] = "ble"
+PHONE_BRIDGE_HOST_DEFAULT: Final[str] = "127.0.0.1"
+PHONE_BRIDGE_PORT_DEFAULT: Final[int] = 8765
+
 # Number of seconds of beats averaged when smoothing the RMSSD chart
 # line.  Larger = smoother trace, smaller = more beat-to-beat detail.
 SMOOTH_SECONDS: Final[int] = 18

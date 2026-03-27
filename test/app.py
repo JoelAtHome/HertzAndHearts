@@ -54,7 +54,12 @@ class MockSensorScanner(QObject):
 
 class MockSensorClient(QObject):
     ibi_update = Signal(object)
+    ecg_update = Signal(object)
+    ecg_ready = Signal()
     status_update = Signal(str)
+    battery_update = Signal(int)
+    verity_limited_support = Signal()
+    diagnostic_logged = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -64,15 +69,25 @@ class MockSensorClient(QObject):
         self.timer = QTimer()
         self.timer.setInterval(self.mean_ibi)
         self.timer.timeout.connect(self.simulate_ibi)
+        self.client = None
 
     def connect_client(self, sensor):
         self.status_update.emit(
             f"Connecting to sensor at {get_sensor_address(sensor)}."
         )
+        self.client = object()
+        self.ecg_ready.emit()
+        self.timer.start()
+
+    def connect_host(self, host: str, port: int):
+        self.status_update.emit(f"Connecting to Phone Bridge at {host}:{int(port)}...")
+        self.client = object()
+        self.ecg_ready.emit()
         self.timer.start()
 
     def disconnect_client(self):
         self.status_update.emit("Disconnecting from sensor.")
+        self.client = None
         self.timer.stop()
 
     def simulate_ibi(self):

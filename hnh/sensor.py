@@ -1,6 +1,9 @@
+import json
+import socket
 import struct
 import os
 import platform
+import time
 import numpy as np
 from time import perf_counter_ns
 from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer, qVersion
@@ -14,10 +17,17 @@ from PySide6.QtBluetooth import (
     QBluetoothDeviceInfo,
     QLowEnergyDescriptor,
 )
+from PySide6.QtNetwork import (
+    QAbstractSocket,
+    QHostAddress,
+    QNetworkInterface,
+    QNetworkProxy,
+    QTcpSocket,
+)
 from math import ceil
 from typing import Union
 from hnh.utils import get_sensor_address, get_sensor_remote_address
-from hnh.config import COMPATIBLE_SENSORS, DEBUG
+from hnh.config import COMPATIBLE_SENSORS, DEBUG, PHONE_BRIDGE_PORT_DEFAULT
 from hnh.perf_probe import get_perf_probe
 from hnh.ble_diagnostics import append_ble_diagnostic
 
@@ -182,6 +192,288 @@ class SensorScanner(QObject):
             self.status_update.emit(msg)
         else:
             print(error)
+
+
+class PhoneBridgeClient(QObject):
+    """
+    Connect to a phone bridge over Wi-Fi/TCP.
+
+    The bridge sends newline-delimited JSON objects:
+      {"type":"status","message":"...","connected":true}
+      {"type":"rr","rr_ms":812}
+      {"type":"ecg","samples_mv":[0.12,0.18,...]}
+    """
+
+    ibi_update = Signal(object)
+    ecg_update = Signal(object)
+    ecg_ready = Signal()
+    status_update = Signal(str)
+    battery_update = Signal(int)
+    verity_limited_support = Signal()
+    diagnostic_logged = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.client: Union[None, QTcpSocket] = None
+        self._buffer = bytearray()
+        self._host = ""
+        self._port = 0
+        self._ecg_announced = False
+        self._rr_frames_seen = 0
+        self._ecg_frames_seen = 0
+
+    def connect_host(self, host: str, port: int) -> None:
+        if self.client is not None:
+            self.status_update.emit("Phone Bridge already connected.")
+            return
+        host = (host or "").strip()
+        if not host:
+            self.status_update.emit("Phone Bridge host is empty.")
+            return
+        if port <= 0 or port > 65535:
+            self.status_update.emit("Phone Bridge port must be 1-65535.")
+            return
+        sock = QTcpSocket(self)
+        self.client = sock
+        self._buffer.clear()
+        self._ecg_announced = False
+        self._rr_frames_seen = 0
+        self._ecg_frames_seen = 0
+        self._host = host
+        self._port = int(port)
+        sock.connected.connect(self._on_connected)
+        sock.disconnected.connect(self._on_disconnected)
+        sock.readyRead.connect(self._on_ready_read)
+        sock.errorOccurred.connect(self._on_error)
+        # Avoid system HTTP/SOCKS proxy routing LAN IPs (can cause spurious timeouts).
+        sock.setProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
+        host_addr = QHostAddress(host)
+        if host_addr.isNull():
+            sock.connectToHost(host, self._port)
+        else:
+            sock.connectToHost(host_addr, self._port)
+        self.status_update.emit(f"Connecting to Phone Bridge at {host}:{self._port}...")
+
+    def disconnect_client(self) -> None:
+        if self.client is None:
+            return
+        sock = self.client
+        self.client = None
+        try:
+            sock.readyRead.disconnect(self._on_ready_read)
+        except Exception:
+            pass
+        try:
+            sock.disconnected.disconnect(self._on_disconnected)
+        except Exception:
+            pass
+        try:
+            sock.connected.disconnect(self._on_connected)
+        except Exception:
+            pass
+        try:
+            sock.errorOccurred.disconnect(self._on_error)
+        except Exception:
+            pass
+        if sock.state() != QAbstractSocket.UnconnectedState:
+            sock.disconnectFromHost()
+            if sock.state() != QAbstractSocket.UnconnectedState:
+                sock.abort()
+        sock.deleteLater()
+        self._buffer.clear()
+        self._ecg_announced = False
+        self._rr_frames_seen = 0
+        self._ecg_frames_seen = 0
+        self.status_update.emit("Disconnected from Phone Bridge.")
+        self.battery_update.emit(-1)
+
+    def _on_connected(self) -> None:
+        self.status_update.emit(f"Connected to Phone Bridge ({self._host}:{self._port}).")
+        self.battery_update.emit(-1)
+
+    def _on_disconnected(self) -> None:
+        had_client = self.client is not None
+        if self.client is not None:
+            self.client.deleteLater()
+            self.client = None
+        self._buffer.clear()
+        self._ecg_announced = False
+        self._rr_frames_seen = 0
+        self._ecg_frames_seen = 0
+        self.battery_update.emit(-1)
+        if had_client:
+            self.status_update.emit(
+                "Phone Bridge disconnected (remote closed connection)."
+            )
+
+    def _on_error(self, _error) -> None:
+        if self.client is None:
+            return
+        msg = self.client.errorString()
+        try:
+            err_code = int(self.client.error())
+            self.status_update.emit(f"Phone Bridge error [{err_code}]: {msg}")
+        except Exception:
+            self.status_update.emit(f"Phone Bridge error: {msg}")
+
+    def _on_ready_read(self) -> None:
+        if self.client is None:
+            return
+        self._buffer.extend(bytes(self.client.readAll()))
+        while True:
+            newline_idx = self._buffer.find(b"\n")
+            if newline_idx < 0:
+                break
+            raw = bytes(self._buffer[:newline_idx]).strip()
+            del self._buffer[:newline_idx + 1]
+            if not raw:
+                continue
+            try:
+                payload = json.loads(raw.decode("utf-8"))
+            except Exception:
+                continue
+            self._handle_bridge_message(payload)
+
+    def _handle_bridge_message(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        msg_type = str(payload.get("type", "")).strip().lower()
+        if msg_type == "status":
+            text = str(payload.get("message", "")).strip()
+            if text:
+                self.status_update.emit(text)
+            battery = payload.get("battery")
+            if isinstance(battery, (int, float)):
+                level = max(0, min(100, int(battery)))
+                self.battery_update.emit(level)
+            return
+        if msg_type == "rr":
+            rr_ms = payload.get("rr_ms", payload.get("ibi_ms"))
+            try:
+                ibi = int(round(float(rr_ms)))
+            except Exception:
+                return
+            if ibi > 0:
+                self._rr_frames_seen += 1
+                if DEBUG and (self._rr_frames_seen % 100 == 0):
+                    print(f"[PhoneBridge] RR frames received: {self._rr_frames_seen}")
+                self.ibi_update.emit(ibi)
+            return
+        if msg_type == "ecg":
+            samples = payload.get("samples_mv", payload.get("samples"))
+            if not isinstance(samples, list) or not samples:
+                return
+            out: list[float] = []
+            for sample in samples:
+                try:
+                    out.append(float(sample))
+                except Exception:
+                    continue
+            if not out:
+                return
+            self._ecg_frames_seen += 1
+            if DEBUG and (
+                self._ecg_frames_seen == 1 or (self._ecg_frames_seen % 50 == 0)
+            ):
+                preview = ", ".join(f"{x:.3f}" for x in out[:3])
+                print(
+                    f"[PhoneBridge] ECG frame {self._ecg_frames_seen}: "
+                    f"n={len(out)} first3=[{preview}]"
+                )
+            if not self._ecg_announced:
+                self._ecg_announced = True
+                self.ecg_ready.emit()
+                self.status_update.emit("Phone Bridge ECG stream started.")
+            self.ecg_update.emit(out)
+
+
+# UDP: Hertz & Hearts broadcasts on PHONE_BRIDGE_APP_DISCOVERY_PORT; the Android
+# Polar H10 bridge app responds (see discover_phone_bridge_hosts).
+PHONE_BRIDGE_APP_DISCOVERY_PORT: int = 45124
+PHONE_BRIDGE_APP_DISCOVER: bytes = b"HnH_PHONE_BRIDGE_DISCOVER_V1\n"
+
+
+def _lan_ipv4_broadcast_strings() -> list[str]:
+    out: list[str] = ["255.255.255.255"]
+    for iface in QNetworkInterface.allInterfaces():
+        flags = iface.flags()
+        if not (
+            flags & QNetworkInterface.InterfaceFlag.IsUp
+            and flags & QNetworkInterface.InterfaceFlag.IsRunning
+        ):
+            continue
+        if flags & QNetworkInterface.InterfaceFlag.IsLoopBack:
+            continue
+        for ae in iface.addressEntries():
+            ip = ae.ip()
+            if ip.protocol() != QAbstractSocket.NetworkLayerProtocol.IPv4Protocol:
+                continue
+            b = ae.broadcast()
+            if b.isNull():
+                continue
+            s = b.toString()
+            if s and s not in out:
+                out.append(s)
+    seen: set[str] = set()
+    dedup: list[str] = []
+    for a in out:
+        if a not in seen:
+            seen.add(a)
+            dedup.append(a)
+    return dedup
+
+
+def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object]]:
+    """
+    Discover Android PolarH10Bridge instances on the LAN. Returns:
+    [{"ip": str, "hostname": str, "port": int}, ...]
+    """
+    found: dict[str, dict[str, object]] = {}
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        sock.bind(("", 0))
+        sock.settimeout(0.35)
+        for addr in _lan_ipv4_broadcast_strings():
+            try:
+                sock.sendto(PHONE_BRIDGE_APP_DISCOVER, (addr, PHONE_BRIDGE_APP_DISCOVERY_PORT))
+            except OSError:
+                continue
+        deadline = time.monotonic() + timeout_s
+        while time.monotonic() < deadline:
+            try:
+                data, raddr = sock.recvfrom(8192)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            ip = raddr[0]
+            try:
+                line = bytes(data).strip().decode("utf-8", errors="replace")
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            if str(payload.get("app", "")) != "PolarH10Bridge":
+                continue
+            if str(payload.get("role", "")) != "phone_bridge":
+                continue
+            try:
+                port = int(payload.get("port", PHONE_BRIDGE_PORT_DEFAULT))
+            except (TypeError, ValueError):
+                port = int(PHONE_BRIDGE_PORT_DEFAULT)
+            if port < 1 or port > 65535:
+                port = int(PHONE_BRIDGE_PORT_DEFAULT)
+            host = str(payload.get("hostname", "")).strip() or ip
+            found[ip] = {"ip": ip, "hostname": host, "port": port}
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+    return sorted(found.values(), key=lambda d: str(d.get("hostname", "")).lower())
 
 
 class SensorClient(QObject):
@@ -702,7 +994,7 @@ class SensorClient(QObject):
                 message="PMD ECG start command written.",
                 platform=platform.system(),
             )
-            self.status_update.emit("ECG streaming started.")
+            self.status_update.emit("ECG stream requested; waiting for data.")
         else:
             msg = "Cannot start ECG: PMD control characteristic not found."
             print(msg)
@@ -789,6 +1081,7 @@ class SensorClient(QObject):
                     sample_count=len(samples),
                     platform=platform.system(),
                 )
+                self.status_update.emit("ECG data stream active.")
                 self.ecg_ready.emit()
             self.ecg_update.emit(samples)
 

@@ -172,9 +172,17 @@ class Model(QObject):
     @Slot(object)
     def update_sensors(self, sensors: list[QBluetoothDeviceInfo]):
         self.sensors = sensors
+        labels: list[str] = []
+        for sensor in sensors:
+            if hasattr(sensor, "name") and hasattr(sensor, "address"):
+                labels.append(f"{sensor.name()}, {get_sensor_address(sensor)}")
+                continue
+            text = str(sensor).strip()
+            if text:
+                labels.append(text)
         self.addresses_update.emit(
             NamedSignal(
-                "Sensors", [f"{s.name()}, {get_sensor_address(s)}" for s in sensors]
+                "Sensors", labels
             )
         )
 

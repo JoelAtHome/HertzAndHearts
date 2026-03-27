@@ -39,7 +39,12 @@ from collections import deque
 from typing import Iterable
 from hnh.utils import get_sensor_address, NamedSignal
 from hnh.ble_diagnostics import ble_diagnostics_log_path
-from hnh.sensor import SensorScanner, SensorClient
+from hnh.sensor import (
+    PhoneBridgeClient,
+    SensorClient,
+    SensorScanner,
+    discover_phone_bridge_hosts,
+)
 from hnh.logger import Logger
 from hnh.pacer import Pacer
 from hnh.model import Model
@@ -53,6 +58,7 @@ from hnh.config import (
     RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
     SIGNAL_POPUP_AUTO_DISMISS_MS,
     PSD_VAGAL_BAND,
+    CONNECTION_MODE_DEFAULT, PHONE_BRIDGE_HOST_DEFAULT, PHONE_BRIDGE_PORT_DEFAULT,
 )
 from hnh.settings import (
     Settings,
@@ -92,6 +98,67 @@ except Exception:
 warnings.filterwarnings("ignore", category=UserWarning)
 pg.setConfigOptions(antialias=True)
 
+
+class PhoneBridgeFindWorker(QThread):
+    """Runs discover_phone_bridge_hosts() off the GUI thread."""
+
+    finished_ok = Signal(object)
+    finished_err = Signal(str)
+
+    def run(self) -> None:
+        try:
+            phones = discover_phone_bridge_hosts(2.5)
+            self.finished_ok.emit(phones)
+        except Exception as exc:
+            self.finished_err.emit(str(exc))
+
+
+class PacerWorker(QObject):
+    """Drives breathing pacer geometry on a dedicated thread."""
+
+    coordinates_ready = Signal(list, list)
+
+    def __init__(self, fps: int = 15):
+        super().__init__()
+        self._pacer = Pacer()
+        self._fps = max(1, int(fps))
+        self._timer: QTimer | None = None
+        self._breathing_rate = 6.0
+        self._enabled = True
+
+    @Slot()
+    def start(self) -> None:
+        if self._timer is not None:
+            return
+        self._timer = QTimer(self)
+        self._timer.setTimerType(Qt.PreciseTimer)
+        self._timer.setInterval(max(10, int(round(1000.0 / float(self._fps)))))
+        self._timer.timeout.connect(self._tick)
+        self._timer.start()
+
+    @Slot()
+    def stop(self) -> None:
+        if self._timer is None:
+            return
+        self._timer.stop()
+        self._timer.deleteLater()
+        self._timer = None
+
+    @Slot(float)
+    def set_breathing_rate(self, rate: float) -> None:
+        self._breathing_rate = float(rate)
+
+    @Slot(bool)
+    def set_enabled(self, enabled: bool) -> None:
+        self._enabled = bool(enabled)
+
+    @Slot()
+    def _tick(self) -> None:
+        if not self._enabled:
+            return
+        x, y = self._pacer.update(self._breathing_rate)
+        self.coordinates_ready.emit(x, y)
+
 BLUE = QColor(135, 206, 250)
 WHITE = QColor(255, 255, 255)
 GREEN = QColor(0, 255, 0)
@@ -102,6 +169,9 @@ PACER_WIDGET_SIZE = 134
 # Tier 1 trend-guidance prefs (per profile; see WISHLIST progressive disclosure roadmap)
 TIER1_PREF_MORNING_BASELINE = "tier1_morning_baseline_protocol"
 TIER1_PREF_RECOVERY_SESSIONS = "tier1_recovery_baseline_sessions"
+CONNECTION_PREF_MODE = "connection_mode"
+CONNECTION_PREF_PHONE_HOST = "phone_bridge_host"
+CONNECTION_PREF_PHONE_PORT = "phone_bridge_port"
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
 
@@ -636,6 +706,7 @@ class ProfileSelectionDialog(QDialog):
         buttons.addWidget(self._new_btn)
         buttons.addStretch()
         self._continue_btn = QPushButton("Continue")
+        self._continue_btn.setAutoDefault(True)
         self._continue_btn.setDefault(True)
         self._continue_btn.clicked.connect(self._accept_selected)
         buttons.addWidget(self._continue_btn)
@@ -653,9 +724,12 @@ class ProfileSelectionDialog(QDialog):
         super().showEvent(event)
         self._center_on_screen()
         # Ensure Enter activates Continue on first show, not the profile dropdown.
-        QTimer.singleShot(
-            0, lambda: self._continue_btn.setFocus(Qt.FocusReason.OtherFocusReason)
-        )
+        def _focus_primary_action():
+            self._continue_btn.setDefault(True)
+            self._continue_btn.setAutoDefault(True)
+            self._continue_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+
+        QTimer.singleShot(0, _focus_primary_action)
 
     def _center_on_screen(self):
         screen = self.screen()
@@ -5362,6 +5436,9 @@ class View(QMainWindow):
             self._profile_store.get_last_active_profile() or "Admin"
         )
         self._profile_store.ensure_profile(self._session_profile_id)
+        self._saved_connection_mode, self._saved_bridge_host, self._saved_bridge_port = (
+            self._load_connection_prefs(self._session_profile_id)
+        )
 
         self.setWindowTitle(f"Hertz & Hearts ({_display_version_label(version)})")
         self.setWindowIcon(QIcon(":/logo.png"))
@@ -5385,12 +5462,12 @@ class View(QMainWindow):
         self.signals = ViewSignals()
         self.signals.request_buffer_reset.connect(self._handle_stream_reset)
         self.pacer = Pacer()
-        self.pacer_timer = QTimer(self)
-        self._pacer_fps = 15
-        self.pacer_timer.setInterval(int(1000 / self._pacer_fps))
-        self.pacer_timer.setTimerType(Qt.PreciseTimer)
-        self.pacer_timer.timeout.connect(self.plot_pacer_disk)
-        self._last_pacer_tune_sec = 0.0
+        self._pacer_thread = QThread(self)
+        self._pacer_worker = PacerWorker(fps=15)
+        self._pacer_worker.moveToThread(self._pacer_thread)
+        self._pacer_thread.started.connect(self._pacer_worker.start)
+        self._pacer_thread.finished.connect(self._pacer_worker.deleteLater)
+        self._pacer_worker.coordinates_ready.connect(self._on_pacer_coordinates)
         self._chart_update_timer = QTimer(self)
         self._chart_update_timer.setInterval(125)
         self._chart_update_timer.setTimerType(Qt.PreciseTimer)
@@ -5410,22 +5487,20 @@ class View(QMainWindow):
         self.scanner.scanning_state.connect(self._on_scan_state_changed)
         self.scanner.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
 
-        self.sensor = SensorClient()
-        self.sensor.ibi_update.connect(self.model.update_ibis_buffer)
-        self.sensor.verity_limited_support.connect(self._on_verity_limited_support)
-        self.sensor.ecg_update.connect(self.model.update_ecg_samples)
-        self.sensor.status_update.connect(self.show_status)
-        self.sensor.battery_update.connect(self._update_battery_display)
-        self.sensor.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
+        self.ble_sensor = SensorClient()
+        self.phone_bridge = PhoneBridgeClient()
+        self._phone_find_worker: PhoneBridgeFindWorker | None = None
+        self._connection_mode = self._saved_connection_mode
+        self.sensor = self.phone_bridge if self._connection_mode == "phone" else self.ble_sensor
+        self._bind_sensor_signals(self.sensor)
 
         self.ecg_window = EcgWindow()
         self.qtc_window = QtcWindow()
         self.model.qtc_update.connect(lambda data: self.qtc_window.append_payload(data.value))
-        self.sensor.ecg_update.connect(self.ecg_window.append_samples)
         self.ecg_window.cursor_measurement_captured.connect(self._on_ecg_cursor_measurement)
         self.ecg_window.image_captured.connect(self._on_ecg_image_captured)
         self.qtc_window.image_captured.connect(self._on_qtc_image_captured)
-        self.sensor.ecg_ready.connect(self._on_ecg_ready)
+        self._bind_sensor_window_signals(self.sensor)
         self.ecg_window.closed.connect(self._on_ecg_window_closed)
         self.qtc_window.closed.connect(self._on_qtc_window_closed)
         self.poincare_window = PoincareWindow()
@@ -5605,7 +5680,28 @@ class View(QMainWindow):
         # Buttons
         self.scan_button = QPushButton("Scan")
         self.scan_button.clicked.connect(self._on_scan_clicked)
+        self.connection_mode_combo = QComboBox()
+        self.connection_mode_combo.addItem("PC BLE", "ble")
+        self.connection_mode_combo.addItem("Phone Bridge", "phone")
         self.address_menu = QComboBox()
+        self.bridge_host_combo = QComboBox()
+        self.bridge_host_combo.setEditable(True)
+        self.bridge_host_combo.setMinimumWidth(135)
+        self.bridge_host_combo.setEditText(
+            (self._saved_bridge_host or "").strip() or PHONE_BRIDGE_HOST_DEFAULT
+        )
+        _bh_le = self.bridge_host_combo.lineEdit()
+        if _bh_le is not None:
+            _bh_le.setPlaceholderText("Phone IP")
+        self.bridge_scan_phones_btn = QPushButton("Find phones")
+        self.bridge_scan_phones_btn.setToolTip(
+            "Search your LAN for the Polar H10 bridge app on Android."
+        )
+        self.bridge_scan_phones_btn.setMaximumWidth(88)
+        self.bridge_scan_phones_btn.clicked.connect(self._on_find_phone_bridges_clicked)
+        self.bridge_port_spin = QSpinBox()
+        self.bridge_port_spin.setRange(1, 65535)
+        self.bridge_port_spin.setValue(int(self._saved_bridge_port))
         # Require a fresh scan each launch to avoid stale/ghost sensor entries.
         self._preloaded_sensor_text: str | None = None
         self.battery_label = QLabel("\u2014")  # em dash when unknown, value% when connected
@@ -5625,6 +5721,14 @@ class View(QMainWindow):
         self.disconnect_button = QPushButton("Disconnect")
         self.disconnect_button.setEnabled(False)
         self.disconnect_button.clicked.connect(self.disconnect_sensor)
+        self.connection_mode_combo.currentIndexChanged.connect(self._on_connection_mode_changed)
+        self.connection_mode_combo.setCurrentIndex(1 if self._connection_mode == "phone" else 0)
+        self.bridge_host_combo.currentIndexChanged.connect(
+            self._on_phone_bridge_endpoint_changed
+        )
+        if _bh_le is not None:
+            _bh_le.editingFinished.connect(self._on_phone_bridge_endpoint_changed)
+        self.bridge_port_spin.valueChanged.connect(self._on_phone_bridge_endpoint_changed)
 
         self.reset_button = QPushButton("Reset Baseline")
         self.reset_button.setEnabled(False)
@@ -5991,9 +6095,19 @@ class View(QMainWindow):
         )
         self.address_menu.setMaximumWidth(200)
         self.address_menu.setStyleSheet("font-size: 11px;")
+        self.connection_mode_combo.setMaximumWidth(130)
+        self.connection_mode_combo.setStyleSheet("font-size: 11px;")
+        self.bridge_host_combo.setStyleSheet("font-size: 11px;")
+        self.bridge_scan_phones_btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.bridge_port_spin.setMaximumWidth(82)
+        self.bridge_port_spin.setStyleSheet("font-size: 11px;")
 
+        toolbar.addWidget(self.connection_mode_combo)
         toolbar.addWidget(self.scan_button)
         toolbar.addWidget(self.address_menu)
+        toolbar.addWidget(self.bridge_host_combo)
+        toolbar.addWidget(self.bridge_scan_phones_btn)
+        toolbar.addWidget(self.bridge_port_spin)
         toolbar.addWidget(self.connect_button)
         toolbar.addWidget(self.disconnect_button)
         toolbar.addWidget(self.battery_label)
@@ -6070,9 +6184,13 @@ class View(QMainWindow):
         self.statusbar.addPermanentWidget(self.health_indicator)
         self.statusbar.addPermanentWidget(self.health_label)
         self.logger_thread.start()
-        self.pacer_timer.start()
+        self._pacer_worker.set_breathing_rate(float(self.model.breathing_rate))
+        self._pacer_worker.set_enabled(bool(self.pacer_toggle.isChecked()))
+        self._pacer_thread.start()
+        self._update_connection_mode_ui()
         self._apply_connect_ready_state()
         self._start_connect_hints()
+        self._update_connection_mode_ui()
         self._update_session_actions()
         self._load_tier1_morning_baseline_pref()
         self._focus_scan_if_needed()
@@ -6181,7 +6299,66 @@ class View(QMainWindow):
                 limit=200,
             )
             self._history_window.set_context(self._session_profile_id, sessions)
+        if hasattr(self, "connection_mode_combo"):
+            mode, host, port = self._load_connection_prefs(self._session_profile_id)
+            self.bridge_host_combo.blockSignals(True)
+            self.bridge_host_combo.clear()
+            self.bridge_host_combo.addItem(host, host)
+            self.bridge_host_combo.setCurrentIndex(0)
+            self.bridge_host_combo.blockSignals(False)
+            self.bridge_port_spin.blockSignals(True)
+            self.bridge_port_spin.setValue(port)
+            self.bridge_port_spin.blockSignals(False)
+            self.connection_mode_combo.blockSignals(True)
+            self.connection_mode_combo.setCurrentIndex(1 if mode == "phone" else 0)
+            self.connection_mode_combo.blockSignals(False)
+            self._set_connection_mode(mode)
+            self._apply_connect_ready_state()
         self._load_tier1_morning_baseline_pref()
+
+    def _load_connection_prefs(self, profile_id: str) -> tuple[str, str, int]:
+        default_mode = (
+            "phone" if str(CONNECTION_MODE_DEFAULT).strip().lower() == "phone" else "ble"
+        )
+        raw_mode = self._profile_store.get_profile_pref(
+            profile_id, CONNECTION_PREF_MODE, default_mode
+        )
+        mode = "phone" if str(raw_mode).strip().lower() == "phone" else "ble"
+        host = self._profile_store.get_profile_pref(
+            profile_id, CONNECTION_PREF_PHONE_HOST, PHONE_BRIDGE_HOST_DEFAULT
+        ).strip()
+        if not host:
+            host = PHONE_BRIDGE_HOST_DEFAULT
+        raw_port = self._profile_store.get_profile_pref(
+            profile_id, CONNECTION_PREF_PHONE_PORT, str(int(PHONE_BRIDGE_PORT_DEFAULT))
+        )
+        try:
+            port = int(str(raw_port).strip())
+        except (TypeError, ValueError):
+            port = int(PHONE_BRIDGE_PORT_DEFAULT)
+        if port < 1 or port > 65535:
+            port = int(PHONE_BRIDGE_PORT_DEFAULT)
+        return mode, host, port
+
+    def _persist_connection_prefs(self) -> None:
+        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
+        if not profile_id:
+            return
+        self._profile_store.set_profile_pref(
+            profile_id,
+            CONNECTION_PREF_MODE,
+            "phone" if self._connection_mode == "phone" else "ble",
+        )
+        self._profile_store.set_profile_pref(
+            profile_id,
+            CONNECTION_PREF_PHONE_HOST,
+            self._phone_bridge_host_value().strip() or PHONE_BRIDGE_HOST_DEFAULT,
+        )
+        self._profile_store.set_profile_pref(
+            profile_id,
+            CONNECTION_PREF_PHONE_PORT,
+            str(int(self.bridge_port_spin.value())),
+        )
 
     def _load_tier1_morning_baseline_pref(self) -> None:
         if not getattr(self, "_morning_baseline_cb", None):
@@ -6325,6 +6502,14 @@ class View(QMainWindow):
             self._disclaimer_ack_mode = "profile_skip_preference"
         if self._should_show_linux_pmd_guidance_for_profile(selected_profile):
             self._show_linux_pmd_guidance_dialog(selected_profile)
+        # After the initial dialogs, set a deterministic initial focus:
+        # - Phone Bridge mode: focus Connect (if enabled)
+        # - Otherwise: let Scan be the primary focus when appropriate
+        self._apply_connect_ready_state()
+        if self._connection_mode == "phone":
+            QTimer.singleShot(0, self._focus_connect_if_ready)
+        else:
+            QTimer.singleShot(0, self._focus_scan_if_needed)
 
     def _show_maximized_fit(self):
         """Size window to available screen (avoid showMaximized which can push window off-screen on Windows)."""
@@ -6332,6 +6517,13 @@ class View(QMainWindow):
 
     def _show_main_window_fullscreen(self):
         """Show main window filling available screen (used after startup flow)."""
+        # On Windows, use true maximized state so the user sees the expected
+        # "maximized" window behavior (previously we used setGeometry only).
+        # We still keep the existing on-screen safety net in showEvent().
+        if platform.system() == "Windows":
+            self._maximized_once = True
+            self.showMaximized()
+            return
         screen = self.screen()
         if screen is None:
             app = QApplication.instance()
@@ -6455,10 +6647,195 @@ class View(QMainWindow):
             self.signals.save_recording.emit()
             self.logger_thread.quit()
             self.logger_thread.wait(2000)
+        if self._pacer_thread.isRunning():
+            self._pacer_worker.stop()
+            self._pacer_thread.quit()
+            self._pacer_thread.wait(1000)
         super().closeEvent(event)
 
     def _is_sensor_connected(self) -> bool:
         return self.sensor.client is not None
+
+    def _bind_sensor_signals(self, sensor_client) -> None:
+        sensor_client.ibi_update.connect(self.model.update_ibis_buffer)
+        sensor_client.verity_limited_support.connect(self._on_verity_limited_support)
+        sensor_client.ecg_update.connect(self.model.update_ecg_samples)
+        sensor_client.status_update.connect(self.show_status)
+        sensor_client.battery_update.connect(self._update_battery_display)
+        sensor_client.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
+
+    def _unbind_sensor_signals(self, sensor_client) -> None:
+        try:
+            sensor_client.ibi_update.disconnect(self.model.update_ibis_buffer)
+        except Exception:
+            pass
+        try:
+            sensor_client.verity_limited_support.disconnect(self._on_verity_limited_support)
+        except Exception:
+            pass
+        try:
+            sensor_client.ecg_update.disconnect(self.model.update_ecg_samples)
+        except Exception:
+            pass
+        try:
+            sensor_client.status_update.disconnect(self.show_status)
+        except Exception:
+            pass
+        try:
+            sensor_client.battery_update.disconnect(self._update_battery_display)
+        except Exception:
+            pass
+        try:
+            sensor_client.diagnostic_logged.disconnect(self._on_ble_diagnostic_logged)
+        except Exception:
+            pass
+
+    def _bind_sensor_window_signals(self, sensor_client) -> None:
+        sensor_client.ecg_update.connect(self.ecg_window.append_samples)
+        sensor_client.ecg_ready.connect(self._on_ecg_ready)
+
+    def _unbind_sensor_window_signals(self, sensor_client) -> None:
+        try:
+            sensor_client.ecg_update.disconnect(self.ecg_window.append_samples)
+        except Exception:
+            pass
+        try:
+            sensor_client.ecg_ready.disconnect(self._on_ecg_ready)
+        except Exception:
+            pass
+
+    def _set_connection_mode(self, mode: str) -> None:
+        requested = "phone" if str(mode).strip().lower() == "phone" else "ble"
+        if requested == self._connection_mode:
+            return
+        if self._is_sensor_connected() or self._connect_attempt_timer.isActive():
+            self.connection_mode_combo.setCurrentIndex(
+                1 if self._connection_mode == "phone" else 0
+            )
+            self.show_status("Disconnect current source before switching connection mode.")
+            return
+        self._unbind_sensor_signals(self.sensor)
+        self._unbind_sensor_window_signals(self.sensor)
+        self.sensor = self.phone_bridge if requested == "phone" else self.ble_sensor
+        if requested == "ble" and hasattr(self.sensor, "set_enable_pmd"):
+            self.sensor.set_enable_pmd(bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False)))
+        self._bind_sensor_signals(self.sensor)
+        self._bind_sensor_window_signals(self.sensor)
+        self._connection_mode = requested
+        if requested == "phone":
+            self.address_menu.clear()
+            self._pending_connect_target = None
+            self._is_scanning = False
+            self._scan_pulse_active = False
+            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+        self._persist_connection_prefs()
+        self._update_connection_mode_ui()
+        self._apply_connect_ready_state()
+
+    def _on_connection_mode_changed(self, _index: int) -> None:
+        mode = self.connection_mode_combo.currentData()
+        self._set_connection_mode(str(mode or "ble"))
+
+    def _on_phone_bridge_endpoint_changed(self, *_args) -> None:
+        self._persist_connection_prefs()
+        self._apply_connect_ready_state()
+
+    def _update_connection_mode_ui(self) -> None:
+        phone_mode = self._connection_mode == "phone"
+        self.scan_button.setEnabled(not phone_mode and self.sensor.client is None)
+        self.address_menu.setVisible(not phone_mode)
+        self.bridge_host_combo.setVisible(phone_mode)
+        self.bridge_scan_phones_btn.setVisible(phone_mode)
+        self.bridge_port_spin.setVisible(phone_mode)
+        self.bridge_host_combo.setEnabled(phone_mode)
+        self.bridge_scan_phones_btn.setEnabled(phone_mode)
+        self.bridge_port_spin.setEnabled(phone_mode)
+        self.scan_button.setToolTip(
+            "Scan for nearby Bluetooth heart sensors."
+            if not phone_mode else
+            "Scan is only available in PC BLE mode."
+        )
+        if phone_mode:
+            self._scan_pulse_active = False
+            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+
+    def _phone_bridge_host_value(self) -> str:
+        idx = self.bridge_host_combo.currentIndex()
+        if idx >= 0:
+            item_text = self.bridge_host_combo.itemText(idx)
+            if self.bridge_host_combo.currentText().strip() == item_text.strip():
+                d = self.bridge_host_combo.itemData(idx)
+                if d and isinstance(d, str) and d.strip():
+                    return d.strip()
+        raw = self.bridge_host_combo.currentText().strip()
+        m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", raw)
+        if m:
+            return m.group(1)
+        return raw
+
+    def _on_find_phone_bridges_clicked(self) -> None:
+        if self._connection_mode != "phone":
+            return
+        w = getattr(self, "_phone_find_worker", None)
+        if w is not None and w.isRunning():
+            return
+        self.bridge_scan_phones_btn.setEnabled(False)
+        self.show_status("Searching for phone bridges on the network…")
+        self._phone_find_worker = PhoneBridgeFindWorker(self)
+        self._phone_find_worker.finished_ok.connect(self._on_phone_find_finished)
+        self._phone_find_worker.finished_err.connect(self._on_phone_find_failed)
+        self._phone_find_worker.start()
+
+    def _on_phone_find_finished(self, phones: object) -> None:
+        self.bridge_scan_phones_btn.setEnabled(True)
+        try:
+            if self._phone_find_worker is not None:
+                self._phone_find_worker.deleteLater()
+        except Exception:
+            pass
+        self._phone_find_worker = None
+        if not isinstance(phones, list):
+            self.show_status("Phone discovery returned nothing.")
+            return
+        current = self._phone_bridge_host_value()
+        self.bridge_host_combo.blockSignals(True)
+        self.bridge_host_combo.clear()
+        for p in phones:
+            if not isinstance(p, dict):
+                continue
+            ip = str(p.get("ip", "")).strip()
+            if not ip:
+                continue
+            host = str(p.get("hostname", "")).strip() or ip
+            label = f"{host} ({ip})"
+            self.bridge_host_combo.addItem(label, ip)
+        self.bridge_host_combo.blockSignals(False)
+        idx = self.bridge_host_combo.findData(current)
+        if idx >= 0:
+            self.bridge_host_combo.setCurrentIndex(idx)
+        else:
+            self.bridge_host_combo.setEditText(current)
+        self._on_phone_bridge_endpoint_changed()
+        n = len(phones)
+        if n:
+            self.show_status(
+                f"Found {n} phone bridge app(s). Choose host/port above, then Connect."
+            )
+        else:
+            self.show_status(
+                "No phone bridge apps found. Check Wi‑Fi, firewall, "
+                "and that the Android bridge app is open."
+            )
+
+    def _on_phone_find_failed(self, msg: str) -> None:
+        self.bridge_scan_phones_btn.setEnabled(True)
+        try:
+            if self._phone_find_worker is not None:
+                self._phone_find_worker.deleteLater()
+        except Exception:
+            pass
+        self._phone_find_worker = None
+        self.show_status(f"Phone discovery failed: {msg}")
 
     def _ecg_path_active(self) -> bool:
         if platform.system() != "Linux":
@@ -6895,6 +7272,19 @@ class View(QMainWindow):
             self._show_post_session_support_prompt()
 
     def connect_sensor(self):
+        if self._connection_mode == "phone":
+            host = self._phone_bridge_host_value().strip()
+            port = int(self.bridge_port_spin.value())
+            self._stop_connect_hints()
+            self.connect_button.setEnabled(False)
+            self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+            self.disconnect_button.setEnabled(False)
+            self.sensor.connect_host(host, port)
+            self._connect_attempt_timer.start()
+            self._last_data_time = None
+            self._data_watchdog.stop()
+            self.show_status("Connecting to Phone Bridge... Please wait.")
+            return
         parsed = self._parse_sensor_menu_entry(self.address_menu.currentText())
         if parsed is None:
             self.show_status("No sensor selected. Click Scan, then select a sensor.")
@@ -7738,6 +8128,9 @@ class View(QMainWindow):
             self.show_status("Support reminder disabled for this profile.")
 
     def _on_scan_clicked(self):
+        if self._connection_mode == "phone":
+            self.show_status("Switch to PC BLE mode to scan for sensors.")
+            return
         self.scanner.scan()
 
     def _on_scan_state_changed(self, active: bool):
@@ -7791,8 +8184,12 @@ class View(QMainWindow):
         # Scan-first UX:
         # - pulse Scan when no fresh scan results exist
         # - pulse Connect when scan has results and next step is connect
-        self._connect_pulse_active = has_sensors and not self._is_scanning
-        self._scan_pulse_active = (not has_sensors) and not self._is_scanning
+        if self._connection_mode == "phone":
+            self._connect_pulse_active = has_sensors and not self._is_scanning
+            self._scan_pulse_active = False
+        else:
+            self._connect_pulse_active = has_sensors and not self._is_scanning
+            self._scan_pulse_active = (not has_sensors) and not self._is_scanning
         self._apply_connect_ready_state()
         if self._is_scanning:
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
@@ -7853,7 +8250,7 @@ class View(QMainWindow):
     _SCAN_NORMAL_CSS = (
         "QPushButton { "
         "font-size: 11px; padding: 2px 6px; "
-        "background: transparent; border: 2px solid transparent; border-radius: 3px; "
+        "background: #f8f9fa; border: 1px solid #bdc3c7; border-radius: 3px; "
         "}"
     )
     _FREEZE_RESUME_PULSE_CSS_A = (
@@ -7870,11 +8267,24 @@ class View(QMainWindow):
     )
 
     def _has_sensor_choices(self) -> bool:
+        if self._connection_mode == "phone":
+            return bool(self._phone_bridge_host_value().strip())
         return self.address_menu.count() > 0 and bool(self.address_menu.currentText().strip())
 
     def _apply_connect_ready_state(self):
         if self.sensor.client is not None:
             self.connect_button.setToolTip("Already connected to a sensor.")
+            self.connect_button.setDefault(False)
+            return
+        if self._connection_mode == "phone":
+            ready = bool(self._phone_bridge_host_value().strip())
+            self.connect_button.setEnabled(ready and not self._connect_attempt_timer.isActive())
+            if ready:
+                self.connect_button.setStyleSheet(self._CONNECT_NORMAL_CSS)
+                self.connect_button.setToolTip("Connect to phone bridge at the configured host/port.")
+            else:
+                self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+                self.connect_button.setToolTip("Enter a phone bridge host/IP to connect.")
             self.connect_button.setDefault(False)
             return
         if self._is_scanning:
@@ -7910,6 +8320,8 @@ class View(QMainWindow):
 
     def _focus_scan_if_needed(self):
         if self.sensor.client is not None or self._connect_attempt_timer.isActive():
+            return
+        if self._connection_mode == "phone":
             return
         if self._has_sensor_choices():
             return
@@ -7988,7 +8400,8 @@ class View(QMainWindow):
                     getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False)
                 )
                 os.environ["HNH_ENABLE_PMD"] = "1" if current_linux_pmd else "0"
-                self.sensor.set_enable_pmd(current_linux_pmd)
+                if hasattr(self.sensor, "set_enable_pmd"):
+                    self.sensor.set_enable_pmd(current_linux_pmd)
                 if current_linux_pmd != prev_linux_pmd:
                     state_text = "ON" if current_linux_pmd else "OFF"
                     msg = QMessageBox(self)
@@ -8849,6 +9262,9 @@ class View(QMainWindow):
             self._do_connect(pending_name, pending_addr)
 
     def _set_scan_in_progress(self, active: bool):
+        if self._connection_mode == "phone":
+            self.scan_button.setEnabled(False)
+            return
         if active:
             self.scan_button.setEnabled(False)
             self._stop_connect_hints()
@@ -8856,28 +9272,11 @@ class View(QMainWindow):
         if self.sensor.client is None:
             self.scan_button.setEnabled(True)
 
-    def plot_pacer_disk(self):
+    @Slot(list, list)
+    def _on_pacer_coordinates(self, x: list[float], y: list[float]):
         if not self.pacer_toggle.isChecked():
             return
-
-        now = time.perf_counter()
-        if (now - self._last_pacer_tune_sec) >= 0.5:
-            self._last_pacer_tune_sec = now
-            redraw_ms = float(getattr(self.ecg_window, "_redraw_ms_ema", 0.0))
-            if redraw_ms >= 14.0:
-                target_fps = 8
-            elif redraw_ms >= 8.0:
-                target_fps = 10
-            elif redraw_ms >= 5.0:
-                target_fps = 12
-            else:
-                target_fps = 15
-            if target_fps != self._pacer_fps:
-                self._pacer_fps = target_fps
-                self.pacer_timer.setInterval(max(10, int(round(1000.0 / float(target_fps)))))
-
-        coordinates = self.pacer.update(self.model.breathing_rate)
-        self.pacer_widget.update_series(*coordinates)
+        self.pacer_widget.update_series(x, y)
 
     def update_pacer_label(self, rate: NamedSignal):
         self.pacer_label.setText(f"Rate: {rate.value}")
@@ -9075,13 +9474,16 @@ class View(QMainWindow):
         if self.pacer_toggle.isChecked():
             self.pacer_widget.disk.setColor(BLUE)
             self.pacer_widget.disk.setBorderColor(QColor(0, 0, 0, 0))
+            self._pacer_worker.set_enabled(True)
         else:
             self.pacer_widget.update_series(self.pacer.lung_x, self.pacer.lung_y)
             self.pacer_widget.disk.setColor(QColor(200, 210, 225))
             self.pacer_widget.disk.setBorderColor(QColor(0, 0, 0, 0))
+            self._pacer_worker.set_enabled(False)
 
     def _update_breathing_rate(self, value):
         self.model.breathing_rate = float(value)
+        self._pacer_worker.set_breathing_rate(float(value))
         self.pacer_label.setText(f"Rate: {value}")
         self._profile_store.set_profile_pref(
             self._session_profile_id, "breathing_rate", str(int(value))
@@ -9131,6 +9533,7 @@ class View(QMainWindow):
             else:
                 self.recording_statusbar.set_idle(status)
 
+        self._update_connection_mode_ui()
         self.statusbar.showMessage(status)
         self._update_session_actions()
 

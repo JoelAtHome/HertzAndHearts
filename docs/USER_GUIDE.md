@@ -4,13 +4,42 @@ This is the short practical guide for day-to-day use.
 
 ## 1) Connect a Sensor
 
+Hertz & Hearts now supports two connection modes:
+
+- `PC BLE`: the desktop app connects directly to Polar H10 over Bluetooth.
+- `Phone Bridge`: your Android phone connects to H10 over BLE and forwards live data to your PC over Wi-Fi.
+
+### PC BLE mode
+
 1. Pair your chest strap in your operating system Bluetooth settings.
 2. Open Hertz & Hearts.
-3. Click `Scan`.
-4. Select your sensor from the dropdown.
-5. Click `Connect`.
+3. In `Connection Mode`, choose `PC BLE`.
+4. Click `Scan`.
+5. Select your sensor from the dropdown.
+6. Click `Connect`.
+
+### Phone Bridge mode
+
+1. In `Connection Mode`, choose `Phone Bridge`.
+2. Enter the phone bridge host/IP and port.
+3. Click `Connect`.
+
+Current bridge protocol expected by HnH is newline-delimited JSON with `status`, `rr`, and `ecg` messages.
 
 If connection fails, try `Disconnect` then reconnect.
+
+When to use this mode:
+
+- `Phone Bridge` is optional.
+- It is often useful when your PC has unreliable BLE behavior with Polar H10 (scan failures, frequent disconnects, or unstable throughput).
+- In that setup, the phone handles BLE and forwards the stream over Wi-Fi to the desktop app.
+
+### Android bridge app options
+
+- Existing apps can connect to H10 and record/forward data (for example MQTT-oriented logger apps), but compatibility with HnH's live protocol is not guaranteed out of the box.
+- Recommended path: test an existing Android app first; if live RR/ECG forwarding into HnH is not stable, use a dedicated lightweight Android bridge built with Polar BLE SDK.
+- The in-repo reference project is `Android Bridge App/PolarH10Bridge`.
+- Install/download options are in `docs/PHONE_BRIDGE_QUICKSTART.md` (GitHub Actions artifact or local build).
 
 ## 2) Start and Run a Session
 
@@ -79,6 +108,7 @@ For a stopped session without final report, generate from Session History.
 
 - See `docs/troubleshooting.md`
 - If BLE behavior varies by platform, use `docs/BLE_PLATFORM_VALIDATION_MATRIX.md`
+- For phone-as-gateway setup and message format, use `docs/PHONE_BRIDGE_QUICKSTART.md`
 
 ## 9) Important Safety/Scope Notes
 
