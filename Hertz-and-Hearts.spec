@@ -115,7 +115,13 @@ _win_sklearn_binaries = _win_duplicate_binaries_to_internal_root(
     _sklearn_merged + _win_sklearn_runtime
 )
 
-_SPEC_DIR = Path(__file__).resolve().parent
+# PyInstaller's spec executor may not define __file__ (e.g. on CI).
+_spec_src = globals().get("__file__")
+_SPEC_DIR = (
+    Path(_spec_src).resolve().parent
+    if _spec_src
+    else Path.cwd().resolve()
+)
 _runtime_hooks = []
 if IS_WIN:
     _runtime_hooks.append(
