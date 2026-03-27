@@ -2,10 +2,13 @@ package com.example.polarh10bridge
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -15,6 +18,8 @@ import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
@@ -60,10 +65,14 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -88,6 +97,7 @@ import com.polar.sdk.api.model.PolarDeviceInfo
 import com.polar.sdk.api.model.PolarEcgData
 import com.polar.sdk.api.model.PolarHealthThermometerData
 import com.polar.sdk.api.model.PolarSensorSetting
+import kotlinx.coroutines.delay
 import io.reactivex.rxjava3.android.schedulers.AndroidSchedulers
 import io.reactivex.rxjava3.disposables.CompositeDisposable
 import io.reactivex.rxjava3.disposables.Disposable
@@ -250,6 +260,9 @@ class MainActivity : ComponentActivity() {
 
     private val screenState = mutableStateOf(BridgeScreenState())
 
+    /** Bumped when link IPv4 may have changed so Compose restarts IP-hint polling (Handler updates alone can be missed). */
+    private val bridgeIpHintRefreshSession = mutableStateOf(0)
+
     private fun loadBridgePortPref(): Int {
         val prefs = getSharedPreferences(BRIDGE_PREFS_NAME, Context.MODE_PRIVATE)
         val saved = prefs.getInt(BRIDGE_PORT_PREF_KEY, BRIDGE_PORT_DEFAULT)
@@ -345,6 +358,46 @@ class MainActivity : ComponentActivity() {
                 mainHandler.postDelayed(this, BLE_ROW_PRUNE_INTERVAL_MS)
             }
         }
+
+    private val wifiIpLinkRetry500Ms = Runnable { applyPhoneWifiLinkFromNetworkToScreenState() }
+    private val wifiIpLinkRetry1500Ms = Runnable { applyPhoneWifiLinkFromNetworkToScreenState() }
+
+    private fun applyPhoneWifiLinkFromNetworkToScreenState() {
+        val beforeIp = screenState.value.phoneWifiIpv4
+        if (!isWifiRadioOn(this)) {
+            screenState.value =
+                screenState.value.copy(
+                    phoneWifiIpv4 = null,
+                    phoneWifiSubnetMask = null,
+                )
+            if (beforeIp != screenState.value.phoneWifiIpv4) {
+                bridgeIpHintRefreshSession.value = bridgeIpHintRefreshSession.value + 1
+            }
+            return
+        }
+        val netInfo = wifiNetworkInfo(this)
+        screenState.value =
+            screenState.value.copy(
+                phoneWifiIpv4 = netInfo.ipv4,
+                phoneWifiSubnetMask = netInfo.subnetMask,
+            )
+        if (beforeIp != screenState.value.phoneWifiIpv4) {
+            bridgeIpHintRefreshSession.value = bridgeIpHintRefreshSession.value + 1
+        }
+    }
+
+    private fun schedulePhoneWifiLinkRefreshWithRetries() {
+        mainHandler.removeCallbacks(wifiIpLinkRetry500Ms)
+        mainHandler.removeCallbacks(wifiIpLinkRetry1500Ms)
+        applyPhoneWifiLinkFromNetworkToScreenState()
+        mainHandler.postDelayed(wifiIpLinkRetry500Ms, 500L)
+        mainHandler.postDelayed(wifiIpLinkRetry1500Ms, 1500L)
+    }
+
+    private fun cancelScheduledPhoneWifiLinkRefresh() {
+        mainHandler.removeCallbacks(wifiIpLinkRetry500Ms)
+        mainHandler.removeCallbacks(wifiIpLinkRetry1500Ms)
+    }
 
     private fun pruneStaleBleRows() {
         val now = SystemClock.elapsedRealtime()
@@ -940,8 +993,20 @@ class MainActivity : ComponentActivity() {
         setContent {
             PolarH10BridgeTheme {
                 val state by screenState
+                val ipHintRefreshSession by bridgeIpHintRefreshSession
                 BridgeMainScreen(
                     state = state,
+                    ipHintRefreshSession = ipHintRefreshSession,
+                    readPhoneWifiIpv4 = { screenState.value.phoneWifiIpv4 },
+                    onWifiRadioAvailabilityChanged = { enabled ->
+                        if (!enabled) {
+                            cancelScheduledPhoneWifiLinkRefresh()
+                            applyPhoneWifiLinkFromNetworkToScreenState()
+                        } else {
+                            schedulePhoneWifiLinkRefreshWithRetries()
+                            bridgeIpHintRefreshSession.value = bridgeIpHintRefreshSession.value + 1
+                        }
+                    },
                     onScanSensors = { beginSensorScan() },
                     onSaveBridgePort = { newPort ->
                         val clamped = newPort.coerceIn(BRIDGE_PORT_MIN, BRIDGE_PORT_MAX)
@@ -978,13 +1043,22 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        val netInfo = wifiNetworkInfo(this)
         screenState.value =
             screenState.value.copy(
-                phoneWifiIpv4 = netInfo.ipv4,
-                phoneWifiSubnetMask = netInfo.subnetMask,
                 foregroundServiceActive = BridgeForegroundService.isRunning,
             )
+        if (isWifiRadioOn(this)) {
+            schedulePhoneWifiLinkRefreshWithRetries()
+            bridgeIpHintRefreshSession.value = bridgeIpHintRefreshSession.value + 1
+        } else {
+            cancelScheduledPhoneWifiLinkRefresh()
+            screenState.value =
+                screenState.value.copy(
+                    phoneWifiIpv4 = null,
+                    phoneWifiSubnetMask = null,
+                )
+            bridgeIpHintRefreshSession.value = bridgeIpHintRefreshSession.value + 1
+        }
     }
 
     override fun onStart() {
@@ -1047,11 +1121,90 @@ class MainActivity : ComponentActivity() {
 @Composable
 private fun BridgeMainScreen(
     state: BridgeScreenState,
+    /** Activity bumps this when IPv4 data may have changed (forces LaunchedEffect to poll again). */
+    ipHintRefreshSession: Int,
+    /** Live read from Activity screen state (Compose may miss invalidations from Handler-delayed updates). */
+    readPhoneWifiIpv4: () -> String?,
+    onWifiRadioAvailabilityChanged: (enabled: Boolean) -> Unit,
     onScanSensors: () -> Unit,
     onSaveBridgePort: (Int) -> Unit,
     onSaveKeepAliveInBackground: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
+    var wifiRadioEnabled by remember(context) {
+        mutableStateOf(isWifiRadioOn(context))
+    }
+    val onWifiRadioAvailabilityChangedState by rememberUpdatedState(onWifiRadioAvailabilityChanged)
+    val peekPhoneWifiIpv4 by rememberUpdatedState(readPhoneWifiIpv4)
+    var connectHintIpv4 by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(wifiRadioEnabled, state.phoneWifiIpv4, ipHintRefreshSession) {
+        if (!wifiRadioEnabled) {
+            connectHintIpv4 = null
+            return@LaunchedEffect
+        }
+        connectHintIpv4 = null
+        var best: String? = null
+        repeat(48) { attempt ->
+            if (!isWifiRadioOn(context)) {
+                connectHintIpv4 = null
+                return@LaunchedEffect
+            }
+            val cur = peekPhoneWifiIpv4() ?: wifiIpv4String(context)
+            if (cur != null) {
+                best = preferMoreLikelyLanDisplayIp(best, cur)
+                connectHintIpv4 = best
+            }
+            if (best != null && !isLikelyTenSlashEightLanIpv4String(best)) {
+                return@LaunchedEffect
+            }
+            if (best != null && isLikelyTenSlashEightLanIpv4String(best) && attempt >= 8) {
+                return@LaunchedEffect
+            }
+            delay(250)
+        }
+    }
+    DisposableEffect(context) {
+        val act = context as? ComponentActivity
+        val receiver =
+            object : BroadcastReceiver() {
+                override fun onReceive(c: Context?, intent: Intent?) {
+                    val now = isWifiRadioOn(context)
+                    val prev = wifiRadioEnabled
+                    wifiRadioEnabled = now
+                    if (now != prev) {
+                        onWifiRadioAvailabilityChangedState(now)
+                    }
+                }
+            }
+        ContextCompat.registerReceiver(
+            context,
+            receiver,
+            IntentFilter(WifiManager.WIFI_STATE_CHANGED_ACTION),
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
+        val lifecycleObserver =
+            LifecycleEventObserver { _, event ->
+                if (event == Lifecycle.Event.ON_RESUME) {
+                    val now = isWifiRadioOn(context)
+                    val prev = wifiRadioEnabled
+                    wifiRadioEnabled = now
+                    if (now != prev) {
+                        onWifiRadioAvailabilityChangedState(now)
+                    }
+                }
+            }
+        act?.lifecycle?.addObserver(lifecycleObserver)
+        val nowRadio = isWifiRadioOn(context)
+        wifiRadioEnabled = nowRadio
+        onWifiRadioAvailabilityChangedState(nowRadio)
+        onDispose {
+            act?.lifecycle?.removeObserver(lifecycleObserver)
+            try {
+                context.unregisterReceiver(receiver)
+            } catch (_: Exception) {
+            }
+        }
+    }
     val versionName = remember(context) { context.appVersionName() }
     var menuExpanded by remember { mutableStateOf(false) }
     var showConnectionSettings by remember { mutableStateOf(false) }
@@ -1114,6 +1267,24 @@ private fun BridgeMainScreen(
                     }
                 }
             }
+            if (!wifiRadioEnabled) {
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Color(0xFFFFF3CD),
+                ) {
+                    Text(
+                        text = "Phone Wi-Fi seems to be turned off. Please check.",
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 10.dp),
+                        color = TextDark,
+                        fontSize = 13.sp,
+                        lineHeight = 15.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                }
+            }
             Column(
                 modifier =
                     Modifier
@@ -1122,7 +1293,16 @@ private fun BridgeMainScreen(
                         .padding(horizontal = 16.dp, vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                val wifiIp = state.phoneWifiIpv4 ?: wifiIpv4String(LocalContext.current)
+                // Only show LAN connect instructions when the Wi-Fi radio is on; the stack may still
+                // report a stale or non-LAN IPv4 while Wi-Fi is disabled.
+                val wifiIp =
+                    if (wifiRadioEnabled) {
+                        connectHintIpv4
+                            ?: state.phoneWifiIpv4
+                            ?: wifiIpv4String(LocalContext.current)
+                    } else {
+                        null
+                    }
                 if (wifiIp != null) {
                     Text(
                         text = "Open Hertz & Hearts on your PC and connect to $wifiIp:${state.bridgePort}",
@@ -1206,7 +1386,15 @@ private fun BridgeMainScreen(
                             ),
                         modifier = Modifier.align(Alignment.Start),
                     )
-                    val phoneIp = state.phoneWifiIpv4 ?: wifiIpv4String(LocalContext.current) ?: "unknown"
+                    val phoneIp =
+                        if (!wifiRadioEnabled) {
+                            "Wi-Fi off"
+                        } else {
+                            connectHintIpv4
+                                ?: state.phoneWifiIpv4
+                                ?: wifiIpv4String(LocalContext.current)
+                                ?: "unknown"
+                        }
                     val pcIp = state.pcBridgeIp ?: "not connected"
                     Spacer(modifier = Modifier.height(1.dp))
                     Text(
@@ -1701,33 +1889,97 @@ private fun Context.appVersionName(): String =
         ""
     }
 
+@Suppress("DEPRECATION")
+private fun isWifiRadioOn(context: Context): Boolean {
+    val wm = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+        ?: return true
+    return wm.isWifiEnabled
+}
+
+private fun isLikelyTenSlashEightLanIpv4String(host: String): Boolean {
+    val parts = host.split('.').mapNotNull { it.toIntOrNull() }
+    return parts.size == 4 && parts[0] == 10
+}
+
+/** When two readings disagree, prefer the address that is not in 10.0.0.0/8 if the other is. */
+private fun preferMoreLikelyLanDisplayIp(current: String?, newer: String?): String? {
+    when {
+        newer.isNullOrBlank() -> return current
+        current.isNullOrBlank() -> return newer
+        isLikelyTenSlashEightLanIpv4String(current) &&
+            !isLikelyTenSlashEightLanIpv4String(newer) -> return newer
+        !isLikelyTenSlashEightLanIpv4String(current) &&
+            isLikelyTenSlashEightLanIpv4String(newer) -> return current
+        else -> return newer
+    }
+}
+
+/**
+ * Typical home/offices use 192.168/16 or 172.16/12. 10/8 also appears on LANs but matches many
+ * carrier CGNAT ranges and Wi-Fi Direct-style subnets; score it lower when multiple Wi-Fi networks exist.
+ * 100.64/10 is CGNAT (RFC 6598); deprioritize for "your Wi-Fi IP" display.
+ */
+private fun ipv4LanRangeScore(addr: Inet4Address): Int {
+    if (addr.isLinkLocalAddress) return -1_000_000
+    val h = addr.hostAddress ?: return 0
+    val parts = h.split('.').mapNotNull { it.toIntOrNull() }
+    if (parts.size != 4) return 0
+    val a = parts[0]
+    val b = parts[1]
+    return when {
+        a == 192 && b == 168 -> 400_000
+        a == 172 && b in 16..31 -> 350_000
+        a == 10 -> 150_000
+        a == 100 && b in 64..127 -> 20_000
+        else -> 50_000
+    }
+}
+
+private fun networkQualityScoreForWifiDisplay(caps: NetworkCapabilities): Int {
+    var s = 0
+    if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) s += 80
+    if (caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)) s += 120
+    return s
+}
+
+private data class WifiIpv4Pick(
+    val host: String,
+    val prefixLength: Int,
+    val score: Int,
+)
+
+@SuppressLint("MissingPermission")
+private fun pickBestWifiLanIpv4(cm: ConnectivityManager): WifiIpv4Pick? {
+    val candidates = mutableListOf<WifiIpv4Pick>()
+    for (network in cm.allNetworks) {
+        val caps = cm.getNetworkCapabilities(network) ?: continue
+        if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) continue
+
+        val netScore = networkQualityScoreForWifiDisplay(caps)
+        val lp = cm.getLinkProperties(network) ?: continue
+        for (la in lp.linkAddresses) {
+            val addr = la.address
+            if (addr !is Inet4Address || addr.isLoopbackAddress) continue
+            val host = addr.hostAddress ?: continue
+            val rangeScore = ipv4LanRangeScore(addr)
+            if (rangeScore < -500_000) continue
+            val combined = netScore * 10_000 + rangeScore
+            candidates.add(WifiIpv4Pick(host = host, prefixLength = la.prefixLength, score = combined))
+        }
+    }
+    if (candidates.isEmpty()) return null
+    val withoutTen =
+        candidates.filter { !isLikelyTenSlashEightLanIpv4String(it.host) }
+    val pool = if (withoutTen.isNotEmpty()) withoutTen else candidates
+    return pool.maxByOrNull { it.score }
+}
+
 @SuppressLint("MissingPermission")
 private fun wifiIpv4String(context: Context): String? {
     val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         ?: return null
-
-    // Prefer Wi-Fi interfaces; active network can be VPN/cellular and return misleading IPs.
-    val networks = cm.allNetworks.toList()
-    val ordered = buildList {
-        addAll(
-            networks.filter { n ->
-                val caps = cm.getNetworkCapabilities(n) ?: return@filter false
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-            },
-        )
-        addAll(networks.filterNot { contains(it) })
-    }
-
-    for (network in ordered) {
-        val lp = cm.getLinkProperties(network) ?: continue
-        for (la in lp.linkAddresses) {
-            val a = la.address
-            if (a is Inet4Address && !a.isLoopbackAddress) {
-                return a.hostAddress
-            }
-        }
-    }
-    return null
+    // Only Wi-Fi transports; never fall back to cellular/VPN/other (misleading for LAN instructions).
+    return pickBestWifiLanIpv4(cm)?.host
 }
 
 private data class WifiNetworkInfo(
@@ -1739,31 +1991,11 @@ private data class WifiNetworkInfo(
 private fun wifiNetworkInfo(context: Context): WifiNetworkInfo {
     val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
         ?: return WifiNetworkInfo(ipv4 = null, subnetMask = null)
-    val networks = cm.allNetworks.toList()
-    val ordered = buildList {
-        addAll(
-            networks.filter { n ->
-                val caps = cm.getNetworkCapabilities(n) ?: return@filter false
-                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
-            },
-        )
-        addAll(networks.filterNot { contains(it) })
-    }
-    for (network in ordered) {
-        val lp = cm.getLinkProperties(network) ?: continue
-        for (la in lp.linkAddresses) {
-            val addr = la.address
-            if (addr is Inet4Address && !addr.isLoopbackAddress) {
-                val prefix = la.prefixLength
-                val mask = prefixLengthToSubnetMask(prefix)
-                return WifiNetworkInfo(
-                    ipv4 = addr.hostAddress,
-                    subnetMask = mask,
-                )
-            }
-        }
-    }
-    return WifiNetworkInfo(ipv4 = null, subnetMask = null)
+    val pick = pickBestWifiLanIpv4(cm) ?: return WifiNetworkInfo(ipv4 = null, subnetMask = null)
+    return WifiNetworkInfo(
+        ipv4 = pick.host,
+        subnetMask = prefixLengthToSubnetMask(pick.prefixLength),
+    )
 }
 
 private fun prefixLengthToSubnetMask(prefixLength: Int): String {
