@@ -189,8 +189,15 @@ def extract_qt_candidates(
         return [], "insufficient ecg data", None, _empty_diag
     try:
         import neurokit2 as nk
-    except Exception:
-        return [], "neurokit2 unavailable", None, _empty_diag
+    except Exception as exc:
+        if isinstance(exc, ModuleNotFoundError):
+            name = getattr(exc, "name", None) or ""
+            hint = f" (missing {name})" if name else f" ({exc})"
+        elif isinstance(exc, ImportError) and str(exc):
+            hint = f" ({str(exc).splitlines()[0][:120]})"
+        else:
+            hint = f" ({type(exc).__name__})"
+        return [], f"neurokit2 unavailable{hint}", None, _empty_diag
 
     try:
         ecg = np.asarray(ecg_samples, dtype=float)

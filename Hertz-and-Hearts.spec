@@ -40,6 +40,11 @@ _hiddenimports = [
     "pandas.errors",
 ]
 _hiddenimports += collect_submodules("reportlab")
+# QTc uses lazy `import neurokit2` in hnh/qtc.py — static analysis often misses it.
+# NeuroKit2's __init__ imports sklearn and many subpackages; without collect,
+# Windows frozen builds often show "neurokit2 unavailable" while PSD (scipy only) works.
+_hiddenimports += collect_submodules("neurokit2")
+_hiddenimports += collect_submodules("sklearn")
 
 a = Analysis(
     ["hnh/app.py"],
