@@ -5,7 +5,7 @@
 import platform
 import re
 
-from PyInstaller.utils.hooks import collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
 
 block_cipher = None
 
@@ -46,10 +46,14 @@ _hiddenimports += collect_submodules("reportlab")
 _hiddenimports += collect_submodules("neurokit2")
 _hiddenimports += collect_submodules("sklearn")
 
+# hook-sklearn only collects data files; sklearn/.libs/*.dll (OpenMP / VC runtime)
+# is not always pulled into onedir bundles → import sklearn raises PyInstallerImportError.
+_sklearn_dlls = collect_dynamic_libs("sklearn")
+
 a = Analysis(
     ["hnh/app.py"],
     pathex=[],
-    binaries=[],
+    binaries=_sklearn_dlls,
     datas=[
         ("LICENSE", "."),
     ],
@@ -86,7 +90,8 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=True,
-    upx_exclude=[],
+    # UPX can break MSVC / OpenMP DLLs used by sklearn; keep them uncompressed.
+    upx_exclude=["vcomp140.dll", "msvcp140.dll"],
     name="Hertz-and-Hearts",
 )
 

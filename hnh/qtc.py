@@ -190,11 +190,18 @@ def extract_qt_candidates(
     try:
         import neurokit2 as nk
     except Exception as exc:
+        msg = str(exc).strip()
+        msg_short = msg.splitlines()[0][:220] if msg else ""
         if isinstance(exc, ModuleNotFoundError):
             name = getattr(exc, "name", None) or ""
-            hint = f" (missing {name})" if name else f" ({exc})"
-        elif isinstance(exc, ImportError) and str(exc):
-            hint = f" ({str(exc).splitlines()[0][:120]})"
+            hint = (
+                f" (missing {name})"
+                if name
+                else (f" ({msg_short})" if msg_short else f" ({type(exc).__name__})")
+            )
+        elif msg_short:
+            # Includes PyInstallerImportError (missing sklearn/.libs DLLs in frozen builds).
+            hint = f" ({msg_short})"
         else:
             hint = f" ({type(exc).__name__})"
         return [], f"neurokit2 unavailable{hint}", None, _empty_diag
