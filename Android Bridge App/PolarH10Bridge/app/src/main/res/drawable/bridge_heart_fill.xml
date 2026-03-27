@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="72dp"
+    android:height="72dp"
+    android:viewportWidth="84"
+    android:viewportHeight="84">
+    <!-- Same heart geometry as launcher foreground; tint in Compose for gray / red. -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M36,68C22,56 10,45 10,31C10,20 18,12 28,12C34,12 39,15 42,19C45,15 50,12 56,12C66,12 74,20 74,31C74,45 62,56 48,68L42,74L36,68Z" />
+</vector>

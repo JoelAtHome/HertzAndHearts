@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="120dp"
+    android:height="56dp"
+    android:viewportWidth="120"
+    android:viewportHeight="56">
+    <!-- Simplified Polar-style pod: matte capsule, light lettering bar, red "O" dot. -->
+    <path
+        android:fillColor="#141414"
+        android:pathData="M24,6L96,6C106.5,6 114,13.8 114,24L114,32C114,42.2 106.5,50 96,50L24,50C13.5,50 6,42.2 6,32L6,24C6,13.8 13.5,6 24,6Z" />
+    <path
+        android:fillColor="#9E9E9E"
+        android:pathData="M22,24h76v8h-76z" />
+    <path
+        android:fillColor="#141414"
+        android:pathData="M26,25.5h68v5h-68z" />
+    <path
+        android:fillColor="#BDBDBD"
+        android:pathData="M32,26.5h6v2h-6z M44,26.5h4v2h-4z M52,26.5h12v2h-12z M68,26.5h6v2h-6z M78,26.5h10v2h-10z" />
+    <path
+        android:fillColor="#C1121F"
+        android:pathData="M58,22.5c2.5,0 4.5,2 4.5,4.5s-2,4.5 -4.5,4.5 -4.5,-2 -4.5,-4.5 2,-4.5 4.5,-4.5z" />
+</vector>
