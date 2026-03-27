@@ -4,8 +4,39 @@
 
 import platform
 import re
+import sys
+from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
+
+
+def _win_dlls_beside_sklearn_openmp() -> list:
+    """
+    sklearn/.libs/vcomp140.dll loads from that folder; Windows resolves
+    vcruntime140*.dll there first. Python ships those runtimes next to python.exe
+    / in DLLs/, but PyInstaller usually places them only at _internal root, so
+    vcomp still fails on machines without VC++ redist. Copy companions into
+    sklearn/.libs alongside vcomp140.dll.
+    """
+    if platform.system() != "Windows":
+        return []
+    names = ("vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll")
+    search_dirs = [
+        Path(sys.executable).resolve().parent,
+        Path(sys.base_prefix) / "DLLs",
+        Path(sys.base_prefix),
+    ]
+    dest = r"sklearn\.libs"
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name in names:
+        for folder in search_dirs:
+            candidate = folder / name
+            if candidate.is_file():
+                out.append((str(candidate), dest))
+                seen.add(name)
+                break
+    return out
 
 block_cipher = None
 
@@ -49,11 +80,12 @@ _hiddenimports += collect_submodules("sklearn")
 # hook-sklearn only collects data files; sklearn/.libs/*.dll (OpenMP / VC runtime)
 # is not always pulled into onedir bundles → import sklearn raises PyInstallerImportError.
 _sklearn_dlls = collect_dynamic_libs("sklearn")
+_win_sklearn_runtime = _win_dlls_beside_sklearn_openmp()
 
 a = Analysis(
     ["hnh/app.py"],
     pathex=[],
-    binaries=_sklearn_dlls,
+    binaries=_sklearn_dlls + _win_sklearn_runtime,
     datas=[
         ("LICENSE", "."),
     ],
@@ -80,6 +112,7 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=["vcruntime140.dll", "vcruntime140_1.dll", "concrt140.dll"],
     console=False,
     icon=icon_path,
 )
@@ -91,7 +124,13 @@ coll = COLLECT(
     strip=False,
     upx=True,
     # UPX can break MSVC / OpenMP DLLs used by sklearn; keep them uncompressed.
-    upx_exclude=["vcomp140.dll", "msvcp140.dll"],
+    upx_exclude=[
+        "vcomp140.dll",
+        "msvcp140.dll",
+        "vcruntime140.dll",
+        "vcruntime140_1.dll",
+        "concrt140.dll",
+    ],
     name="Hertz-and-Hearts",
 )
 
