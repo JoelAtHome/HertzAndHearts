@@ -23,10 +23,13 @@ Hertz & Hearts now supports two connection modes:
 1. In `Connection Mode`, choose `Phone Bridge`.
 2. Enter the phone bridge host/IP and port.
 3. Click `Connect`.
+4. Optional on phone app: open `Connection settings` and enable `Keep bridge active in background` to reduce dropouts when switching apps.
 
 Current bridge protocol expected by HnH is newline-delimited JSON with `status`, `rr`, and `ecg` messages.
 
 If connection fails, try `Disconnect` then reconnect.
+
+For Android background reliability, disable battery optimization for the bridge app (OEM battery savers can still suspend networking/BLE despite foreground notifications).
 
 When to use this mode:
 

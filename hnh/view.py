@@ -26,6 +26,7 @@ from PySide6.QtCore import (
     QEventLoop, QUrl, QDate,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
+from PySide6.QtNetwork import QAbstractSocket
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
@@ -4270,7 +4271,13 @@ class QtcWindow(QMainWindow):
         self._plot_widget.getAxis("bottom").setPen(pg.mkPen("k"))
         self._plot_widget.getAxis("bottom").enableAutoSIPrefix(False)
         self._plot_widget.hideButtons()
-        self._plot_widget.setYRange(410, 505, padding=0)
+        self._default_y_range: tuple[float, float] = (410.0, 505.0)
+        self._min_y_span_ms = 70.0
+        self._max_y_span_ms = 240.0
+        self._y_pad_ms = 14.0
+        self._y_smooth_alpha = 0.24
+        self._last_y_range: tuple[float, float] | None = self._default_y_range
+        self._plot_widget.setYRange(*self._default_y_range, padding=0)
         self._plot_widget.setXRange(0, 60, padding=0)
         self._plot_widget.addLegend(offset=(8, 8))
 
@@ -4454,6 +4461,72 @@ class QtcWindow(QMainWindow):
                         return f"Rationale: {first_sentence}."
         return "Rationale: insufficient data."
 
+    def _set_adaptive_y_range(
+        self,
+        x: np.ndarray,
+        median: np.ndarray,
+        p25: np.ndarray,
+        p75: np.ndarray,
+        x_lo: float,
+        x_hi: float,
+    ) -> None:
+        if x.size == 0:
+            return
+        view_mask = (x >= float(x_lo)) & (x <= float(x_hi))
+        if not np.any(view_mask):
+            return
+
+        visible = np.concatenate(
+            (
+                median[view_mask],
+                p25[view_mask],
+                p75[view_mask],
+                np.asarray([470.0], dtype=float),  # keep threshold context visible
+            )
+        )
+        visible = visible[np.isfinite(visible)]
+        if visible.size == 0:
+            return
+
+        raw_lo = float(np.min(visible))
+        raw_hi = float(np.max(visible))
+        spread = max(1.0, raw_hi - raw_lo)
+        pad = max(self._y_pad_ms, spread * 0.12)
+        target_lo = raw_lo - pad
+        target_hi = raw_hi + pad
+
+        span = max(self._min_y_span_ms, target_hi - target_lo)
+        span = min(self._max_y_span_ms, span)
+        center = (target_lo + target_hi) / 2.0
+        target_lo = center - span / 2.0
+        target_hi = center + span / 2.0
+
+        # Guardrails for extreme outliers while preserving trend readability.
+        target_lo = max(180.0, target_lo)
+        target_hi = min(700.0, target_hi)
+        if (target_hi - target_lo) < self._min_y_span_ms:
+            center = (target_lo + target_hi) / 2.0
+            half_span = self._min_y_span_ms / 2.0
+            target_lo = max(180.0, center - half_span)
+            target_hi = min(700.0, center + half_span)
+
+        if self._last_y_range is not None:
+            prev_lo, prev_hi = self._last_y_range
+            alpha = float(self._y_smooth_alpha)
+            lo = prev_lo + (target_lo - prev_lo) * alpha
+            hi = prev_hi + (target_hi - prev_hi) * alpha
+        else:
+            lo, hi = target_lo, target_hi
+
+        if hi <= lo:
+            return
+        if self._last_y_range is not None:
+            prev_lo, prev_hi = self._last_y_range
+            if abs(lo - prev_lo) < 0.4 and abs(hi - prev_hi) < 0.4:
+                return
+        self._plot_widget.setYRange(float(lo), float(hi), padding=0)
+        self._last_y_range = (float(lo), float(hi))
+
     def _show_info(self):
         msg = QMessageBox(self)
         msg.setIcon(QMessageBox.Information)
@@ -4495,6 +4568,8 @@ class QtcWindow(QMainWindow):
         self._low_quality_curve.setData([], [])
         self._upper_curve.setData([], [])
         self._lower_curve.setData([], [])
+        self._plot_widget.setYRange(*self._default_y_range, padding=0)
+        self._last_y_range = self._default_y_range
         self._statusbar.showMessage("Waiting for QTc trend points...")
 
     def start(self):
@@ -4786,6 +4861,8 @@ class QtcWindow(QMainWindow):
             auto_lo = max(0.0, auto_hi - self._view_sec)
             self._set_xrange_if_needed(auto_lo, auto_hi)
             self._threshold_label.setPos(auto_hi - 1.0, 471)
+            x_lo, x_hi = auto_lo, auto_hi
+        self._set_adaptive_y_range(x=x, median=y, p25=lo, p75=hi, x_lo=x_lo, x_hi=x_hi)
         self._statusbar.showMessage(
             f"QTc streaming. {self._formula_label}. {self._formula_reason_label} "
             "For trend context only; clinical interpretation requires review."
@@ -5621,6 +5698,7 @@ class View(QMainWindow):
         self._connect_pulse_on = False
         self._connect_pulse_active = False
         self._scan_pulse_active = False
+        self._ble_guidance_force_scan = self._connection_mode == "ble"
         self._freeze_resume_pulse_timer = QTimer(self)
         self._freeze_resume_pulse_timer.setInterval(650)
         self._freeze_resume_pulse_timer.timeout.connect(self._pulse_freeze_resume_button)
@@ -5697,14 +5775,14 @@ class View(QMainWindow):
             _bh_le.setPlaceholderText("Phone IP")
         self.bridge_scan_phones_btn = QPushButton("Find phones")
         self.bridge_scan_phones_btn.setToolTip(
-            "Search your LAN for the Polar H10 bridge app on Android."
+            "Legacy phone discovery trigger. Use Scan in Phone Bridge mode."
         )
         self.bridge_scan_phones_btn.setAutoDefault(False)
         self.bridge_scan_phones_btn.setDefault(False)
         self.bridge_scan_phones_btn.setMaximumWidth(88)
         self.bridge_scan_phones_btn.clicked.connect(self._on_find_phone_bridges_clicked)
         self.bridge_port_spin = QSpinBox()
-        self.bridge_port_spin.setRange(1, 65535)
+        self.bridge_port_spin.setRange(1024, 65535)
         self.bridge_port_spin.setValue(int(self._saved_bridge_port))
         # Require a fresh scan each launch to avoid stale/ghost sensor entries.
         self._preloaded_sensor_text: str | None = None
@@ -5841,8 +5919,19 @@ class View(QMainWindow):
         self._settings_shortcut.activated.connect(self._open_settings)
 
         # Tooltips for buttons and key data fields.
-        self.scan_button.setToolTip("Scan for nearby Bluetooth heart sensors.")
+        self.scan_button.setToolTip(
+            "Scan for nearby Bluetooth heart sensors (PC BLE mode) or discover phone bridges (Phone Bridge mode)."
+        )
+        self.connection_mode_combo.setToolTip(
+            "Choose how to connect: PC BLE (direct Bluetooth) or Phone Bridge (Wi-Fi via phone app)."
+        )
         self.address_menu.setToolTip("Select the sensor to connect.")
+        self.bridge_host_combo.setToolTip(
+            "Phone bridge IP address or hostname on your local Wi-Fi network."
+        )
+        self.bridge_port_spin.setToolTip(
+            "Phone bridge TCP port. Must match the port configured in the phone app."
+        )
         self.connect_button.setToolTip("Connect to the selected sensor.")
         self.disconnect_button.setToolTip("Disconnect from the current sensor.")
         self.reset_button.setToolTip(
@@ -6115,8 +6204,8 @@ class View(QMainWindow):
         toolbar_top.addWidget(self.scan_button)
         toolbar_top.addWidget(self.address_menu)
         toolbar_top.addWidget(self.bridge_host_combo)
-        toolbar_top.addWidget(self.bridge_scan_phones_btn)
         toolbar_top.addWidget(self.bridge_port_spin)
+        toolbar_top.addWidget(self.bridge_scan_phones_btn)
         toolbar_top.addWidget(self.connect_button)
         toolbar_top.addWidget(self.disconnect_button)
         toolbar_top.addWidget(self.battery_label)
@@ -6663,7 +6752,7 @@ class View(QMainWindow):
                 pass
         # Ensure BLE resources are released on app exit to reduce reconnect issues
         # on next launch (especially on Windows stacks that linger briefly).
-        if self.sensor.client is not None:
+        if self._is_sensor_connected():
             self.sensor.disconnect_client()
             # Give Qt's BLE stack a brief chance to process disconnect cleanup
             # before the process exits.
@@ -6682,7 +6771,17 @@ class View(QMainWindow):
         super().closeEvent(event)
 
     def _is_sensor_connected(self) -> bool:
-        return self.sensor.client is not None
+        client = getattr(self.sensor, "client", None)
+        if client is None:
+            return False
+        # Phone bridge can leave a socket object allocated after connection-refused.
+        # Treat unconnected socket state as not connected so UI recovery remains available.
+        if isinstance(self.sensor, PhoneBridgeClient):
+            try:
+                return client.state() != QAbstractSocket.UnconnectedState
+            except Exception:
+                return False
+        return True
 
     def _bind_sensor_signals(self, sensor_client) -> None:
         sensor_client.ibi_update.connect(self.model.update_ibis_buffer)
@@ -6756,6 +6855,9 @@ class View(QMainWindow):
             self._is_scanning = False
             self._scan_pulse_active = False
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
+            self._ble_guidance_force_scan = False
+        else:
+            self._ble_guidance_force_scan = True
         self._persist_connection_prefs()
         self._update_connection_mode_ui()
         self._apply_connect_ready_state()
@@ -6770,27 +6872,24 @@ class View(QMainWindow):
 
     def _update_connection_mode_ui(self) -> None:
         phone_mode = self._connection_mode == "phone"
-        prompt = (
-            "No sensor connected\nPress Find phones or Connect to begin"
-            if phone_mode
-            else "No sensor connected\nPress Scan or Connect to begin"
-        )
+        prompt = "No sensor connected\nPress Scan or Connect to begin"
         if getattr(self, "_hr_overlay", None) is not None:
             self._hr_overlay.setText(prompt)
         if getattr(self, "_hrv_overlay", None) is not None:
             self._hrv_overlay.setText(prompt)
-        self.scan_button.setEnabled(not phone_mode and self.sensor.client is None)
+        self.scan_button.setEnabled(not self._is_sensor_connected())
         self.address_menu.setVisible(not phone_mode)
         self.bridge_host_combo.setVisible(phone_mode)
-        self.bridge_scan_phones_btn.setVisible(phone_mode)
+        # Keep legacy button hidden; Scan now handles both BLE and phone discovery.
+        self.bridge_scan_phones_btn.setVisible(False)
         self.bridge_port_spin.setVisible(phone_mode)
         self.bridge_host_combo.setEnabled(phone_mode)
-        self.bridge_scan_phones_btn.setEnabled(phone_mode)
+        self.bridge_scan_phones_btn.setEnabled(False)
         self.bridge_port_spin.setEnabled(phone_mode)
         self.scan_button.setToolTip(
             "Scan for nearby Bluetooth heart sensors."
             if not phone_mode else
-            "Scan is only available in PC BLE mode."
+            "Discover phone bridge apps on your local Wi-Fi network."
         )
         if phone_mode:
             self._scan_pulse_active = False
@@ -6817,6 +6916,7 @@ class View(QMainWindow):
         if w is not None and w.isRunning():
             return
         self.bridge_scan_phones_btn.setEnabled(False)
+        self.scan_button.setEnabled(False)
         if self.bridge_host_combo.lineEdit() is not None:
             self.bridge_host_combo.lineEdit().setFocus(Qt.FocusReason.OtherFocusReason)
         self.show_status("Searching for phone bridges on the network…")
@@ -6827,6 +6927,8 @@ class View(QMainWindow):
 
     def _on_phone_find_finished(self, phones: object) -> None:
         self.bridge_scan_phones_btn.setEnabled(True)
+        if self._connection_mode == "phone" and not self._is_sensor_connected():
+            self.scan_button.setEnabled(True)
         try:
             if self._phone_find_worker is not None:
                 self._phone_find_worker.deleteLater()
@@ -6903,6 +7005,8 @@ class View(QMainWindow):
 
     def _on_phone_find_failed(self, msg: str) -> None:
         self.bridge_scan_phones_btn.setEnabled(True)
+        if self._connection_mode == "phone" and not self._is_sensor_connected():
+            self.scan_button.setEnabled(True)
         try:
             if self._phone_find_worker is not None:
                 self._phone_find_worker.deleteLater()
@@ -7831,7 +7935,7 @@ class View(QMainWindow):
     @staticmethod
     def _make_chart_overlay(parent):
         lbl = QLabel(
-            "No sensor connected\nPress Scan to begin",
+            "No sensor connected\nPress Scan or Connect to begin",
             parent,
         )
         lbl.setAlignment(Qt.AlignCenter)
@@ -8247,8 +8351,9 @@ class View(QMainWindow):
 
     def _on_scan_clicked(self):
         if self._connection_mode == "phone":
-            self.show_status("Switch to PC BLE mode to scan for sensors.")
+            self._on_find_phone_bridges_clicked()
             return
+        self._ble_guidance_force_scan = False
         self.scanner.scan()
 
     def _on_scan_state_changed(self, active: bool):
@@ -8306,8 +8411,13 @@ class View(QMainWindow):
             self._connect_pulse_active = has_sensors and not self._is_scanning
             self._scan_pulse_active = False
         else:
-            self._connect_pulse_active = has_sensors and not self._is_scanning
-            self._scan_pulse_active = (not has_sensors) and not self._is_scanning
+            if self._ble_guidance_force_scan:
+                # Startup BLE guidance: always emphasize Scan first.
+                self._connect_pulse_active = False
+                self._scan_pulse_active = not self._is_scanning
+            else:
+                self._connect_pulse_active = has_sensors and not self._is_scanning
+                self._scan_pulse_active = (not has_sensors) and not self._is_scanning
         self._apply_connect_ready_state()
         if self._is_scanning:
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
@@ -8325,6 +8435,8 @@ class View(QMainWindow):
         if not self._connect_pulse_timer.isActive():
             self._connect_pulse_on = False
             self._connect_pulse_timer.start()
+        if self._connection_mode == "ble" and self._scan_pulse_active and not self._is_scanning:
+            self._focus_scan_if_needed()
 
     def _stop_connect_hints(self):
         self._hr_overlay.hide()
@@ -8390,7 +8502,7 @@ class View(QMainWindow):
         return self.address_menu.count() > 0 and bool(self.address_menu.currentText().strip())
 
     def _apply_connect_ready_state(self):
-        if self.sensor.client is not None:
+        if self._is_sensor_connected():
             self.connect_button.setToolTip("Already connected to a sensor.")
             self.connect_button.setDefault(False)
             return
@@ -8431,13 +8543,13 @@ class View(QMainWindow):
     def _focus_connect_if_ready(self):
         if not self._has_sensor_choices():
             return
-        if self.sensor.client is not None or self._connect_attempt_timer.isActive():
+        if self._is_sensor_connected() or self._connect_attempt_timer.isActive():
             return
         self.connect_button.setFocus(Qt.OtherFocusReason)
         self.connect_button.setDefault(True)
 
     def _focus_scan_if_needed(self):
-        if self.sensor.client is not None or self._connect_attempt_timer.isActive():
+        if self._is_sensor_connected() or self._connect_attempt_timer.isActive():
             return
         if self._connection_mode == "phone":
             return
@@ -8702,7 +8814,7 @@ class View(QMainWindow):
         self.show_status(f"Disclaimer prompt reset for user: {self._session_profile_id}")
 
     def _on_connect_timeout(self):
-        if self.sensor.client is not None:
+        if self._is_sensor_connected():
             return
         self.sensor.disconnect_client()
         self._forget_preloaded_sensor_entry()
@@ -9611,7 +9723,17 @@ class View(QMainWindow):
     def show_recording_status(self, status: int):
         self.recording_statusbar.setRange(0, max(status, 1))
 
+    @staticmethod
+    def _status_indicates_phone_bridge_link_down(status: str) -> bool:
+        """Remote/user disconnect messages do not contain 'error'; treat as link-down for UI recovery."""
+        s = status.lower()
+        return (
+            "phone bridge disconnected" in s
+            or "disconnected from phone bridge" in s
+        )
+
     def show_status(self, status: str, print_to_terminal=True):
+        display_status = status
         if status.startswith("Scanning for BLE sensors..."):
             self._on_scan_state_changed(True)
         elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
@@ -9619,7 +9741,10 @@ class View(QMainWindow):
             if status.startswith("Couldn't find sensors."):
                 self._pending_connect_target = None
 
-        if "Connected" in status and "Disconnecting" not in status:
+        if (
+            status.startswith("Connected to")
+            and "Disconnecting" not in status
+        ):
             self._suppress_comm_error_popups = False
             self._connect_attempt_timer.stop()
             self._stop_connect_hints()
@@ -9634,17 +9759,36 @@ class View(QMainWindow):
             self.disconnect_button.setEnabled(True)
             self.scan_button.setEnabled(False)
             self._auto_start_recording()
-        elif "error" in status.lower() or "Disconnecting" in status:
+        elif (
+            "error" in status.lower()
+            or "Disconnecting" in status
+            or self._status_indicates_phone_bridge_link_down(status)
+        ):
             # If connect failed or link dropped, unblock reconnect immediately.
             self._connect_attempt_timer.stop()
+            if isinstance(self.sensor, PhoneBridgeClient):
+                client = getattr(self.sensor, "client", None)
+                if client is not None:
+                    try:
+                        client_state = client.state()
+                    except Exception:
+                        client_state = QAbstractSocket.UnconnectedState
+                    if client_state == QAbstractSocket.UnconnectedState:
+                        self.sensor.disconnect_client()
             if "error" in status.lower() and not self._received_ibi_since_connect:
                 self._forget_preloaded_sensor_entry()
             self._apply_connect_ready_state()
             self.disconnect_button.setEnabled(False)
             self.scan_button.setEnabled(True)
             self._set_signal_indicator("Disconnected", "gray")
-            if self.sensor.client is None:
+            if not self._is_sensor_connected():
                 self._start_connect_hints()
+            s_lower = status.lower()
+            if "phone bridge" in s_lower and "connection refused" in s_lower:
+                display_status = (
+                    f"{status} Open the phone bridge app, confirm host/port match, "
+                    "then click Scan or Connect."
+                )
 
         if not self.is_phase_active:
             if "error" in status.lower():
@@ -9653,11 +9797,11 @@ class View(QMainWindow):
                 self.recording_statusbar.set_idle(status)
 
         self._update_connection_mode_ui()
-        self.statusbar.showMessage(status)
+        self.statusbar.showMessage(display_status)
         self._update_session_actions()
 
         if print_to_terminal and self.settings.DEBUG:
-            print(status)
+            print(display_status)
 
     def _show_signal_degraded_popup(self, reason: str):
         if self._suppress_comm_error_popups:

@@ -3,6 +3,7 @@ package com.example.polarh10bridge
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -15,10 +16,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.border
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -35,16 +39,23 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.union
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.RadioButtonDefaults
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -52,15 +63,19 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -85,6 +100,8 @@ import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
+import java.time.LocalDate
+import java.time.format.DateTimeFormatter
 import java.util.Locale
 import java.util.concurrent.Executors
 
@@ -96,6 +113,12 @@ private val TextDark = Color(0xFF1A1A1A)
 private const val PHONE_UDP_DISCOVERY_PORT = 45124
 
 private const val PHONE_UDP_DISCOVER_PREFIX = "HnH_PHONE_BRIDGE_DISCOVER_V1"
+private const val BRIDGE_PREFS_NAME = "bridge_prefs"
+private const val BRIDGE_PORT_PREF_KEY = "bridge_port"
+private const val BRIDGE_BG_KEEPALIVE_PREF_KEY = "bridge_bg_keepalive"
+private const val BRIDGE_PORT_DEFAULT = 8765
+private const val BRIDGE_PORT_MIN = 1024
+private const val BRIDGE_PORT_MAX = 65535
 private const val BLE_ROW_STALE_MS = 5_000L
 private const val BLE_ROW_PRUNE_INTERVAL_MS = 1_000L
 private const val BLE_RSSI_RESUBSCRIBE_MS = 1_500L
@@ -186,6 +209,10 @@ private data class BridgeScreenState(
     val connectedSensorAddress: String = "",
     val connectedSensorRssi: Int? = null,
     val phoneWifiIpv4: String? = null,
+    val phoneWifiSubnetMask: String? = null,
+    val bridgePort: Int = BRIDGE_PORT_DEFAULT,
+    val keepAliveInBackground: Boolean = true,
+    val foregroundServiceActive: Boolean = false,
     /** Outbound TCP session: PC connected to this phone's bridge port. */
     val pcBridgeConnected: Boolean = false,
     val pcBridgeIp: String? = null,
@@ -215,8 +242,84 @@ class MainActivity : ComponentActivity() {
     private val discoverySocketLock = Any()
     @Volatile
     private var udpDiscoverySocket: DatagramSocket? = null
+    private val bridgeServerSocketLock = Any()
+    @Volatile
+    private var bridgeServerSocket: ServerSocket? = null
+    @Volatile
+    private var bridgePort: Int = BRIDGE_PORT_DEFAULT
 
     private val screenState = mutableStateOf(BridgeScreenState())
+
+    private fun loadBridgePortPref(): Int {
+        val prefs = getSharedPreferences(BRIDGE_PREFS_NAME, Context.MODE_PRIVATE)
+        val saved = prefs.getInt(BRIDGE_PORT_PREF_KEY, BRIDGE_PORT_DEFAULT)
+        return saved.coerceIn(BRIDGE_PORT_MIN, BRIDGE_PORT_MAX)
+    }
+
+    private fun saveBridgePortPref(port: Int) {
+        getSharedPreferences(BRIDGE_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putInt(BRIDGE_PORT_PREF_KEY, port.coerceIn(BRIDGE_PORT_MIN, BRIDGE_PORT_MAX))
+            .apply()
+    }
+
+    private fun loadKeepAliveInBackgroundPref(): Boolean =
+        getSharedPreferences(BRIDGE_PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(BRIDGE_BG_KEEPALIVE_PREF_KEY, true)
+
+    private fun saveKeepAliveInBackgroundPref(enabled: Boolean) {
+        getSharedPreferences(BRIDGE_PREFS_NAME, Context.MODE_PRIVATE)
+            .edit()
+            .putBoolean(BRIDGE_BG_KEEPALIVE_PREF_KEY, enabled)
+            .apply()
+    }
+
+    private fun restartBridgeServerIfNeeded() {
+        synchronized(bridgeServerSocketLock) {
+            try {
+                bridgeClient?.close()
+            } catch (_: Exception) {
+            }
+            bridgeClient = null
+            bridgeWriter = null
+            try {
+                bridgeServerSocket?.close()
+            } catch (_: Exception) {
+            }
+            bridgeServerSocket = null
+        }
+        updateScreen {
+            it.copy(
+                pcBridgeConnected = false,
+                pcBridgeIp = null,
+            )
+        }
+    }
+
+    private fun shouldKeepBridgeAliveInBackground(): Boolean {
+        val s = screenState.value
+        return s.keepAliveInBackground && (s.sensorConnected || s.pcBridgeConnected)
+    }
+
+    private fun startBridgeForegroundService() {
+        val intent = Intent(this, BridgeForegroundService::class.java).apply {
+            action = BridgeForegroundService.ACTION_START
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+        updateScreen { it.copy(foregroundServiceActive = true) }
+    }
+
+    private fun stopBridgeForegroundService() {
+        val intent = Intent(this, BridgeForegroundService::class.java).apply {
+            action = BridgeForegroundService.ACTION_STOP
+        }
+        startService(intent)
+        updateScreen { it.copy(foregroundServiceActive = false) }
+    }
 
     private val bleScanStopRunnable = Runnable { stopBleScan() }
     private val bleRssiResubscribeRunnable =
@@ -519,6 +622,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        bridgePort = loadBridgePortPref()
+        val keepAlivePref = loadKeepAliveInBackgroundPref()
+        screenState.value =
+            screenState.value.copy(
+                bridgePort = bridgePort,
+                keepAliveInBackground = keepAlivePref,
+                foregroundServiceActive = BridgeForegroundService.isRunning,
+            )
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             requestPermissions(
@@ -715,7 +826,7 @@ class MainActivity : ComponentActivity() {
                                 .put("app", "PolarH10Bridge")
                                 .put("role", "phone_bridge")
                                 .put("hostname", hostLabel)
-                                .put("port", 8765)
+                                .put("port", bridgePort)
                                 .toString() + "\n"
                         val replyBytes = replyJson.toByteArray(Charsets.UTF_8)
                         socket.send(DatagramPacket(replyBytes, replyBytes.size, p.socketAddress))
@@ -751,8 +862,12 @@ class MainActivity : ComponentActivity() {
                 try {
                     ServerSocket().use { server ->
                         server.reuseAddress = true
-                        server.bind(InetSocketAddress(8765))
-                        Log.d("HnHBridge", "TCP listening on port 8765")
+                        val listenPort = bridgePort
+                        synchronized(bridgeServerSocketLock) {
+                            bridgeServerSocket = server
+                        }
+                        server.bind(InetSocketAddress(listenPort))
+                        Log.d("HnHBridge", "TCP listening on port $listenPort")
 
                         while (!Thread.currentThread().isInterrupted) {
                             server.accept().use { client ->
@@ -808,6 +923,11 @@ class MainActivity : ComponentActivity() {
                 } catch (e: Exception) {
                     if (Thread.currentThread().isInterrupted) break
                     Log.e("HnHBridge", "Bridge server error", e)
+                    synchronized(bridgeServerSocketLock) {
+                        if (bridgeServerSocket != null) {
+                            bridgeServerSocket = null
+                        }
+                    }
                     try {
                         Thread.sleep(2000)
                     } catch (_: InterruptedException) {
@@ -823,6 +943,20 @@ class MainActivity : ComponentActivity() {
                 BridgeMainScreen(
                     state = state,
                     onScanSensors = { beginSensorScan() },
+                    onSaveBridgePort = { newPort ->
+                        val clamped = newPort.coerceIn(BRIDGE_PORT_MIN, BRIDGE_PORT_MAX)
+                        bridgePort = clamped
+                        saveBridgePortPref(clamped)
+                        updateScreen { it.copy(bridgePort = clamped) }
+                        restartBridgeServerIfNeeded()
+                    },
+                    onSaveKeepAliveInBackground = { enabled ->
+                        saveKeepAliveInBackgroundPref(enabled)
+                        updateScreen { it.copy(keepAliveInBackground = enabled) }
+                        if (!enabled) {
+                            stopBridgeForegroundService()
+                        }
+                    },
                 )
                 if (state.bleDialogVisible) {
                     SensorListDialog(
@@ -844,11 +978,33 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        val netInfo = wifiNetworkInfo(this)
         screenState.value =
-            screenState.value.copy(phoneWifiIpv4 = wifiIpv4String(this))
+            screenState.value.copy(
+                phoneWifiIpv4 = netInfo.ipv4,
+                phoneWifiSubnetMask = netInfo.subnetMask,
+                foregroundServiceActive = BridgeForegroundService.isRunning,
+            )
+    }
+
+    override fun onStart() {
+        super.onStart()
+        stopBridgeForegroundService()
+    }
+
+    override fun onStop() {
+        if (!isChangingConfigurations && shouldKeepBridgeAliveInBackground()) {
+            startBridgeForegroundService()
+        }
+        super.onStop()
     }
 
     override fun onDestroy() {
+        val keepAlive = BridgeForegroundService.isRunning && !isFinishing && !isChangingConfigurations
+        if (keepAlive) {
+            super.onDestroy()
+            return
+        }
         rrStreamingStarted = false
         ecgStreamingStarted = false
 
@@ -869,6 +1025,13 @@ class MainActivity : ComponentActivity() {
             }
             udpDiscoverySocket = null
         }
+        synchronized(bridgeServerSocketLock) {
+            try {
+                bridgeServerSocket?.close()
+            } catch (_: Exception) {
+            }
+            bridgeServerSocket = null
+        }
 
         disposables.clear()
         discoveryExecutor.shutdownNow()
@@ -885,9 +1048,14 @@ class MainActivity : ComponentActivity() {
 private fun BridgeMainScreen(
     state: BridgeScreenState,
     onScanSensors: () -> Unit,
+    onSaveBridgePort: (Int) -> Unit,
+    onSaveKeepAliveInBackground: (Boolean) -> Unit,
 ) {
     val context = LocalContext.current
     val versionName = remember(context) { context.appVersionName() }
+    var menuExpanded by remember { mutableStateOf(false) }
+    var showConnectionSettings by remember { mutableStateOf(false) }
+    var showAbout by remember { mutableStateOf(false) }
 
     Column(
         modifier =
@@ -909,14 +1077,42 @@ private fun BridgeMainScreen(
                         .background(BannerRed)
                         .padding(horizontal = 16.dp, vertical = 14.dp),
             ) {
-                Text(
-                    text = "Polar H10-to-PC Bridge",
-                    color = UiWhite,
-                    fontSize = 18.sp,
-                    fontWeight = FontWeight.SemiBold,
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    textAlign = TextAlign.Center,
-                )
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text(
+                        text = "Polar H10-to-PC Bridge",
+                        color = UiWhite,
+                        fontSize = 18.sp,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Box {
+                        TextButton(onClick = { menuExpanded = true }) {
+                            Text(text = "\u2630", color = UiWhite, fontSize = 20.sp)
+                        }
+                        DropdownMenu(
+                            expanded = menuExpanded,
+                            onDismissRequest = { menuExpanded = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Connection settings") },
+                                onClick = {
+                                    menuExpanded = false
+                                    showConnectionSettings = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("About") },
+                                onClick = {
+                                    menuExpanded = false
+                                    showAbout = true
+                                },
+                            )
+                        }
+                    }
+                }
             }
             Column(
                 modifier =
@@ -929,7 +1125,7 @@ private fun BridgeMainScreen(
                 val wifiIp = state.phoneWifiIpv4 ?: wifiIpv4String(LocalContext.current)
                 if (wifiIp != null) {
                     Text(
-                        text = "Open Hertz & Hearts on your PC and connect to $wifiIp:8765",
+                        text = "Open Hertz & Hearts on your PC and connect to $wifiIp:${state.bridgePort}",
                         color = TextDark.copy(alpha = 0.78f),
                         fontSize = 11.sp,
                         lineHeight = 11.sp,
@@ -945,6 +1141,18 @@ private fun BridgeMainScreen(
                             Modifier
                                 .fillMaxWidth()
                                 .padding(bottom = 6.dp),
+                    )
+                }
+                if (state.foregroundServiceActive) {
+                    Text(
+                        text = "Background keep-alive is active (foreground notification shown).",
+                        color = TextDark.copy(alpha = 0.78f),
+                        fontSize = 11.sp,
+                        lineHeight = 11.sp,
+                        modifier =
+                            Modifier
+                                .fillMaxWidth()
+                                .padding(bottom = 4.dp),
                     )
                 }
 
@@ -1048,6 +1256,289 @@ private fun BridgeMainScreen(
                         .padding(bottom = 12.dp),
                 textAlign = TextAlign.Center,
             )
+        }
+    }
+
+    if (showConnectionSettings) {
+        ConnectionSettingsDialog(
+            bridgePort = state.bridgePort,
+            pcBridgeConnected = state.pcBridgeConnected,
+            wifiIp = state.phoneWifiIpv4 ?: "Unavailable",
+            subnetMask = state.phoneWifiSubnetMask ?: "Unavailable",
+            keepAliveInBackground = state.keepAliveInBackground,
+            onDismissRequest = { showConnectionSettings = false },
+            onSavePort = { port ->
+                onSaveBridgePort(port)
+                showConnectionSettings = false
+            },
+            onSaveKeepAliveInBackground = onSaveKeepAliveInBackground,
+        )
+    }
+    if (showAbout) {
+        AboutDialog(
+            versionName = versionName,
+            onDismissRequest = { showAbout = false },
+        )
+    }
+}
+
+@Composable
+private fun ConnectionSettingsDialog(
+    bridgePort: Int,
+    pcBridgeConnected: Boolean,
+    wifiIp: String,
+    subnetMask: String,
+    keepAliveInBackground: Boolean,
+    onDismissRequest: () -> Unit,
+    onSavePort: (Int) -> Unit,
+    onSaveKeepAliveInBackground: (Boolean) -> Unit,
+) {
+    var portText by remember(bridgePort) {
+        mutableStateOf(bridgePort.coerceIn(BRIDGE_PORT_MIN, BRIDGE_PORT_MAX).toString())
+    }
+    var showPortWarning by remember { mutableStateOf(false) }
+    var showDisconnectPcWarning by remember { mutableStateOf(false) }
+    var pendingPort by remember { mutableStateOf<Int?>(null) }
+    var portMenuExpanded by remember { mutableStateOf(false) }
+    val parsedPort = portText.toIntOrNull()
+    val portValid = parsedPort != null && parsedPort in BRIDGE_PORT_MIN..BRIDGE_PORT_MAX
+    val commonPorts = listOf(8765, 7777, 5000, 8080, 9000)
+    Dialog(onDismissRequest = onDismissRequest) {
+        Surface(shape = RoundedCornerShape(10.dp), color = UiWhite) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "Connection settings",
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 16.sp,
+                    color = TextDark,
+                )
+                Spacer(modifier = Modifier.height(12.dp))
+                Text("Bridge port", color = TextDark, fontSize = 13.sp, fontWeight = FontWeight.Medium)
+                Spacer(modifier = Modifier.height(4.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    BasicTextField(
+                        value = portText,
+                        onValueChange = { input -> portText = input.filter { it.isDigit() }.take(5) },
+                        singleLine = true,
+                        textStyle = TextStyle(color = TextDark, fontSize = 16.sp),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier =
+                            Modifier
+                                .weight(1f)
+                                .background(Color.White, RoundedCornerShape(6.dp))
+                                .border(
+                                    width = 1.dp,
+                                    color = if (portValid) TextDark.copy(alpha = 0.55f) else BannerRed,
+                                    shape = RoundedCornerShape(6.dp),
+                                )
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                    )
+                    Box(modifier = Modifier.padding(start = 8.dp)) {
+                        TextButton(onClick = { portMenuExpanded = true }) {
+                            Text("Select", color = BannerRed, fontWeight = FontWeight.Bold)
+                        }
+                        DropdownMenu(
+                            expanded = portMenuExpanded,
+                            onDismissRequest = { portMenuExpanded = false },
+                        ) {
+                            for (port in commonPorts) {
+                                DropdownMenuItem(
+                                    text = { Text(port.toString()) },
+                                    onClick = {
+                                        portText = port.toString()
+                                        portMenuExpanded = false
+                                    },
+                                )
+                            }
+                        }
+                    }
+                }
+                if (!portValid) {
+                    Text(
+                        text = "Enter a port from $BRIDGE_PORT_MIN to $BRIDGE_PORT_MAX.",
+                        color = BannerRed,
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(text = "IP address: $wifiIp", color = TextDark, fontSize = 13.sp)
+                Text(text = "Subnet mask: $subnetMask", color = TextDark, fontSize = 13.sp)
+                Spacer(modifier = Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = "Keep bridge active in background",
+                        color = TextDark,
+                        fontSize = 13.sp,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Switch(
+                        checked = keepAliveInBackground,
+                        onCheckedChange = { enabled -> onSaveKeepAliveInBackground(enabled) },
+                        modifier = Modifier.padding(end = 2.dp),
+                    )
+                }
+                Text(
+                    text = "When enabled, a persistent notification keeps bridge streaming stable while using other apps.",
+                    color = TextDark.copy(alpha = 0.75f),
+                    fontSize = 12.sp,
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                ) {
+                    TextButton(onClick = onDismissRequest) { Text("Cancel", color = BannerRed) }
+                    TextButton(
+                        onClick = {
+                            val target = parsedPort ?: return@TextButton
+                            if (target != bridgePort) {
+                                pendingPort = target.coerceIn(BRIDGE_PORT_MIN, BRIDGE_PORT_MAX)
+                                if (pcBridgeConnected) {
+                                    showDisconnectPcWarning = true
+                                } else {
+                                    showPortWarning = true
+                                }
+                            } else {
+                                onSavePort(target)
+                            }
+                        },
+                        enabled = portValid,
+                    ) {
+                        Text("Save", color = BannerRed, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+    }
+    if (showDisconnectPcWarning) {
+        AlertDialog(
+            onDismissRequest = {
+                showDisconnectPcWarning = false
+                pendingPort = null
+            },
+            containerColor = UiWhite,
+            titleContentColor = TextDark,
+            textContentColor = TextDark,
+            title = { Text("Disconnect PC?", color = TextDark) },
+            text = {
+                Text(
+                    "Changing the bridge port will disconnect Hertz & Hearts on your PC. You can reconnect after updating the port on the PC.",
+                    color = TextDark,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingPort?.let { onSavePort(it) }
+                        pendingPort = null
+                        showDisconnectPcWarning = false
+                    },
+                ) {
+                    Text("Change port", color = BannerRed, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showDisconnectPcWarning = false
+                        pendingPort = null
+                    },
+                ) {
+                    Text("Cancel", color = BannerRed)
+                }
+            },
+        )
+    }
+    if (showPortWarning) {
+        AlertDialog(
+            onDismissRequest = {
+                showPortWarning = false
+                pendingPort = null
+            },
+            containerColor = UiWhite,
+            titleContentColor = TextDark,
+            textContentColor = TextDark,
+            title = { Text("Change bridge port?", color = TextDark) },
+            text = {
+                Text(
+                    "Changing the bridge port can break connection if Hertz & Hearts on your PC is not set to the same port.",
+                    color = TextDark,
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        pendingPort?.let { onSavePort(it) }
+                        pendingPort = null
+                        showPortWarning = false
+                    },
+                ) {
+                    Text("Change port", color = BannerRed, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(
+                    onClick = {
+                        showPortWarning = false
+                        pendingPort = null
+                    },
+                ) {
+                    Text("Cancel", color = BannerRed)
+                }
+            },
+        )
+    }
+}
+
+@Composable
+private fun AboutDialog(
+    versionName: String,
+    onDismissRequest: () -> Unit,
+) {
+    val uriHandler = LocalUriHandler.current
+    val today = remember {
+        LocalDate.now().format(DateTimeFormatter.ofPattern("dd-MM-yyyy"))
+    }
+    Dialog(onDismissRequest = onDismissRequest) {
+        Surface(shape = RoundedCornerShape(10.dp), color = UiWhite) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text("About", fontWeight = FontWeight.SemiBold, fontSize = 16.sp, color = TextDark)
+                Spacer(modifier = Modifier.height(10.dp))
+                Text(
+                    "For use with Hertz & Hearts PC app",
+                    color = TextDark,
+                    fontSize = 13.sp,
+                    lineHeight = 12.sp,
+                )
+                Text(
+                    "Developed by J. Kobe Labs",
+                    color = Color(0xFF0B57D0),
+                    fontSize = 13.sp,
+                    textDecoration = TextDecoration.Underline,
+                    modifier =
+                        Modifier.clickable {
+                            uriHandler.openUri("https://buymeacoffee.com/JoelAtHome")
+                        },
+                )
+                Text("Date: $today", color = TextDark, fontSize = 13.sp)
+                if (versionName.isNotBlank()) {
+                    Text("Version: $versionName", color = TextDark, fontSize = 13.sp)
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onDismissRequest) {
+                        Text("Close", color = BannerRed, fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
         }
     }
 }
@@ -1237,4 +1728,50 @@ private fun wifiIpv4String(context: Context): String? {
         }
     }
     return null
+}
+
+private data class WifiNetworkInfo(
+    val ipv4: String?,
+    val subnetMask: String?,
+)
+
+@SuppressLint("MissingPermission")
+private fun wifiNetworkInfo(context: Context): WifiNetworkInfo {
+    val cm = context.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+        ?: return WifiNetworkInfo(ipv4 = null, subnetMask = null)
+    val networks = cm.allNetworks.toList()
+    val ordered = buildList {
+        addAll(
+            networks.filter { n ->
+                val caps = cm.getNetworkCapabilities(n) ?: return@filter false
+                caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)
+            },
+        )
+        addAll(networks.filterNot { contains(it) })
+    }
+    for (network in ordered) {
+        val lp = cm.getLinkProperties(network) ?: continue
+        for (la in lp.linkAddresses) {
+            val addr = la.address
+            if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                val prefix = la.prefixLength
+                val mask = prefixLengthToSubnetMask(prefix)
+                return WifiNetworkInfo(
+                    ipv4 = addr.hostAddress,
+                    subnetMask = mask,
+                )
+            }
+        }
+    }
+    return WifiNetworkInfo(ipv4 = null, subnetMask = null)
+}
+
+private fun prefixLengthToSubnetMask(prefixLength: Int): String {
+    val p = prefixLength.coerceIn(0, 32)
+    val mask = if (p == 0) 0 else (-0x1 shl (32 - p))
+    val b1 = (mask ushr 24) and 0xFF
+    val b2 = (mask ushr 16) and 0xFF
+    val b3 = (mask ushr 8) and 0xFF
+    val b4 = mask and 0xFF
+    return "$b1.$b2.$b3.$b4"
 }

@@ -55,8 +55,16 @@ Use one of these options:
 - Bluetooth: enabled
 - Location services: enabled (required on many Android versions for BLE scan)
 - App permissions: Bluetooth + Nearby devices + Location (as requested)
-- Disable battery optimization for the bridge app (prevents background dropouts)
+- In app `Connection settings`, keep `Keep bridge active in background` enabled for best stability
+- Disable battery optimization for the bridge app (prevents background dropouts on aggressive OEM firmware)
 - Keep phone and PC on the same Wi-Fi network
+
+### Background keep-alive behavior
+
+- When background keep-alive is enabled and a bridge session is active, Android shows a persistent foreground notification.
+- You can tap the notification to return to the app.
+- Notification action `Stop background keep-alive` turns off keep-alive if you no longer need background streaming.
+- This does not block normal phone use (calls, texts, other apps), but may increase battery use while active.
 
 ## 3) Network checks
 
