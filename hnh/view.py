@@ -5687,8 +5687,7 @@ class View(QMainWindow):
         self.address_menu = QComboBox()
         self.bridge_host_combo = QComboBox()
         self.bridge_host_combo.setEditable(True)
-        self.bridge_host_combo.setMinimumWidth(360)
-        self.bridge_host_combo.setMaximumWidth(360)
+        self.bridge_host_combo.setMinimumWidth(180)
         self.bridge_host_combo.setEditText(
             (self._saved_bridge_host or "").strip() or PHONE_BRIDGE_HOST_DEFAULT
         )
@@ -6101,7 +6100,8 @@ class View(QMainWindow):
         self._disclaimer_link.setStyleSheet(
             "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
         )
-        self.address_menu.setMaximumWidth(200)
+        self.address_menu.setMinimumWidth(240)
+        self.address_menu.setMaximumWidth(240)
         self.address_menu.setStyleSheet("font-size: 11px;")
         self.connection_mode_combo.setMaximumWidth(130)
         self.connection_mode_combo.setStyleSheet("font-size: 11px;")
