@@ -6909,6 +6909,15 @@ class View(QMainWindow):
             return m.group(1)
         return raw
 
+    def _focus_bridge_host_line_edit_without_select_all(self) -> None:
+        """Give keyboard focus to the phone bridge host field without selecting all text."""
+        le = self.bridge_host_combo.lineEdit()
+        if le is None:
+            return
+        le.setFocus(Qt.FocusReason.OtherFocusReason)
+        # Qt often selects the whole line on focus-in; clear it after that runs.
+        QTimer.singleShot(0, le.deselect)
+
     def _on_find_phone_bridges_clicked(self) -> None:
         if self._connection_mode != "phone":
             return
@@ -6917,8 +6926,7 @@ class View(QMainWindow):
             return
         self.bridge_scan_phones_btn.setEnabled(False)
         self.scan_button.setEnabled(False)
-        if self.bridge_host_combo.lineEdit() is not None:
-            self.bridge_host_combo.lineEdit().setFocus(Qt.FocusReason.OtherFocusReason)
+        self._focus_bridge_host_line_edit_without_select_all()
         self.show_status("Searching for phone bridges on the network…")
         self._phone_find_worker = PhoneBridgeFindWorker(self)
         self._phone_find_worker.finished_ok.connect(self._on_phone_find_finished)
@@ -6948,7 +6956,10 @@ class View(QMainWindow):
             if not ip:
                 continue
             host = str(p.get("hostname", "")).strip() or ip
-            label = f"{host} ({ip})"
+            if host == ip:
+                label = f"Phone at {ip}"
+            else:
+                label = f"{host} ({ip})"
             self.bridge_host_combo.addItem(label, ip)
         self.bridge_host_combo.blockSignals(False)
         idx = self.bridge_host_combo.findData(current)
@@ -6962,8 +6973,7 @@ class View(QMainWindow):
             else:
                 self.bridge_host_combo.setEditText(current)
         self._on_phone_bridge_endpoint_changed()
-        if self.bridge_host_combo.lineEdit() is not None:
-            self.bridge_host_combo.lineEdit().setFocus(Qt.FocusReason.OtherFocusReason)
+        self._focus_bridge_host_line_edit_without_select_all()
         n = len(phones)
         if n == 0:
             candidate = current.strip()
@@ -6971,7 +6981,7 @@ class View(QMainWindow):
             if candidate:
                 try:
                     with socket.create_connection((candidate, port), timeout=1.2):
-                        label = f"{candidate} ({candidate})"
+                        label = f"Phone at {candidate}"
                         self.bridge_host_combo.blockSignals(True)
                         self.bridge_host_combo.addItem(label, candidate)
                         self.bridge_host_combo.blockSignals(False)
@@ -6981,10 +6991,7 @@ class View(QMainWindow):
                         self.bridge_host_combo.setEditText(
                             self.bridge_host_combo.currentText()
                         )
-                        if self.bridge_host_combo.lineEdit() is not None:
-                            self.bridge_host_combo.lineEdit().setFocus(
-                                Qt.FocusReason.OtherFocusReason
-                            )
+                        self._focus_bridge_host_line_edit_without_select_all()
                         self._on_phone_bridge_endpoint_changed()
                         self.show_status(
                             "No broadcast discovery replies, but current host is reachable. "
