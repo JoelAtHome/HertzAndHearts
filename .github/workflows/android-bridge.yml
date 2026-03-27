@@ -2,6 +2,12 @@ name: android-bridge
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_to_release_tag:
+        description: "Optional. Published release tag to attach the APK to (e.g. v1.0.0-beta). Leave empty to build only and download the Actions artifact."
+        required: false
+        type: string
+        default: ""
   release:
     types:
       - published
@@ -53,12 +59,28 @@ jobs:
 
   upload-to-release:
     needs: build-debug-apk
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_release_tag != '')
     runs-on: ubuntu-latest
     permissions:
       contents: write
 
     steps:
+      - name: Resolve release tag
+        id: release_tag
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.upload_to_release_tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            T="${{ github.ref_name }}"
+          else
+            T=$(printf '%s' "$MANUAL_TAG" | tr -d '\r' | xargs)
+          fi
+          if [ -z "$T" ]; then
+            echo "::error::Release tag is empty."
+            exit 1
+          fi
+          echo "tag=$T" >> "$GITHUB_OUTPUT"
+
       - name: Download debug APK artifact
         uses: actions/download-artifact@v7
         with:
@@ -69,6 +91,11 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          TAG="${{ steps.release_tag.outputs.tag }}"
           test -f apk/app-debug.apk
-          cp apk/app-debug.apk "PolarH10Bridge-debug-${{ github.ref_name }}.apk"
-          gh release upload "${{ github.ref_name }}" "PolarH10Bridge-debug-${{ github.ref_name }}.apk" --clobber
+          gh release view "$TAG" --json tagName >/dev/null 2>&1 || {
+            echo "::error::No published GitHub Release found for tag '$TAG'. Create and publish the release first, then re-run with this tag."
+            exit 1
+          }
+          cp apk/app-debug.apk "PolarH10Bridge-debug-${TAG}.apk"
+          gh release upload "$TAG" "PolarH10Bridge-debug-${TAG}.apk" --clobber
