@@ -1,0 +1,46 @@
+name: android-bridge
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "Android Bridge App/PolarH10Bridge/**"
+      - ".github/workflows/android-bridge.yml"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - "Android Bridge App/PolarH10Bridge/**"
+      - ".github/workflows/android-bridge.yml"
+
+jobs:
+  build-debug-apk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Android Bridge App/PolarH10Bridge
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up JDK
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon clean assembleDebug
+
+      - name: Upload debug APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: PolarH10Bridge-debug-apk
+          path: Android Bridge App/PolarH10Bridge/app/build/outputs/apk/debug/app-debug.apk
