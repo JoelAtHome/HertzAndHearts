@@ -8,6 +8,7 @@ import math
 import platform
 import re
 import random
+import socket
 import shutil
 import statistics
 import time
@@ -5686,7 +5687,7 @@ class View(QMainWindow):
         self.address_menu = QComboBox()
         self.bridge_host_combo = QComboBox()
         self.bridge_host_combo.setEditable(True)
-        self.bridge_host_combo.setMinimumWidth(135)
+        self.bridge_host_combo.setMinimumWidth(180)
         self.bridge_host_combo.setEditText(
             (self._saved_bridge_host or "").strip() or PHONE_BRIDGE_HOST_DEFAULT
         )
@@ -5697,6 +5698,8 @@ class View(QMainWindow):
         self.bridge_scan_phones_btn.setToolTip(
             "Search your LAN for the Polar H10 bridge app on Android."
         )
+        self.bridge_scan_phones_btn.setAutoDefault(False)
+        self.bridge_scan_phones_btn.setDefault(False)
         self.bridge_scan_phones_btn.setMaximumWidth(88)
         self.bridge_scan_phones_btn.clicked.connect(self._on_find_phone_bridges_clicked)
         self.bridge_port_spin = QSpinBox()
@@ -6068,10 +6071,14 @@ class View(QMainWindow):
         progress_row.addWidget(self.recording_statusbar, stretch=1)
         self.vlayout0.addLayout(progress_row)
 
-        # BOTTOM ROW 2: Compact toolbar
-        toolbar = QHBoxLayout()
-        toolbar.setSpacing(4)
-        toolbar.setContentsMargins(0, 0, 0, 0)
+        # BOTTOM ROW 2: Compact controls split across two rows to avoid
+        # over-constraining minimum window width on smaller displays.
+        toolbar_top = QHBoxLayout()
+        toolbar_top.setSpacing(4)
+        toolbar_top.setContentsMargins(0, 0, 0, 0)
+        toolbar_bottom = QHBoxLayout()
+        toolbar_bottom.setSpacing(4)
+        toolbar_bottom.setContentsMargins(0, 0, 0, 0)
 
         for btn in (self.scan_button, self.connect_button,
                     self.disconnect_button):
@@ -6102,38 +6109,31 @@ class View(QMainWindow):
         self.bridge_port_spin.setMaximumWidth(82)
         self.bridge_port_spin.setStyleSheet("font-size: 11px;")
 
-        toolbar.addWidget(self.connection_mode_combo)
-        toolbar.addWidget(self.scan_button)
-        toolbar.addWidget(self.address_menu)
-        toolbar.addWidget(self.bridge_host_combo)
-        toolbar.addWidget(self.bridge_scan_phones_btn)
-        toolbar.addWidget(self.bridge_port_spin)
-        toolbar.addWidget(self.connect_button)
-        toolbar.addWidget(self.disconnect_button)
-        toolbar.addWidget(self.battery_label)
-
-        toolbar.addWidget(self.start_recording_button)
-        toolbar.addWidget(self.stop_save_button)
+        toolbar_top.addWidget(self.connection_mode_combo)
+        toolbar_top.addWidget(self.scan_button)
+        toolbar_top.addWidget(self.address_menu)
+        toolbar_top.addWidget(self.bridge_host_combo)
+        toolbar_top.addWidget(self.bridge_scan_phones_btn)
+        toolbar_top.addWidget(self.bridge_port_spin)
+        toolbar_top.addWidget(self.connect_button)
+        toolbar_top.addWidget(self.disconnect_button)
+        toolbar_top.addWidget(self.battery_label)
+        toolbar_top.addWidget(self.start_recording_button)
+        toolbar_top.addWidget(self.stop_save_button)
         self._morning_baseline_cb = QCheckBox("Morning baseline")
         self._morning_baseline_cb.setToolTip(
             "When checked, a short protocol reminder appears while recording and the "
             "session manifest notes this mode (for trend consistency)."
         )
         self._morning_baseline_cb.stateChanged.connect(self._on_morning_baseline_toggled)
-        toolbar.addWidget(self._morning_baseline_cb)
-
-        toolbar.addWidget(self._more_button)
+        toolbar_top.addWidget(self._morning_baseline_cb)
+        toolbar_top.addWidget(self._more_button)
 
         _sep1 = QFrame()
         _sep1.setFixedSize(1, 18)
         _sep1.setStyleSheet("background: #bdc3c7;")
-        toolbar.addWidget(_sep1)
-
-        toolbar.addWidget(self.ecg_button)
-        toolbar.addWidget(self.qtc_button)
-        toolbar.addWidget(self.poincare_button)
-        toolbar.addWidget(self.psd_button)
-        toolbar.addStretch()
+        toolbar_top.addWidget(_sep1)
+        toolbar_top.addStretch()
 
         _stat_style = (
             "font-size: 11px; color: #2c3e50; "
@@ -6160,7 +6160,11 @@ class View(QMainWindow):
         _sep2 = QFrame()
         _sep2.setFixedSize(1, 18)
         _sep2.setStyleSheet("background: #bdc3c7;")
-        toolbar.addWidget(_sep2)
+        toolbar_bottom.addWidget(self.ecg_button)
+        toolbar_bottom.addWidget(self.qtc_button)
+        toolbar_bottom.addWidget(self.poincare_button)
+        toolbar_bottom.addWidget(self.psd_button)
+        toolbar_bottom.addWidget(_sep2)
 
         self.annotation.setMaximumWidth(200)
         self.annotation.setStyleSheet("font-size: 11px;")
@@ -6170,10 +6174,12 @@ class View(QMainWindow):
             "QPushButton { font-size: 11px; padding: 2px 6px; }"
             "QPushButton:disabled { color: #7f8c8d; background-color: #e0e0e0; }"
         )
-        toolbar.addWidget(self.annotation)
-        toolbar.addWidget(self.annotation_button)
+        toolbar_bottom.addWidget(self.annotation)
+        toolbar_bottom.addWidget(self.annotation_button)
+        toolbar_bottom.addStretch()
 
-        self.vlayout0.addLayout(toolbar)
+        self.vlayout0.addLayout(toolbar_top)
+        self.vlayout0.addLayout(toolbar_bottom)
 
         # Set the monitoring dashboard as the central widget directly
         self.setCentralWidget(central)
@@ -6742,6 +6748,15 @@ class View(QMainWindow):
 
     def _update_connection_mode_ui(self) -> None:
         phone_mode = self._connection_mode == "phone"
+        prompt = (
+            "No sensor connected\nPress Find phones or Connect to begin"
+            if phone_mode
+            else "No sensor connected\nPress Scan or Connect to begin"
+        )
+        if getattr(self, "_hr_overlay", None) is not None:
+            self._hr_overlay.setText(prompt)
+        if getattr(self, "_hrv_overlay", None) is not None:
+            self._hrv_overlay.setText(prompt)
         self.scan_button.setEnabled(not phone_mode and self.sensor.client is None)
         self.address_menu.setVisible(not phone_mode)
         self.bridge_host_combo.setVisible(phone_mode)
@@ -6780,6 +6795,8 @@ class View(QMainWindow):
         if w is not None and w.isRunning():
             return
         self.bridge_scan_phones_btn.setEnabled(False)
+        if self.bridge_host_combo.lineEdit() is not None:
+            self.bridge_host_combo.lineEdit().setFocus(Qt.FocusReason.OtherFocusReason)
         self.show_status("Searching for phone bridges on the network…")
         self._phone_find_worker = PhoneBridgeFindWorker(self)
         self._phone_find_worker.finished_ok.connect(self._on_phone_find_finished)
@@ -6813,10 +6830,45 @@ class View(QMainWindow):
         idx = self.bridge_host_combo.findData(current)
         if idx >= 0:
             self.bridge_host_combo.setCurrentIndex(idx)
+            self.bridge_host_combo.setEditText(self.bridge_host_combo.itemText(idx))
         else:
-            self.bridge_host_combo.setEditText(current)
+            if self.bridge_host_combo.count() > 0:
+                self.bridge_host_combo.setCurrentIndex(0)
+                self.bridge_host_combo.setEditText(self.bridge_host_combo.itemText(0))
+            else:
+                self.bridge_host_combo.setEditText(current)
         self._on_phone_bridge_endpoint_changed()
+        if self.bridge_host_combo.lineEdit() is not None:
+            self.bridge_host_combo.lineEdit().setFocus(Qt.FocusReason.OtherFocusReason)
         n = len(phones)
+        if n == 0:
+            candidate = current.strip()
+            port = int(self.bridge_port_spin.value())
+            if candidate:
+                try:
+                    with socket.create_connection((candidate, port), timeout=1.2):
+                        label = f"{candidate} ({candidate})"
+                        self.bridge_host_combo.blockSignals(True)
+                        self.bridge_host_combo.addItem(label, candidate)
+                        self.bridge_host_combo.blockSignals(False)
+                        self.bridge_host_combo.setCurrentIndex(
+                            self.bridge_host_combo.findData(candidate)
+                        )
+                        self.bridge_host_combo.setEditText(
+                            self.bridge_host_combo.currentText()
+                        )
+                        if self.bridge_host_combo.lineEdit() is not None:
+                            self.bridge_host_combo.lineEdit().setFocus(
+                                Qt.FocusReason.OtherFocusReason
+                            )
+                        self._on_phone_bridge_endpoint_changed()
+                        self.show_status(
+                            "No broadcast discovery replies, but current host is reachable. "
+                            "You can Connect now."
+                        )
+                        return
+                except OSError:
+                    pass
         if n:
             self.show_status(
                 f"Found {n} phone bridge app(s). Choose host/port above, then Connect."

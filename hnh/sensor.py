@@ -4,6 +4,8 @@ import struct
 import os
 import platform
 import time
+import ipaddress
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 from time import perf_counter_ns
 from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer, qVersion
@@ -409,11 +411,23 @@ def _lan_ipv4_broadcast_strings() -> list[str]:
             if ip.protocol() != QAbstractSocket.NetworkLayerProtocol.IPv4Protocol:
                 continue
             b = ae.broadcast()
-            if b.isNull():
+            if not b.isNull():
+                s = b.toString().strip()
+                if s and s not in out:
+                    out.append(s)
                 continue
-            s = b.toString()
-            if s and s not in out:
-                out.append(s)
+            # Some Windows adapters report no broadcast in Qt; derive one.
+            try:
+                ip_s = ip.toString().strip()
+                mask_s = ae.netmask().toString().strip()
+                ip_i = struct.unpack("!I", socket.inet_aton(ip_s))[0]
+                mask_i = struct.unpack("!I", socket.inet_aton(mask_s))[0]
+                bcast_i = ip_i | (~mask_i & 0xFFFFFFFF)
+                derived = socket.inet_ntoa(struct.pack("!I", bcast_i))
+            except (OSError, struct.error, ValueError):
+                continue
+            if derived and derived not in out:
+                out.append(derived)
     seen: set[str] = set()
     dedup: list[str] = []
     for a in out:
@@ -421,6 +435,101 @@ def _lan_ipv4_broadcast_strings() -> list[str]:
             seen.add(a)
             dedup.append(a)
     return dedup
+
+
+def _lan_ipv4_hosts_for_probe(max_hosts: int = 1024) -> list[str]:
+    """
+    Return likely LAN host IPs derived from local IPv4 interfaces.
+    Used as a fallback when UDP broadcast discovery is blocked.
+    """
+    iface_entries: list[tuple[int, str, str]] = []
+    for iface in QNetworkInterface.allInterfaces():
+        flags = iface.flags()
+        if not (
+            flags & QNetworkInterface.InterfaceFlag.IsUp
+            and flags & QNetworkInterface.InterfaceFlag.IsRunning
+        ):
+            continue
+        if flags & QNetworkInterface.InterfaceFlag.IsLoopBack:
+            continue
+        name = (
+            iface.humanReadableName().strip().lower()
+            or iface.name().strip().lower()
+        )
+        is_virtual = any(k in name for k in ("docker", "vmware", "vbox", "hyper-v", "vethernet"))
+        for ae in iface.addressEntries():
+            ip = ae.ip()
+            if ip.protocol() != QAbstractSocket.NetworkLayerProtocol.IPv4Protocol:
+                continue
+            ip_s = ip.toString().strip()
+            mask_s = ae.netmask().toString().strip()
+            try:
+                net = ipaddress.IPv4Network(f"{ip_s}/{mask_s}", strict=False)
+            except ValueError:
+                continue
+            if net.num_addresses <= 2:
+                continue
+            own = ipaddress.IPv4Address(ip_s)
+            priority = 0
+            if not net.is_private:
+                priority += 4
+            if is_virtual:
+                priority += 8
+            iface_entries.append((priority, ip_s, mask_s))
+    out: list[str] = []
+    seen: set[str] = set()
+    for _priority, ip_s, mask_s in sorted(iface_entries, key=lambda x: x[0]):
+        try:
+            net = ipaddress.IPv4Network(f"{ip_s}/{mask_s}", strict=False)
+            own = ipaddress.IPv4Address(ip_s)
+        except ValueError:
+            continue
+        candidates = [h for h in net.hosts() if h != own]
+        if len(candidates) > 512:
+            # Keep probe time bounded on very large subnets.
+            candidates = candidates[:512]
+        for host in candidates:
+            hs = str(host)
+            if hs in seen:
+                continue
+            seen.add(hs)
+            out.append(hs)
+            if len(out) >= max_hosts:
+                return out
+    return out
+
+
+def _tcp_probe_phone_bridge_hosts(
+    hosts: list[str],
+    port: int,
+    timeout_s: float = 0.35,
+    max_workers: int = 32,
+) -> list[dict[str, object]]:
+    found: dict[str, dict[str, object]] = {}
+
+    def _probe(ip: str) -> tuple[str, bool]:
+        for _ in range(2):
+            try:
+                with socket.create_connection((ip, int(port)), timeout=timeout_s):
+                    return (ip, True)
+            except OSError:
+                time.sleep(0.02)
+        return (ip, False)
+
+    if not hosts:
+        return []
+    with ThreadPoolExecutor(max_workers=max(4, min(max_workers, len(hosts)))) as ex:
+        futures = [ex.submit(_probe, ip) for ip in hosts]
+        for fut in as_completed(futures):
+            ip, ok = fut.result()
+            if not ok:
+                continue
+            try:
+                host = socket.gethostbyaddr(ip)[0]
+            except OSError:
+                host = ip
+            found[ip] = {"ip": ip, "hostname": host, "port": int(port)}
+    return sorted(found.values(), key=lambda d: str(d.get("hostname", "")).lower())
 
 
 def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object]]:
@@ -435,13 +544,23 @@ def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(("", 0))
         sock.settimeout(0.35)
-        for addr in _lan_ipv4_broadcast_strings():
-            try:
-                sock.sendto(PHONE_BRIDGE_APP_DISCOVER, (addr, PHONE_BRIDGE_APP_DISCOVERY_PORT))
-            except OSError:
-                continue
+        targets = _lan_ipv4_broadcast_strings()
+
+        def _send_probe() -> None:
+            for addr in targets:
+                try:
+                    sock.sendto(PHONE_BRIDGE_APP_DISCOVER, (addr, PHONE_BRIDGE_APP_DISCOVERY_PORT))
+                except OSError:
+                    continue
+
+        _send_probe()
         deadline = time.monotonic() + timeout_s
+        next_probe_at = time.monotonic() + 0.8
         while time.monotonic() < deadline:
+            now = time.monotonic()
+            if now >= next_probe_at:
+                _send_probe()
+                next_probe_at = now + 0.8
             try:
                 data, raddr = sock.recvfrom(8192)
             except socket.timeout:
@@ -473,6 +592,16 @@ def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object
             sock.close()
         except OSError:
             pass
+    if not found:
+        port = int(PHONE_BRIDGE_PORT_DEFAULT)
+        tcp_hosts = _lan_ipv4_hosts_for_probe(max_hosts=1024)
+        for row in _tcp_probe_phone_bridge_hosts(
+            tcp_hosts, port=port, timeout_s=0.35, max_workers=32
+        ):
+            ip = str(row.get("ip", "")).strip()
+            if not ip:
+                continue
+            found[ip] = row
     return sorted(found.values(), key=lambda d: str(d.get("hostname", "")).lower())
 
 
