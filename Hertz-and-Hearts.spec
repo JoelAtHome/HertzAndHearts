@@ -28,15 +28,20 @@ def _win_dlls_beside_sklearn_openmp() -> list:
     ]
     dest = r"sklearn\.libs"
     out: list[tuple[str, str]] = []
-    seen: set[str] = set()
     for name in names:
         for folder in search_dirs:
             candidate = folder / name
             if candidate.is_file():
                 out.append((str(candidate), dest))
-                seen.add(name)
                 break
     return out
+
+
+def _win_duplicate_binaries_to_internal_root(entries: list) -> list:
+    """ctypes fallback uses basename under _MEIPASS if the sklearn\\.libs path fails."""
+    if platform.system() != "Windows" or not entries:
+        return list(entries)
+    return list(entries) + [(src, ".") for src, _ in entries]
 
 block_cipher = None
 
@@ -81,18 +86,28 @@ _hiddenimports += collect_submodules("sklearn")
 # is not always pulled into onedir bundles → import sklearn raises PyInstallerImportError.
 _sklearn_dlls = collect_dynamic_libs("sklearn")
 _win_sklearn_runtime = _win_dlls_beside_sklearn_openmp()
+_win_sklearn_binaries = _win_duplicate_binaries_to_internal_root(
+    _sklearn_dlls + _win_sklearn_runtime
+)
+
+_SPEC_DIR = Path(__file__).resolve().parent
+_runtime_hooks = []
+if IS_WIN:
+    _runtime_hooks.append(
+        str(_SPEC_DIR / "packaging" / "pyinstaller_rth_win_sklearn_dlls.py")
+    )
 
 a = Analysis(
     ["hnh/app.py"],
     pathex=[],
-    binaries=_sklearn_dlls + _win_sklearn_runtime,
+    binaries=_win_sklearn_binaries if IS_WIN else _sklearn_dlls,
     datas=[
         ("LICENSE", "."),
     ],
     hiddenimports=_hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=_runtime_hooks,
     excludes=[
         "tkinter",
     ],
