@@ -2,6 +2,10 @@ package com.example.polarh10bridge
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -38,7 +42,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBars
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.only
@@ -131,8 +134,12 @@ private const val BRIDGE_PORT_MIN = 1024
 private const val BRIDGE_PORT_MAX = 65535
 private const val BLE_ROW_STALE_MS = 5_000L
 private const val BLE_ROW_PRUNE_INTERVAL_MS = 1_000L
-private const val BLE_RSSI_RESUBSCRIBE_MS = 1_500L
-private const val BLE_RSSI_SCAN_WINDOW_MS = 1_000L
+/** Watchdog: restart RSSI scan if the stack dropped it (and pacing for Polar fallback when MAC unknown). */
+private const val BLE_RSSI_RESUBSCRIBE_MS = 2_000L
+/** Polar-only fallback: short burst scan when we have no BLE address to match (rare). */
+private const val BLE_RSSI_POLAR_BURST_MS = 3_500L
+/** Min time between on-screen connected-sensor dBm updates (scan may run faster). */
+private const val BLE_RSSI_UI_THROTTLE_MS = 1_500L
 
 private data class BleDeviceRow(
     val deviceId: String,
@@ -241,7 +248,33 @@ class MainActivity : ComponentActivity() {
     private var hrDisposable: io.reactivex.rxjava3.disposables.Disposable? = null
     private var ecgDisposable: io.reactivex.rxjava3.disposables.Disposable? = null
     private var bleSearchDisposable: Disposable? = null
-    private var bleRssiMonitorDisposable: Disposable? = null
+    /** Direct LE scan for RSSI; Polar search often never re-emits the connected peripheral. */
+    private var rssiLeScanCallback: ScanCallback? = null
+    private var bleRssiPolarFallbackDisposable: Disposable? = null
+
+    private var lastConnectedRssiUiElapsedMs = 0L
+    private var pendingConnectedRssiValue: Int? = null
+    private var pendingConnectedRssiAddressNorm: String? = null
+    private var rssiUiThrottleFlushScheduled = false
+
+    private val rssiUiThrottleFlushRunnable =
+        Runnable {
+            rssiUiThrottleFlushScheduled = false
+            val v = pendingConnectedRssiValue ?: return@Runnable
+            val addrNorm = pendingConnectedRssiAddressNorm
+            pendingConnectedRssiValue = null
+            pendingConnectedRssiAddressNorm = null
+            updateScreen { current ->
+                if (!current.sensorConnected) return@updateScreen current
+                if (addrNorm != null &&
+                    normBleAddr(current.connectedSensorAddress) != addrNorm
+                ) {
+                    return@updateScreen current
+                }
+                current.copy(connectedSensorRssi = v)
+            }
+            lastConnectedRssiUiElapsedMs = SystemClock.elapsedRealtime()
+        }
 
     private val writerLock = Any()
 
@@ -344,9 +377,15 @@ class MainActivity : ComponentActivity() {
                     mainHandler.postDelayed(this, BLE_RSSI_RESUBSCRIBE_MS)
                     return
                 }
-                stopConnectedRssiMonitor()
-                startConnectedRssiMonitor()
-                mainHandler.postDelayed({ stopConnectedRssiMonitor() }, BLE_RSSI_SCAN_WINDOW_MS)
+                if (state.connectedSensorAddress.isNotBlank()) {
+                    if (rssiLeScanCallback == null) {
+                        startConnectedRssiLeScan()
+                    }
+                } else {
+                    stopConnectedRssiPolarFallback()
+                    startConnectedRssiPolarFallback()
+                    mainHandler.postDelayed({ stopConnectedRssiPolarFallback() }, BLE_RSSI_POLAR_BURST_MS)
+                }
                 mainHandler.postDelayed(this, BLE_RSSI_RESUBSCRIBE_MS)
             }
         }
@@ -460,6 +499,38 @@ class MainActivity : ComponentActivity() {
         return out
     }
 
+    private fun requestConnectedSensorRssiUiUpdate(
+        rssi: Int,
+        connectedAddressNorm: String?,
+    ) {
+        val now = SystemClock.elapsedRealtime()
+        pendingConnectedRssiValue = rssi
+        pendingConnectedRssiAddressNorm = connectedAddressNorm
+        val due = now - lastConnectedRssiUiElapsedMs >= BLE_RSSI_UI_THROTTLE_MS
+        if (due) {
+            mainHandler.removeCallbacks(rssiUiThrottleFlushRunnable)
+            rssiUiThrottleFlushScheduled = false
+            rssiUiThrottleFlushRunnable.run()
+            return
+        }
+        if (!rssiUiThrottleFlushScheduled) {
+            val delay = BLE_RSSI_UI_THROTTLE_MS - (now - lastConnectedRssiUiElapsedMs)
+            rssiUiThrottleFlushScheduled = true
+            mainHandler.postDelayed(
+                rssiUiThrottleFlushRunnable,
+                delay.coerceAtLeast(1L),
+            )
+        }
+    }
+
+    private fun clearConnectedRssiUiThrottle() {
+        mainHandler.removeCallbacks(rssiUiThrottleFlushRunnable)
+        rssiUiThrottleFlushScheduled = false
+        pendingConnectedRssiValue = null
+        pendingConnectedRssiAddressNorm = null
+        lastConnectedRssiUiElapsedMs = 0L
+    }
+
     private fun stopBleScan() {
         mainHandler.removeCallbacks(bleScanStopRunnable)
         mainHandler.removeCallbacks(bleRowPruneRunnable)
@@ -468,14 +539,86 @@ class MainActivity : ComponentActivity() {
         updateScreen { it.copy(bleScanning = false) }
     }
 
-    private fun startConnectedRssiMonitor() {
+    @SuppressLint("MissingPermission")
+    private fun startConnectedRssiLeScan() {
+        val state = screenState.value
+        if (!state.sensorConnected) return
+        val addr = state.connectedSensorAddress.trim()
+        if (addr.isEmpty()) return
+        if (rssiLeScanCallback != null) return
+
+        val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+        if (adapter == null || !adapter.isEnabled) return
+        val scanner = adapter.bluetoothLeScanner ?: return
+        val targetNorm = normBleAddr(addr)
+
+        val callback =
+            object : ScanCallback() {
+                override fun onScanResult(
+                    callbackType: Int,
+                    result: ScanResult,
+                ) {
+                    if (normBleAddr(result.device.address) != targetNorm) return
+                    requestConnectedSensorRssiUiUpdate(result.rssi, targetNorm)
+                }
+
+                override fun onBatchScanResults(results: MutableList<ScanResult>) {
+                    for (r in results) {
+                        onScanResult(0, r)
+                    }
+                }
+
+                override fun onScanFailed(errorCode: Int) {
+                    Log.w("HnHBridge", "RSSI LE scan failed errorCode=$errorCode")
+                    val self = rssiLeScanCallback
+                    rssiLeScanCallback = null
+                    try {
+                        adapter.bluetoothLeScanner?.stopScan(self)
+                    } catch (_: Exception) {
+                    }
+                    if (screenState.value.sensorConnected &&
+                        !screenState.value.bleScanning &&
+                        screenState.value.connectedSensorAddress.isNotBlank()
+                    ) {
+                        mainHandler.postDelayed({ startConnectedRssiLeScan() }, 750L)
+                    }
+                }
+            }
+
+        rssiLeScanCallback = callback
+        try {
+            scanner.startScan(
+                null,
+                ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .build(),
+                callback,
+            )
+        } catch (e: Exception) {
+            Log.w("HnHBridge", "RSSI LE scan start failed", e)
+            rssiLeScanCallback = null
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopConnectedRssiLeScan() {
+        val cb = rssiLeScanCallback ?: return
+        rssiLeScanCallback = null
+        try {
+            val adapter = (getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+            adapter?.bluetoothLeScanner?.stopScan(cb)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun startConnectedRssiPolarFallback() {
         val state = screenState.value
         if (!state.sensorConnected) return
         val connectedId = state.connectedSensorId
         val connectedAddress = state.connectedSensorAddress
         val connectedName = state.connectedSensorName
         if (connectedId.isEmpty() && connectedAddress.isEmpty() && connectedName.isEmpty()) return
-        if (bleRssiMonitorDisposable?.isDisposed == false) return
+        if (bleRssiPolarFallbackDisposable?.isDisposed == false) return
 
         val connectedRow =
             BleDeviceRow(
@@ -486,30 +629,42 @@ class MainActivity : ComponentActivity() {
                 lastSeenElapsedMs = SystemClock.elapsedRealtime(),
             )
         try {
-            bleRssiMonitorDisposable = polarApi.searchForDevice()
-                .subscribeOn(Schedulers.io())
-                .observeOn(AndroidSchedulers.mainThread())
-                .subscribe(
-                    { info ->
-                        if (samePhysicalBleRow(connectedRow, info) ||
-                            sameConnectedDevice(connectedId, connectedAddress, connectedName, info)
-                        ) {
-                            updateScreen { current ->
-                                if (!current.sensorConnected) return@updateScreen current
-                                current.copy(connectedSensorRssi = info.rssi)
+            bleRssiPolarFallbackDisposable =
+                polarApi.searchForDevice()
+                    .subscribeOn(Schedulers.io())
+                    .observeOn(AndroidSchedulers.mainThread())
+                    .subscribe(
+                        { info ->
+                            if (samePhysicalBleRow(connectedRow, info) ||
+                                sameConnectedDevice(connectedId, connectedAddress, connectedName, info)
+                            ) {
+                                requestConnectedSensorRssiUiUpdate(info.rssi, null)
                             }
-                        }
-                    },
-                    { err -> Log.d("HnHBridge", "RSSI monitor stopped: ${err.message}") },
-                )
+                        },
+                        { err -> Log.d("HnHBridge", "RSSI Polar fallback stopped: ${err.message}") },
+                    )
         } catch (e: Exception) {
-            Log.d("HnHBridge", "RSSI monitor unavailable: ${e.message}")
+            Log.d("HnHBridge", "RSSI Polar fallback unavailable: ${e.message}")
+        }
+    }
+
+    private fun stopConnectedRssiPolarFallback() {
+        bleRssiPolarFallbackDisposable?.dispose()
+        bleRssiPolarFallbackDisposable = null
+    }
+
+    private fun startConnectedRssiMonitor() {
+        val state = screenState.value
+        if (!state.sensorConnected) return
+        if (state.connectedSensorAddress.isNotBlank()) {
+            startConnectedRssiLeScan()
         }
     }
 
     private fun stopConnectedRssiMonitor() {
-        bleRssiMonitorDisposable?.dispose()
-        bleRssiMonitorDisposable = null
+        clearConnectedRssiUiThrottle()
+        stopConnectedRssiLeScan()
+        stopConnectedRssiPolarFallback()
     }
 
     private fun stopConnectedRssiPolling() {
@@ -1728,35 +1883,6 @@ private fun AboutDialog(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun RedActionButton(
-    text: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Button(
-        onClick = onClick,
-        modifier = modifier.height(52.dp),
-        colors =
-            ButtonDefaults.buttonColors(
-                containerColor = BannerRed,
-                contentColor = UiWhite,
-            ),
-        elevation =
-            ButtonDefaults.buttonElevation(
-                defaultElevation = 4.dp,
-                pressedElevation = 8.dp,
-                hoveredElevation = 5.dp,
-                focusedElevation = 4.dp,
-                disabledElevation = 0.dp,
-            ),
-        shape = RoundedCornerShape(14.dp),
-        contentPadding = PaddingValues(horizontal = 20.dp, vertical = 12.dp),
-    ) {
-        Text(text = text, fontWeight = FontWeight.Bold, fontSize = 14.sp)
     }
 }
 
