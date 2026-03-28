@@ -154,11 +154,13 @@ def suggest_qtc_method(
     hr_span = float(np.max(hr_values) - np.min(hr_values))
     high_ratio = float(np.mean(hr_values > high))
     low_ratio = float(np.mean(hr_values < low))
+    pct_out = int(round(100.0 * outside_ratio))
+    span_bpm = int(round(hr_span))
 
     if outside_ratio >= 0.35 or hr_span >= 35.0:
         reason = (
             f"HR is frequently outside {int(low)}-{int(high)} bpm "
-            f"(outside_ratio={outside_ratio:.2f}, span={hr_span:.1f} bpm). "
+            f"({pct_out}% of beats out of band; HR span {span_bpm} bpm). "
             "Fridericia is less rate-biased at extremes."
         )
         return {"suggested_method": "fridericia", "reasoning": reason}
@@ -167,14 +169,14 @@ def suggest_qtc_method(
         dominant = "high" if high_ratio >= low_ratio else "low"
         reason = (
             f"HR occasionally leaves {int(low)}-{int(high)} bpm range "
-            f"(outside_ratio={outside_ratio:.2f}, mostly {dominant}-rate excursions). "
+            f"({pct_out}% of beats out of band; mostly {dominant}-rate excursions). "
             "Use adaptive Bazett/Fridericia switching with hysteresis."
         )
         return {"suggested_method": "adaptive_bazett_fridericia", "reasoning": reason}
 
     reason = (
         f"HR remains mostly inside {int(low)}-{int(high)} bpm "
-        f"(outside_ratio={outside_ratio:.2f}, span={hr_span:.1f} bpm). "
+        f"({pct_out}% of beats had HR outside that band; HR span {span_bpm} bpm). "
         "Bazett is acceptable for this dataset."
     )
     return {"suggested_method": "bazett", "reasoning": reason}

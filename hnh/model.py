@@ -8,7 +8,6 @@ from PySide6.QtCore import QObject, Signal, Slot
 from PySide6.QtBluetooth import QBluetoothDeviceInfo
 from hnh.utils import get_sensor_address, NamedSignal
 from hnh.config import (
-    tick_to_breathing_rate,
     HRV_BUFFER_SIZE,
     IBI_BUFFER_SIZE,
     MAX_BREATHING_RATE,
@@ -28,7 +27,6 @@ class Model(QObject):
     ibis_buffer_update = Signal(NamedSignal)
     hrv_update = Signal(NamedSignal)
     addresses_update = Signal(NamedSignal)
-    pacer_rate_update = Signal(NamedSignal)
     hrv_target_update = Signal(NamedSignal)
     stress_ratio_update = Signal(NamedSignal)
     psd_update = Signal(NamedSignal)
@@ -158,11 +156,6 @@ class Model(QObject):
             self._ecg_samples_since_qtc = 0
             self._schedule_qtc_compute()
 
-
-    @Slot(int)
-    def update_breathing_rate(self, breathing_tick: int):
-        self.breathing_rate = tick_to_breathing_rate(breathing_tick)
-        self.pacer_rate_update.emit(NamedSignal("PacerRate", self.breathing_rate))
 
     @Slot(int)
     def update_hrv_target(self, hrv_target: int):

@@ -27,10 +27,6 @@ MAX_HEART_RATE: Final[int] = 220  # bpm — physiological ceiling
 MIN_IBI: Final[int] = ceil(60_000 / MAX_HEART_RATE)   # ~273 ms
 MAX_IBI: Final[int] = ceil(60_000 / MIN_HEART_RATE)   # 2000 ms
 
-# Y-axis display range for the IBI (heart-rate) chart.
-MIN_PLOT_IBI: Final[int] = 300
-MAX_PLOT_IBI: Final[int] = 1500
-
 # ──────────────────────────────────────────────────────────────────────
 #  IBI / HRV BUFFERS & HISTORY
 # ──────────────────────────────────────────────────────────────────────
@@ -119,7 +115,8 @@ OPEN_SESSION_FOLDER_ON_SAVE: Final[bool] = True
 
 # Live connection source for the toolbar selector: "ble" or "phone".
 CONNECTION_MODE_DEFAULT: Final[str] = "ble"
-PHONE_BRIDGE_HOST_DEFAULT: Final[str] = "127.0.0.1"
+# Empty until the user scans, connects, or types a host (then persisted per profile).
+PHONE_BRIDGE_HOST_DEFAULT: Final[str] = ""
 PHONE_BRIDGE_PORT_DEFAULT: Final[int] = 8765
 
 # Number of seconds of beats averaged when smoothing the RMSSD chart
@@ -133,16 +130,7 @@ HR_EWMA_WEIGHT: Final[float] = 0.33
 # ──────────────────────────────────────────────────────────────────────
 #  BREATHING PACER
 # ──────────────────────────────────────────────────────────────────────
-MIN_BREATHING_RATE: Final[float] = 4.0  # breaths per minute
 MAX_BREATHING_RATE: Final[float] = 7.0  # breaths per minute
-
-
-def tick_to_breathing_rate(tick: int) -> float:
-    return (tick + 8) / 2  # scale tick to [4, 7], step .5
-
-
-def breathing_rate_to_tick(rate: float) -> int:
-    return ceil(rate * 2 - 8)  # scale rate to [0, 6], step 1
 
 
 # ──────────────────────────────────────────────────────────────────────

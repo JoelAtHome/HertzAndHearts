@@ -170,6 +170,31 @@ class ProfileStore:
                 (key, str(value)),
             )
 
+    LINUX_PHONE_BRIDGE_ECG_PROMPT_KEY = "linux_phone_bridge_ecg_prompt_v1"
+
+    def get_linux_phone_bridge_ecg_prompt_choice(self) -> str:
+        """
+        Linux Phone Bridge ECG offer persistence (separate from PC BLE PMD setting).
+        Returns '' (prompt each connection), 'always' (enable ECG without asking),
+        or 'never' (declined; do not prompt again).
+        """
+        raw = self._get_app_state(self.LINUX_PHONE_BRIDGE_ECG_PROMPT_KEY)
+        if raw in ("always", "never"):
+            return raw
+        return ""
+
+    def set_linux_phone_bridge_ecg_prompt_choice(self, choice: str) -> None:
+        if choice == "always":
+            self._set_app_state(self.LINUX_PHONE_BRIDGE_ECG_PROMPT_KEY, "always")
+        elif choice == "never":
+            self._set_app_state(self.LINUX_PHONE_BRIDGE_ECG_PROMPT_KEY, "never")
+        else:
+            with self._db() as conn:
+                conn.execute(
+                    "DELETE FROM app_state WHERE key = ?",
+                    (self.LINUX_PHONE_BRIDGE_ECG_PROMPT_KEY,),
+                )
+
     @staticmethod
     def _safe_started_at(session_id: str, fallback: datetime) -> str:
         try:

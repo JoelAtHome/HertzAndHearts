@@ -2,7 +2,6 @@ import os
 import sys
 from importlib import metadata
 from datetime import datetime
-from pathlib import Path
 
 
 def _configure_linux_qt_defaults() -> None:

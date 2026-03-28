@@ -7,6 +7,7 @@ file in the user's home directory so they survive app restarts.
 import json
 import math
 import os
+import platform
 import shutil
 from collections import OrderedDict
 from pathlib import Path
@@ -203,8 +204,9 @@ REGISTRY = OrderedDict([
         "display": "Linux PMD/ECG Path (Experimental)",
         "tooltip": (
             "Linux only. Enables Polar PMD control/data path used by ECG features. "
-            "When disabled, app uses stable HR/RR-only mode. If changed while running, "
-            "disconnect/reconnect sensor to apply."
+            "When disabled, app uses stable HR/RR-only mode. Leave unchecked when "
+            "reliable Bluetooth is not available (e.g. disconnects or no data). "
+            "If changed while running, disconnect/reconnect sensor to apply."
         ),
         "type": bool,
         "section": "ECG Monitor",
@@ -838,6 +840,8 @@ class SettingsDialog(QDialog):
         self._recommended_data_root = recommended_data_root()
         self._timeline_default_label: QLabel | None = None
         self._timeline_default_combo: QComboBox | None = None
+        self._phone_bridge_ecg_prompt_reset_label: QLabel | None = None
+        self._phone_bridge_ecg_prompt_reset_btn: QPushButton | None = None
 
         self.setWindowTitle("Hertz & Hearts \u2014 Settings")
         self.setMinimumWidth(500)
@@ -914,6 +918,31 @@ class SettingsDialog(QDialog):
                 self._labels[key] = label
                 self._base_tooltips[key] = full_tip
                 section_keys.append(key)
+            if (
+                section_name == "ECG Monitor"
+                and platform.system() == "Linux"
+                and self._profile_store is not None
+            ):
+                tip = (
+                    "Clears the remembered choice from 'Don't ask again' on the Linux "
+                    "Phone Bridge ECG/QTc prompt. This is separate from the experimental "
+                    "PC Bluetooth PMD setting above. The next Phone Bridge connection can "
+                    "show the prompt again."
+                )
+                pr_label = QLabel("Reset Phone Bridge ECG prompt [Global]")
+                pr_label.setToolTip(tip)
+                pr_btn = QPushButton("Reset \"Don't ask again\"…")
+                pr_btn.setToolTip(tip)
+                pr_btn.clicked.connect(self._on_reset_phone_bridge_ecg_prompt)
+                pr_row = QWidget()
+                pr_lay = QHBoxLayout(pr_row)
+                pr_lay.setContentsMargins(0, 0, 0, 0)
+                pr_lay.addWidget(pr_btn)
+                pr_lay.addStretch()
+                form.addRow(pr_label, pr_row)
+                self._phone_bridge_ecg_prompt_reset_label = pr_label
+                self._phone_bridge_ecg_prompt_reset_btn = pr_btn
+                self._refresh_phone_bridge_ecg_prompt_reset_button()
             if section_name == "Session Timing":
                 has_profile_context = bool(self._profile_store is not None and self._profile_id)
                 timeline_label = QLabel("Default Timeline Width [Profile]")
@@ -1377,6 +1406,27 @@ class SettingsDialog(QDialog):
         SettingsDialog._show_advanced = show
         self._refresh_section_visibility()
 
+    def _refresh_phone_bridge_ecg_prompt_reset_button(self) -> None:
+        btn = self._phone_bridge_ecg_prompt_reset_btn
+        if btn is None or self._profile_store is None:
+            return
+        has = bool(self._profile_store.get_linux_phone_bridge_ecg_prompt_choice())
+        btn.setEnabled(has)
+
+    def _on_reset_phone_bridge_ecg_prompt(self) -> None:
+        if self._profile_store is None:
+            return
+        if not self._profile_store.get_linux_phone_bridge_ecg_prompt_choice():
+            return
+        self._profile_store.set_linux_phone_bridge_ecg_prompt_choice("")
+        self._refresh_phone_bridge_ecg_prompt_reset_button()
+        QMessageBox.information(
+            self,
+            "Phone Bridge ECG prompt",
+            "The saved \"don't ask again\" choice was cleared. "
+            "The next Linux Phone Bridge connection can show the ECG/QTc prompt again.",
+        )
+
     def _apply_scope_filter(self, profile_only: bool):
         if profile_only:
             self._advanced_prev_checked = bool(self._advanced_toggle.isChecked())
@@ -1401,6 +1451,11 @@ class SettingsDialog(QDialog):
             widget.setVisible(visible)
             if label is not None:
                 label.setVisible(visible)
+        g_vis = not profile_only
+        if self._phone_bridge_ecg_prompt_reset_label is not None:
+            self._phone_bridge_ecg_prompt_reset_label.setVisible(g_vis)
+        if self._phone_bridge_ecg_prompt_reset_btn is not None:
+            self._phone_bridge_ecg_prompt_reset_btn.parentWidget().setVisible(g_vis)
         self._refresh_section_visibility()
 
     def _refresh_section_visibility(self):

@@ -5,7 +5,6 @@ import os
 import platform
 import json
 import math
-import platform
 import re
 import random
 import socket
@@ -17,7 +16,7 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
 from PySide6.QtGui import (
-    QPen, QIcon, QImage, QLinearGradient, QBrush, QGradient, QColor, QPixmap, QFont,
+    QPen, QIcon, QImage, QBrush, QColor, QPixmap, QFont,
     QKeySequence, QShortcut, QDesktopServices, QPainter,
 )
 from PySide6.QtCore import (
@@ -25,20 +24,21 @@ from PySide6.QtCore import (
     QRect, QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
     QEventLoop, QUrl, QDate,
 )
-from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo
+from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo, QBluetoothLocalDevice
 from PySide6.QtNetwork import QAbstractSocket
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
-    QProgressBar, QGridLayout, QSizePolicy, QStatusBar, QFrame, QCompleter,
+    QProgressBar, QSizePolicy, QStatusBar, QFrame, QCompleter,
     QGraphicsView,
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
+    QProgressDialog,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QDateEdit,
     QTabWidget, QListWidget, QListWidgetItem, QSplitter,
     QToolButton, QMenu, QSpinBox,
 )
 from collections import deque
-from typing import Iterable
+from typing import Optional
 from hnh.utils import get_sensor_address, NamedSignal
 from hnh.ble_diagnostics import ble_diagnostics_log_path
 from hnh.sensor import (
@@ -47,14 +47,12 @@ from hnh.sensor import (
     SensorScanner,
     discover_phone_bridge_hosts,
 )
+from hnh.linux_ble_prep import LinuxBlePrepWorker
 from hnh.logger import Logger
 from hnh.pacer import Pacer
 from hnh.model import Model
 from hnh.config import (
-    breathing_rate_to_tick, HRV_HISTORY_DURATION, IBI_HISTORY_DURATION,
     PLOT_WARMUP_SECONDS, MAIN_PLOT_START_SECONDS, MAIN_PLOT_SYNC_MIN_IBIS,
-    MAX_BREATHING_RATE, MIN_BREATHING_RATE, MIN_HRV_TARGET, MAX_HRV_TARGET,
-    MIN_PLOT_IBI, MAX_PLOT_IBI,
     ECG_SAMPLE_RATE,
     ECG_QRS_UNCERTAINTY_PCT, ECG_QTc_UNCERTAINTY_PCT,
     RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
@@ -162,10 +160,6 @@ class PacerWorker(QObject):
         self.coordinates_ready.emit(x, y)
 
 BLUE = QColor(135, 206, 250)
-WHITE = QColor(255, 255, 255)
-GREEN = QColor(0, 255, 0)
-YELLOW = QColor(255, 255, 0)
-RED = QColor(255, 0, 0)
 PACER_WIDGET_SIZE = 134
 
 # Tier 1 trend-guidance prefs (per profile; see WISHLIST progressive disclosure roadmap)
@@ -261,25 +255,6 @@ def _ensure_linux_window_decorations(widget) -> None:
     widget.setWindowFlags(flags)
 
 
-def _save_last_sensor(name, address):
-    if not name or "verity" in (name or "").lower():
-        return
-    try:
-        SENSOR_CONFIG.write_text(json.dumps({"name": name, "address": address}))
-    except Exception:
-        pass
-
-def _load_last_sensor():
-    try:
-        data = json.loads(SENSOR_CONFIG.read_text())
-        if data and "verity" in (data.get("name") or "").lower():
-            SENSOR_CONFIG.unlink(missing_ok=True)
-            return None
-        return data
-    except Exception:
-        return None
-
-
 def _clear_last_sensor(address: str | None = None):
     try:
         if not SENSOR_CONFIG.exists():
@@ -347,9 +322,6 @@ class StatusBanner(QFrame):
         self._label.setText(text)
         self._bar.setRange(0, maximum)
         self._bar.setValue(value)
-
-    def setFormat(self, text: str):
-        self._label.setText(text)
 
     def setRange(self, lo: int, hi: int):
         self._bar.setRange(lo, hi)
@@ -4254,6 +4226,9 @@ class EcgWindow(QMainWindow):
 class QtcWindow(QMainWindow):
     closed = Signal()
     image_captured = Signal(object)  # QPixmap
+    _STATUS_FOOTER = (
+        "For trend context only; clinical interpretation requires review."
+    )
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -4323,6 +4298,23 @@ class QtcWindow(QMainWindow):
         )
 
         self._statusbar = QStatusBar()
+        self._qtc_status_container = QWidget()
+        _qtc_stat_lay = QVBoxLayout(self._qtc_status_container)
+        _qtc_stat_lay.setContentsMargins(4, 2, 8, 2)
+        _qtc_stat_lay.setSpacing(0)
+        self._qtc_status_line1 = QLabel()
+        self._qtc_status_line2 = QLabel()
+        for _lb in (self._qtc_status_line1, self._qtc_status_line2):
+            _lb.setWordWrap(True)
+            _lb.setStyleSheet("font-size: 11px;")
+            _lb.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+            _lb.setSizePolicy(
+                QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
+            )
+        _qtc_stat_lay.addWidget(self._qtc_status_line1)
+        _qtc_stat_lay.addWidget(self._qtc_status_line2)
+        self._statusbar.addWidget(self._qtc_status_container, stretch=1)
+
         zoom_label = QLabel("Zoom:")
         zoom_label.setStyleSheet("font-size: 11px;")
         self._zoom_out_button = QPushButton("\u2212")
@@ -4372,9 +4364,7 @@ class QtcWindow(QMainWindow):
         self._statusbar.addPermanentWidget(self._capture_image_button)
         self._statusbar.addPermanentWidget(self._freeze_button)
         self.setStatusBar(self._statusbar)
-        self._statusbar.showMessage(
-            "Waiting for QTc trend points... For trend context only; clinical interpretation requires review."
-        )
+        self._set_qtc_status("Waiting for QTc trend points...", self._STATUS_FOOTER)
 
         self.setCentralWidget(self._plot_widget)
         self._frozen = False
@@ -4404,7 +4394,7 @@ class QtcWindow(QMainWindow):
         """Grab QTc plot widget and emit for saving to session folder."""
         pixmap = self._plot_widget.grab()
         if pixmap.isNull():
-            self._statusbar.showMessage("QTc image capture failed.")
+            self._set_qtc_status("QTc image capture failed.")
             return
         self.image_captured.emit(pixmap)
         central = self.centralWidget()
@@ -4460,6 +4450,20 @@ class QtcWindow(QMainWindow):
                     if first_sentence:
                         return f"Rationale: {first_sentence}."
         return "Rationale: insufficient data."
+
+    def _set_qtc_status(self, line1: str, line2: Optional[str] = None) -> None:
+        """Two-line status area; permanent widgets stay on the right."""
+        self._statusbar.clearMessage()
+        self._qtc_status_line1.setText(line1)
+        if line2:
+            self._qtc_status_line2.setText(line2)
+            self._qtc_status_line2.setVisible(True)
+        else:
+            self._qtc_status_line2.clear()
+            self._qtc_status_line2.setVisible(False)
+        tip = line1 if not line2 else f"{line1}\n{line2}"
+        self._qtc_status_line1.setToolTip(tip)
+        self._qtc_status_line2.setToolTip(tip)
 
     def _set_adaptive_y_range(
         self,
@@ -4570,7 +4574,7 @@ class QtcWindow(QMainWindow):
         self._lower_curve.setData([], [])
         self._plot_widget.setYRange(*self._default_y_range, padding=0)
         self._last_y_range = self._default_y_range
-        self._statusbar.showMessage("Waiting for QTc trend points...")
+        self._set_qtc_status("Waiting for QTc trend points...", self._STATUS_FOOTER)
 
     def start(self):
         self._frozen = False
@@ -4634,7 +4638,9 @@ class QtcWindow(QMainWindow):
             self._freeze_button.setToolTip("Resume QTc streaming and relock to main timeline.")
             self._apply_interaction_mode()
             self._refresh_relock_tooltip()
-            self._statusbar.showMessage("QTc frozen — drag to pan, scroll wheel or +/- to zoom.")
+            self._set_qtc_status(
+                "QTc frozen — drag to pan, scroll wheel or +/- to zoom."
+            )
         else:
             if was_frozen and self._pre_freeze_view_sec is not None:
                 self._view_sec = float(self._pre_freeze_view_sec)
@@ -4648,12 +4654,14 @@ class QtcWindow(QMainWindow):
                 self._set_xrange_if_needed(float(x_lo), float(x_hi))
             self._refresh_relock_tooltip()
             if self._times:
-                self._statusbar.showMessage(
-                    f"QTc streaming. {self._formula_label}. {self._formula_reason_label} "
-                    "For trend context only; clinical interpretation requires review."
+                self._set_qtc_status(
+                    f"QTc streaming. {self._formula_label}",
+                    f"{self._formula_reason_label} {self._STATUS_FOOTER}",
                 )
             else:
-                self._statusbar.showMessage("Waiting for QTc trend points...")
+                self._set_qtc_status(
+                    "Waiting for QTc trend points...", self._STATUS_FOOTER
+                )
             self._redraw()
 
     def _apply_interaction_mode(self):
@@ -4789,8 +4797,9 @@ class QtcWindow(QMainWindow):
             quality = payload.get("quality", {}) if isinstance(payload, dict) else {}
             reason = quality.get("reason") if isinstance(quality, dict) else None
             if isinstance(reason, str) and reason.strip():
-                self._statusbar.showMessage(
-                    f"QTc waiting: {reason}. {self._formula_label}. {self._formula_reason_label}"
+                self._set_qtc_status(
+                    f"QTc waiting: {reason}",
+                    f"{self._formula_label}. {self._formula_reason_label}",
                 )
             return
         try:
@@ -4863,9 +4872,9 @@ class QtcWindow(QMainWindow):
             self._threshold_label.setPos(auto_hi - 1.0, 471)
             x_lo, x_hi = auto_lo, auto_hi
         self._set_adaptive_y_range(x=x, median=y, p25=lo, p75=hi, x_lo=x_lo, x_hi=x_hi)
-        self._statusbar.showMessage(
-            f"QTc streaming. {self._formula_label}. {self._formula_reason_label} "
-            "For trend context only; clinical interpretation requires review."
+        self._set_qtc_status(
+            f"QTc streaming. {self._formula_label}",
+            f"{self._formula_reason_label} {self._STATUS_FOOTER}",
         )
 
     def closeEvent(self, event):
@@ -5477,6 +5486,10 @@ class View(QMainWindow):
         self._signal_fault_buffer: list[dict] = []
         self._signal_fault_counts: dict[str, int] = {}
         self._ble_diag_dialog_shown_session = False
+        # Linux: ECG/QTc via Phone Bridge without persisting LINUX_ENABLE_PMD_EXPERIMENTAL
+        # (saved checkbox applies to PC BLE only; cleared on disconnect / mode switch).
+        self._phone_bridge_linux_ecg_opt_in: bool = False
+        self._phone_bridge_linux_ecg_prompt_answered: bool = False
         # Disconnect intervals for manifest/CSV/report (start_ts, end_ts, reason, duration_sec)
         self._disconnect_intervals: list[dict] = []
         self._current_disconnect_start: float | None = None
@@ -5534,7 +5547,6 @@ class View(QMainWindow):
         self.model.qtc_update.connect(self.update_ui_labels)
 
         self.model.addresses_update.connect(self.list_addresses)
-        self.model.pacer_rate_update.connect(self.update_pacer_label)
         self.model.hrv_target_update.connect(self.update_hrv_target)
 
         # 3. COMPONENT INITIALIZATION
@@ -5698,7 +5710,6 @@ class View(QMainWindow):
         self._connect_pulse_on = False
         self._connect_pulse_active = False
         self._scan_pulse_active = False
-        self._ble_guidance_force_scan = self._connection_mode == "ble"
         self._freeze_resume_pulse_timer = QTimer(self)
         self._freeze_resume_pulse_timer.setInterval(650)
         self._freeze_resume_pulse_timer.timeout.connect(self._pulse_freeze_resume_button)
@@ -5708,6 +5719,8 @@ class View(QMainWindow):
         self._preserve_good_on_reset = False
         self._resuming_after_button_disconnect = False
         self._pending_connect_target: tuple[str, str] | None = None
+        self._linux_ble_prep_worker: LinuxBlePrepWorker | None = None
+        self._linux_ble_prep_dialog: QProgressDialog | None = None
 
         self.recording_statusbar = StatusBanner()
 
@@ -5767,9 +5780,7 @@ class View(QMainWindow):
         self.bridge_host_combo = QComboBox()
         self.bridge_host_combo.setEditable(True)
         self.bridge_host_combo.setMinimumWidth(180)
-        self.bridge_host_combo.setEditText(
-            (self._saved_bridge_host or "").strip() or PHONE_BRIDGE_HOST_DEFAULT
-        )
+        self.bridge_host_combo.setEditText((self._saved_bridge_host or "").strip())
         _bh_le = self.bridge_host_combo.lineEdit()
         if _bh_le is not None:
             _bh_le.setPlaceholderText("Phone IP")
@@ -6203,6 +6214,7 @@ class View(QMainWindow):
         toolbar_top.addWidget(self.connection_mode_combo)
         toolbar_top.addWidget(self.scan_button)
         toolbar_top.addWidget(self.address_menu)
+        self.address_menu.currentIndexChanged.connect(self._refresh_connect_hints_if_active)
         toolbar_top.addWidget(self.bridge_host_combo)
         toolbar_top.addWidget(self.bridge_port_spin)
         toolbar_top.addWidget(self.bridge_scan_phones_btn)
@@ -6290,7 +6302,6 @@ class View(QMainWindow):
         self._update_connection_mode_ui()
         self._update_session_actions()
         self._load_tier1_morning_baseline_pref()
-        self._focus_scan_if_needed()
         QTimer.singleShot(0, self._run_startup_flow)
         QTimer.singleShot(3500, self._schedule_background_update_check)
 
@@ -6401,8 +6412,11 @@ class View(QMainWindow):
             mode, host, port = self._load_connection_prefs(self._session_profile_id)
             self.bridge_host_combo.blockSignals(True)
             self.bridge_host_combo.clear()
-            self.bridge_host_combo.addItem(host, host)
-            self.bridge_host_combo.setCurrentIndex(0)
+            if host.strip():
+                self.bridge_host_combo.addItem(host, host)
+                self.bridge_host_combo.setCurrentIndex(0)
+            else:
+                self.bridge_host_combo.setEditText("")
             self.bridge_host_combo.blockSignals(False)
             self.bridge_port_spin.blockSignals(True)
             self.bridge_port_spin.setValue(port)
@@ -6425,8 +6439,6 @@ class View(QMainWindow):
         host = self._profile_store.get_profile_pref(
             profile_id, CONNECTION_PREF_PHONE_HOST, PHONE_BRIDGE_HOST_DEFAULT
         ).strip()
-        if not host:
-            host = PHONE_BRIDGE_HOST_DEFAULT
         raw_port = self._profile_store.get_profile_pref(
             profile_id, CONNECTION_PREF_PHONE_PORT, str(int(PHONE_BRIDGE_PORT_DEFAULT))
         )
@@ -6450,7 +6462,7 @@ class View(QMainWindow):
         self._profile_store.set_profile_pref(
             profile_id,
             CONNECTION_PREF_PHONE_HOST,
-            self._phone_bridge_host_value().strip() or PHONE_BRIDGE_HOST_DEFAULT,
+            self._phone_bridge_host_value().strip(),
         )
         self._profile_store.set_profile_pref(
             profile_id,
@@ -6620,13 +6632,14 @@ class View(QMainWindow):
         if self._should_show_linux_pmd_guidance_for_profile(selected_profile):
             self._show_linux_pmd_guidance_dialog(selected_profile)
         # After the initial dialogs, set a deterministic initial focus:
-        # - Phone Bridge mode: focus Connect (if enabled)
-        # - Otherwise: let Scan be the primary focus when appropriate
+        # focus Connect when host/sensor is chosen, otherwise Scan.
         self._apply_connect_ready_state()
-        if self._connection_mode == "phone":
-            QTimer.singleShot(0, self._focus_connect_if_ready)
-        else:
-            QTimer.singleShot(0, self._focus_scan_if_needed)
+        def _startup_focus():
+            if self._has_sensor_choices():
+                self._focus_connect_if_ready()
+            else:
+                self._focus_scan_if_needed()
+        QTimer.singleShot(0, _startup_focus)
 
     def _show_maximized_fit(self):
         """Size window to available screen (avoid showMaximized which can push window off-screen on Windows)."""
@@ -6849,18 +6862,17 @@ class View(QMainWindow):
         self._bind_sensor_signals(self.sensor)
         self._bind_sensor_window_signals(self.sensor)
         self._connection_mode = requested
+        self._clear_phone_bridge_linux_ecg_session_flags()
         if requested == "phone":
             self.address_menu.clear()
             self._pending_connect_target = None
             self._is_scanning = False
             self._scan_pulse_active = False
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
-            self._ble_guidance_force_scan = False
-        else:
-            self._ble_guidance_force_scan = True
         self._persist_connection_prefs()
         self._update_connection_mode_ui()
         self._apply_connect_ready_state()
+        self._start_connect_hints()
 
     def _on_connection_mode_changed(self, _index: int) -> None:
         mode = self.connection_mode_combo.currentData()
@@ -6869,6 +6881,7 @@ class View(QMainWindow):
     def _on_phone_bridge_endpoint_changed(self, *_args) -> None:
         self._persist_connection_prefs()
         self._apply_connect_ready_state()
+        self._refresh_connect_hints_if_active()
 
     def _update_connection_mode_ui(self) -> None:
         phone_mode = self._connection_mode == "phone"
@@ -6891,9 +6904,6 @@ class View(QMainWindow):
             if not phone_mode else
             "Discover phone bridge apps on your local Wi-Fi network."
         )
-        if phone_mode:
-            self._scan_pulse_active = False
-            self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
 
     def _phone_bridge_host_value(self) -> str:
         idx = self.bridge_host_combo.currentIndex()
@@ -7025,7 +7035,86 @@ class View(QMainWindow):
     def _ecg_path_active(self) -> bool:
         if platform.system() != "Linux":
             return True
+        if (
+            self._connection_mode == "phone"
+            and self._phone_bridge_linux_ecg_opt_in
+        ):
+            return True
         return bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False))
+
+    def _clear_phone_bridge_linux_ecg_session_flags(self) -> None:
+        if not self._phone_bridge_linux_ecg_opt_in and not self._phone_bridge_linux_ecg_prompt_answered:
+            return
+        self._phone_bridge_linux_ecg_opt_in = False
+        self._phone_bridge_linux_ecg_prompt_answered = False
+        self._update_session_actions()
+
+    def _maybe_offer_linux_phone_bridge_ecg(self) -> None:
+        if platform.system() != "Linux":
+            return
+        if self._connection_mode != "phone":
+            return
+        if not isinstance(self.sensor, PhoneBridgeClient):
+            return
+        if not self._is_sensor_connected():
+            return
+        if bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False)):
+            return
+
+        saved = self._profile_store.get_linux_phone_bridge_ecg_prompt_choice()
+        if saved == "always":
+            self._phone_bridge_linux_ecg_opt_in = True
+            self._phone_bridge_linux_ecg_prompt_answered = True
+            self._update_session_actions()
+            return
+        if saved == "never":
+            self._phone_bridge_linux_ecg_opt_in = False
+            self._phone_bridge_linux_ecg_prompt_answered = True
+            self._update_session_actions()
+            return
+
+        if self._phone_bridge_linux_ecg_prompt_answered:
+            return
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Information)
+        box.setWindowTitle("ECG with Phone Bridge")
+        box.setTextFormat(Qt.RichText)
+        box.setText(
+            "Phone Bridge already sends ECG from your phone over Wi‑Fi. "
+            "The Linux <b>experimental PMD / PC Bluetooth ECG</b> setting is not used "
+            "in this mode."
+        )
+        box.setInformativeText(
+            "Enable the live ECG monitor and QTc tools for this Phone Bridge connection?\n\n"
+            "If you switch back to PC Bluetooth, your saved Linux PMD/ECG setting is unchanged."
+        )
+        dont_again = QCheckBox("Don't ask again on future Phone Bridge connections")
+        dont_again.setToolTip(
+            "Remember this choice for later connects. The PC Bluetooth PMD setting in "
+            "Settings is still separate."
+        )
+        box.setCheckBox(dont_again)
+        box.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        box.setDefaultButton(QMessageBox.Yes)
+        yes_btn = box.button(QMessageBox.Yes)
+        no_btn = box.button(QMessageBox.No)
+        if yes_btn is not None:
+            yes_btn.setText("Enable ECG && QTc")
+        if no_btn is not None:
+            no_btn.setText("Not now")
+
+        reply = box.exec()
+        self._phone_bridge_linux_ecg_prompt_answered = True
+        if reply == QMessageBox.Yes:
+            self._phone_bridge_linux_ecg_opt_in = True
+        else:
+            self._phone_bridge_linux_ecg_opt_in = False
+        if dont_again.isChecked():
+            self._profile_store.set_linux_phone_bridge_ecg_prompt_choice(
+                "always" if reply == QMessageBox.Yes else "never"
+            )
+        self._update_session_actions()
 
     def _set_session_state(self, state: str):
         self._session_state = state
@@ -7074,12 +7163,22 @@ class View(QMainWindow):
                 self.ecg_button.setToolTip("Open/close the live ECG monitor window.")
                 self.qtc_button.setToolTip("Open/close the live QTc trend monitor window.")
             else:
-                self.ecg_button.setToolTip(
-                    "ECG window disabled: Linux PMD/ECG path is OFF in Settings."
-                )
-                self.qtc_button.setToolTip(
-                    "QTc window disabled: Linux PMD/ECG path is OFF in Settings."
-                )
+                if platform.system() == "Linux" and self._connection_mode == "phone":
+                    self.ecg_button.setToolTip(
+                        "ECG: confirm the Phone Bridge prompt after connect, or enable "
+                        "Linux PMD/ECG in Settings when using PC Bluetooth."
+                    )
+                    self.qtc_button.setToolTip(
+                        "QTc: confirm the Phone Bridge prompt after connect, or enable "
+                        "Linux PMD/ECG in Settings when using PC Bluetooth."
+                    )
+                else:
+                    self.ecg_button.setToolTip(
+                        "ECG window disabled: Linux PMD/ECG path is OFF in Settings."
+                    )
+                    self.qtc_button.setToolTip(
+                        "QTc window disabled: Linux PMD/ECG path is OFF in Settings."
+                    )
         self._apply_freeze_button_states()
         self._refresh_popup_control_labels()
         self.ecg_window.set_image_capture_enabled(True)
@@ -7167,25 +7266,6 @@ class View(QMainWindow):
                     break
         shutil.copytree(source, target)
         return target
-
-    def _copy_selected_artifacts_to(self, destination_root: Path, paths: list[Path]) -> Path | None:
-        if self._session_bundle is None:
-            return None
-        started = self._session_bundle.started_at
-        out_dir = (
-            destination_root
-            / started.strftime("%Y")
-            / started.strftime("%Y-%m-%d")
-            / self._session_bundle.session_id
-        )
-        out_dir.mkdir(parents=True, exist_ok=True)
-        copied_any = False
-        for path in paths:
-            if not path.exists():
-                continue
-            shutil.copy2(path, out_dir / path.name)
-            copied_any = True
-        return out_dir if copied_any else None
 
     def _build_report_data(self, report_stage: str) -> dict:
         session_start = (
@@ -7437,13 +7517,6 @@ class View(QMainWindow):
         else:
             self.show_status(f"Session started: {self._session_bundle.session_dir}")
 
-    def stop_session(self):
-        """End the measuring session, stop recording, and save data to session folder.
-        Does not generate reports or prompt for copy destination. Use Save for that."""
-        self._abandon_active_session()
-        if self._session_bundle is not None:
-            self.show_status(f"Session stopped. Data saved to {self._session_bundle.session_dir}")
-
     def _abandon_active_session(self):
         if self._session_state != "recording":
             return
@@ -7504,6 +7577,7 @@ class View(QMainWindow):
         if self._connection_mode == "phone":
             host = self._phone_bridge_host_value().strip()
             port = int(self.bridge_port_spin.value())
+            self._persist_connection_prefs()
             self._stop_connect_hints()
             self.connect_button.setEnabled(False)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
@@ -7525,9 +7599,7 @@ class View(QMainWindow):
         if not self.model.sensors and self.sensor.client is None:
             self._pending_connect_target = (name, address)
             self._set_scan_in_progress(True)
-            if not self.scanner.scan():
-                self._set_scan_in_progress(False)
-                self._pending_connect_target = None
+            self._start_pc_ble_sensor_scan()
             return
         self._do_connect(name, address)
 
@@ -8356,12 +8428,71 @@ class View(QMainWindow):
             self._set_support_prompt_never()
             self.show_status("Support reminder disabled for this profile.")
 
+    def _start_pc_ble_sensor_scan(self) -> None:
+        """Begin PC BLE discovery; Linux runs BlueZ prep in a worker with a short dialog first."""
+        if self._connection_mode != "ble":
+            return
+        w = self._linux_ble_prep_worker
+        if w is not None and w.isRunning():
+            return
+        if platform.system() == "Linux":
+            self._run_linux_ble_prep_then_scan()
+        else:
+            self._complete_pc_ble_sensor_scan_start()
+
+    def _complete_pc_ble_sensor_scan_start(self) -> None:
+        if not self.scanner.scan():
+            self._set_scan_in_progress(False)
+            self._pending_connect_target = None
+
+    def _run_linux_ble_prep_then_scan(self) -> None:
+        dlg = QProgressDialog(self)
+        dlg.setWindowTitle("Checking Bluetooth")
+        dlg.setLabelText(
+            "Checking Bluetooth and preparing the adapter before scanning for sensors.\n\n"
+            "If you use a Wi-Fi phone bridge instead of PC Bluetooth, choose "
+            "Phone Bridge in Connection Mode (no local BLE scan)."
+        )
+        dlg.setRange(0, 0)
+        dlg.setMinimumDuration(0)
+        dlg.setCancelButton(None)
+        dlg.setModal(True)
+        _ensure_linux_window_decorations(dlg)
+        dlg.show()
+        QApplication.processEvents()
+        self._linux_ble_prep_dialog = dlg
+        worker = LinuxBlePrepWorker(self)
+        self._linux_ble_prep_worker = worker
+        worker.finished.connect(self._on_linux_ble_prep_thread_finished)
+        worker.start()
+
+    def _on_linux_ble_prep_thread_finished(self) -> None:
+        dlg = self._linux_ble_prep_dialog
+        if dlg is not None:
+            dlg.close()
+            self._linux_ble_prep_dialog = None
+        worker = self._linux_ble_prep_worker
+        self._linux_ble_prep_worker = None
+        if worker is not None:
+            try:
+                worker.finished.disconnect(self._on_linux_ble_prep_thread_finished)
+            except Exception:
+                pass
+            worker.deleteLater()
+        try:
+            local = QBluetoothLocalDevice()
+            if local.isValid():
+                local.powerOn()
+        except Exception:
+            pass
+        QApplication.processEvents()
+        self._complete_pc_ble_sensor_scan_start()
+
     def _on_scan_clicked(self):
         if self._connection_mode == "phone":
             self._on_find_phone_bridges_clicked()
             return
-        self._ble_guidance_force_scan = False
-        self.scanner.scan()
+        self._start_pc_ble_sensor_scan()
 
     def _on_scan_state_changed(self, active: bool):
         self._is_scanning = bool(active)
@@ -8411,24 +8542,17 @@ class View(QMainWindow):
             self._hr_overlay.show()
             self._hrv_overlay.show()
         has_sensors = self._has_sensor_choices()
-        # Scan-first UX:
-        # - pulse Scan when no fresh scan results exist
-        # - pulse Connect when scan has results and next step is connect
-        if self._connection_mode == "phone":
-            self._connect_pulse_active = has_sensors and not self._is_scanning
-            self._scan_pulse_active = False
-        else:
-            if self._ble_guidance_force_scan:
-                # Startup BLE guidance: always emphasize Scan first.
-                self._connect_pulse_active = False
-                self._scan_pulse_active = not self._is_scanning
-            else:
-                self._connect_pulse_active = has_sensors and not self._is_scanning
-                self._scan_pulse_active = (not has_sensors) and not self._is_scanning
+        # Pulse Scan whenever hints are shown (except while scanning). Pulse Connect only
+        # when host/sensor text exists so Connect is actionable; otherwise keep it gray.
+        self._scan_pulse_active = not self._is_scanning
+        self._connect_pulse_active = has_sensors and not self._is_scanning
         self._apply_connect_ready_state()
         if self._is_scanning:
             self.scan_button.setStyleSheet(self._SCAN_NORMAL_CSS)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
+        elif self._scan_pulse_active and self._connect_pulse_active:
+            self.scan_button.setStyleSheet(self._SCAN_GLOW_CSS)
+            self.connect_button.setStyleSheet(self._CONNECT_GLOW_CSS)
         elif self._scan_pulse_active:
             # Make the startup guidance visible immediately (before first timer tick).
             self.scan_button.setStyleSheet(self._SCAN_GLOW_CSS)
@@ -8442,8 +8566,15 @@ class View(QMainWindow):
         if not self._connect_pulse_timer.isActive():
             self._connect_pulse_on = False
             self._connect_pulse_timer.start()
-        if self._connection_mode == "ble" and self._scan_pulse_active and not self._is_scanning:
-            self._focus_scan_if_needed()
+        if not self._is_scanning:
+            if has_sensors:
+                self._focus_connect_if_ready()
+            else:
+                self._focus_scan_if_needed()
+
+    def _refresh_connect_hints_if_active(self) -> None:
+        if getattr(self, "_connect_pulse_timer", None) and self._connect_pulse_timer.isActive():
+            self._start_connect_hints()
 
     def _stop_connect_hints(self):
         self._hr_overlay.hide()
@@ -8461,33 +8592,33 @@ class View(QMainWindow):
 
     _CONNECT_GLOW_CSS = (
         "QPushButton { "
-        "font-size: 11px; padding: 2px 6px; "
+        "font-size: 11px; padding: 2px 6px; font-weight: normal; "
         "background: #d4edda; border: 2px solid #28a745; border-radius: 3px; "
         "}"
     )
     _CONNECT_NORMAL_CSS = (
         "QPushButton { "
-        "font-size: 11px; padding: 2px 6px; "
+        "font-size: 11px; padding: 2px 6px; font-weight: normal; "
         "background: transparent; border: 2px solid transparent; border-radius: 3px; "
         "}"
     )
     _CONNECT_DISABLED_CSS = (
         "QPushButton { "
-        "font-size: 11px; padding: 2px 6px; "
+        "font-size: 11px; padding: 2px 6px; font-weight: normal; "
         "background: #ecf0f1; color: #7f8c8d; border: 2px solid #bdc3c7; border-radius: 3px; "
         "}"
     )
     _SCAN_GLOW_CSS = (
         "QPushButton { "
-        "font-size: 11px; padding: 2px 6px; "
-        "font-weight: 700; color: #1f3a2d; "
+        "font-size: 11px; padding: 2px 6px; font-weight: normal; "
+        "color: #1f3a2d; "
         "background: #d4edda; border: 2px solid #28a745; border-radius: 3px; "
         "}"
     )
     _SCAN_NORMAL_CSS = (
         "QPushButton { "
-        "font-size: 11px; padding: 2px 6px; "
-        "background: #f8f9fa; border: 1px solid #bdc3c7; border-radius: 3px; "
+        "font-size: 11px; padding: 2px 6px; font-weight: normal; "
+        "background: #f8f9fa; border: 2px solid #bdc3c7; border-radius: 3px; "
         "}"
     )
     _FREEZE_RESUME_PULSE_CSS_A = (
@@ -8552,16 +8683,16 @@ class View(QMainWindow):
             return
         if self._is_sensor_connected() or self._connect_attempt_timer.isActive():
             return
+        self.scan_button.setDefault(False)
         self.connect_button.setFocus(Qt.OtherFocusReason)
         self.connect_button.setDefault(True)
 
     def _focus_scan_if_needed(self):
         if self._is_sensor_connected() or self._connect_attempt_timer.isActive():
             return
-        if self._connection_mode == "phone":
-            return
         if self._has_sensor_choices():
             return
+        self.connect_button.setDefault(False)
         self.scan_button.setFocus(Qt.OtherFocusReason)
         self.scan_button.setDefault(True)
 
@@ -8838,9 +8969,6 @@ class View(QMainWindow):
         if self._session_state == "recording":
             return
         self.start_session(auto=True)
-
-    def get_filepath(self):
-        self.start_session(auto=False)
 
     def emit_annotation(self):
         if self._session_state != "recording":
@@ -9488,10 +9616,6 @@ class View(QMainWindow):
         self.address_menu.addItems(addresses.value)
         self._set_scan_in_progress(False)
         self._apply_connect_ready_state()
-        if self._has_sensor_choices():
-            self._focus_connect_if_ready()
-        else:
-            self._focus_scan_if_needed()
         if self.sensor.client is None:
             self._start_connect_hints()
         if self._pending_connect_target is not None and self.sensor.client is None:
@@ -9515,9 +9639,6 @@ class View(QMainWindow):
         if not self.pacer_toggle.isChecked():
             return
         self.pacer_widget.update_series(x, y)
-
-    def update_pacer_label(self, rate: NamedSignal):
-        self.pacer_label.setText(f"Rate: {rate.value}")
 
     def update_hrv_target(self, target: NamedSignal):
         # Do not overwrite RMSSD axis when user has reset Y axes (data-driven range)
@@ -9766,6 +9887,12 @@ class View(QMainWindow):
             self.disconnect_button.setEnabled(True)
             self.scan_button.setEnabled(False)
             self._auto_start_recording()
+            if (
+                platform.system() == "Linux"
+                and isinstance(self.sensor, PhoneBridgeClient)
+                and "phone bridge" in status.lower()
+            ):
+                QTimer.singleShot(0, self._maybe_offer_linux_phone_bridge_ecg)
         elif (
             "error" in status.lower()
             or "Disconnecting" in status
@@ -9774,6 +9901,7 @@ class View(QMainWindow):
             # If connect failed or link dropped, unblock reconnect immediately.
             self._connect_attempt_timer.stop()
             if isinstance(self.sensor, PhoneBridgeClient):
+                self._clear_phone_bridge_linux_ecg_session_flags()
                 client = getattr(self.sensor, "client", None)
                 if client is not None:
                     try:

@@ -1,5 +1,4 @@
 import platform
-from pathlib import Path
 from collections import namedtuple
 from PySide6.QtBluetooth import QBluetoothDeviceInfo
 

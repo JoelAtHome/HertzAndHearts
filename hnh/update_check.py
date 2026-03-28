@@ -92,7 +92,6 @@ class ReleaseInfo:
     version_display: str
     html_url: str
     tag_name: str
-    release_name: str
 
 
 @dataclass(frozen=True)
@@ -183,7 +182,6 @@ def pick_newest_release(releases: list[dict[str, Any]]) -> ReleaseInfo | None:
         if pv is None:
             continue
         url = str(r.get("html_url") or RELEASES_PAGE_URL)
-        name = str(r.get("name") or tag)
         norm = _normalize_tag(tag)
         info = ReleaseInfo(
             version=pv,
@@ -191,7 +189,6 @@ def pick_newest_release(releases: list[dict[str, Any]]) -> ReleaseInfo | None:
             version_display=norm or str(pv),
             html_url=url,
             tag_name=tag,
-            release_name=name,
         )
         if best_v is None or pv > best_v:
             best_v = pv
