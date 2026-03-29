@@ -65,6 +65,9 @@ jobs:
       contents: write
 
     steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
       - name: Resolve release tag
         id: release_tag
         env:
@@ -87,15 +90,31 @@ jobs:
           name: PolarH10Bridge-debug-apk
           path: apk
 
+      # GitHub's release API can lag slightly behind the `release: published` event;
+      # Gradle also finishes after the desktop matrix uploads. Retry so `gh release view`
+      # sees the same published release the desktop workflow attached to.
       - name: Attach APK to GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           TAG="${{ steps.release_tag.outputs.tag }}"
           test -f apk/app-debug.apk
-          gh release view "$TAG" --json tagName >/dev/null 2>&1 || {
-            echo "::error::No published GitHub Release found for tag '$TAG'. Create and publish the release first, then re-run with this tag."
-            exit 1
-          }
           cp apk/app-debug.apk "PolarH10Bridge-debug-${TAG}.apk"
-          gh release upload "$TAG" "PolarH10Bridge-debug-${TAG}.apk" --clobber
+          FILE="PolarH10Bridge-debug-${TAG}.apk"
+          found=
+          for i in $(seq 1 30); do
+            if gh release view "$TAG" --json tagName >/dev/null 2>&1; then
+              found=1
+              break
+            fi
+            echo "Release not visible yet for tag '$TAG' (attempt $i/30); waiting 10s..."
+            sleep 10
+          done
+          if [ -z "$found" ]; then
+            echo "::error::No published GitHub release found for tag '$TAG' after waiting."
+            echo "Recent releases (check tag spelling, including leading 'v'):"
+            gh release list -L 15 || true
+            exit 1
+          fi
+          gh release upload "$TAG" "$FILE" --clobber
