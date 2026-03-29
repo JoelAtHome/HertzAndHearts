@@ -1,6 +1,7 @@
 # Changelog
 
 ### Unreleased
++ release: Bumped pre-release version to `1.0.0b1` (public label: `1.0.0-beta.1`); aligned Polar H10 Bridge and Windows installer metadata.
 + docs: Extended `docs/USER_GUIDE.md` with Tier 1 morning baseline protocol, Session Trends / Compare / Tag Insights, and RMSSD recovery zones.
 + enhancement: Tier 1 trend guidance—morning baseline protocol (checkbox, in-session banner, `session_manifest.json` → `trend_guidance.morning_baseline_protocol`), RMSSD recovery zone strip under Session Trends with configurable baseline window and “Why these zones?” explainer (`hnh/view.py`; prefs `tier1_morning_baseline_protocol`, `tier1_recovery_baseline_sessions`).
 + release: Set project pre-release version to `1.0.0b0` (public label: `1.0.0-beta`) and added beta launch collateral/templates.

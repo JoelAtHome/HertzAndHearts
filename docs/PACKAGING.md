@@ -1,6 +1,6 @@
 # Packaging Guide (Windows, macOS, Linux)
 
-Current beta target: **1.0.0-beta** (Python package version: `1.0.0b0`).
+Current beta target: **1.0.0-beta.1** (Python package version: `1.0.0b1`).
 
 ## Prerequisites
 
@@ -23,7 +23,7 @@ pwsh packaging/windows/build_windows_package.ps1
 Optional installer:
 
 - Install Inno Setup
-- Run: `iscc /DMyAppVersion=1.0.0-beta installer.iss`
+- Run: `iscc /DMyAppVersion=1.0.0-beta.1 installer.iss`
 
 ## macOS
 

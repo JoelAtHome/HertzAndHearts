@@ -409,7 +409,7 @@ class Card0Dialog(QDialog):
         self._tagline.setAlignment(Qt.AlignCenter)
         lay.addWidget(self._tagline)
 
-        self._ver = QLabel(f"v{version}  ·  Investigational Use Only")
+        self._ver = QLabel(f"v{_display_version_label(version)}  ·  Investigational Use Only")
         self._ver.setAlignment(Qt.AlignCenter)
         ver_row = QHBoxLayout()
         ver_row.setAlignment(Qt.AlignCenter)

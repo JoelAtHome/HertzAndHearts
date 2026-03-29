@@ -2,7 +2,7 @@
 
 ## X (short)
 
-Hertz & Hearts 1.0.0-beta is live.
+Hertz & Hearts 1.0.0-beta.1 is live.
 
 Open-source desktop HRV biofeedback app (ECG chest straps like Polar H10).
 Looking for beta testers to run our checklist + submit issues.
@@ -13,7 +13,7 @@ Repo: https://github.com/JoelAtHome/HertzAndHearts
 
 ## X (thread opener)
 
-I just launched Hertz & Hearts 1.0.0-beta:
+I just launched Hertz & Hearts 1.0.0-beta.1:
 an open-source desktop HRV biofeedback app using ECG chest straps.
 
 If you are into HRV, recovery, biofeedback, or coaching workflows, I would love your testing help.
@@ -25,7 +25,7 @@ https://github.com/JoelAtHome/HertzAndHearts
 
 ## LinkedIn (longer)
 
-I am opening public beta for **Hertz & Hearts 1.0.0-beta**, an open-source desktop HRV biofeedback application.
+I am opening public beta for **Hertz & Hearts 1.0.0-beta.1**, an open-source desktop HRV biofeedback application.
 
 The goal of this beta is to validate real-world reliability and usability across different OS + hardware setups (especially chest-strap ECG devices like Polar H10).
 

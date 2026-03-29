@@ -67,8 +67,7 @@ jobs:
         shell: pwsh
         run: |
           choco install innosetup -y --no-progress
-          $ver = (python -c "import tomllib;print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
-          $ver = $ver -replace "b0$", "-beta"
+          $ver = python -c 'import re, tomllib; v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]; m = re.fullmatch(r"(\d+\.\d+\.\d+)b(\d+)", v); print(f"{m.group(1)}-beta" if m and m.group(2) == "0" else f"{m.group(1)}-beta.{m.group(2)}" if m else v)'
           iscc "/DMyAppVersion=$ver" installer.iss
 
       # Upload the built tree, not a pre-made .zip/.tar.gz: GitHub always zips

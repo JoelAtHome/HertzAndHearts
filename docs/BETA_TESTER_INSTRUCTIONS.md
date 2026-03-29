@@ -1,4 +1,4 @@
-# Beta Tester Instructions (1.0.0-beta)
+# Beta Tester Instructions (1.0.0-beta.1)
 
 Thanks for testing Hertz & Hearts.
 

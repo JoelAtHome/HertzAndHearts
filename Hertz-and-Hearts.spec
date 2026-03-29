@@ -65,7 +65,7 @@ block_cipher = None
 # Read version from pyproject.toml (single source of truth).
 with open("pyproject.toml", encoding="utf-8") as f:
     _match = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
-VERSION = _match.group(1) if _match else "1.0.0b0"
+VERSION = _match.group(1) if _match else "1.0.0b1"
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"

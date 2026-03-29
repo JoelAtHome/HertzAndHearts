@@ -1,6 +1,6 @@
-# Hertz & Hearts 1.0.0-beta (Call for Testers)
+# Hertz & Hearts 1.0.0-beta.1 (Call for Testers)
 
-Hertz & Hearts **1.0.0-beta** is now open for public beta testing.
+Hertz & Hearts **1.0.0-beta.1** is now open for public beta testing.
 
 Built upon OpenHRV (Jan C. Brammer), continued under GPL-3.0.
 

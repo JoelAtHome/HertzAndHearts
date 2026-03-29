@@ -2,13 +2,13 @@
 
 ## Title
 
-Show HN: Hertz & Hearts 1.0.0-beta - Open-source desktop HRV biofeedback app
+Show HN: Hertz & Hearts 1.0.0-beta.1 - Open-source desktop HRV biofeedback app
 
 ## Body
 
 Hi HN,
 
-I am releasing **Hertz & Hearts 1.0.0-beta**, an open-source desktop app for HRV biofeedback sessions using ECG chest straps (e.g., Polar H10).
+I am releasing **Hertz & Hearts 1.0.0-beta.1**, an open-source desktop app for HRV biofeedback sessions using ECG chest straps (e.g., Polar H10).
 
 This beta is mainly for validating:
 - session reliability (connect/record/stop/save)
