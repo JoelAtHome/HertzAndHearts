@@ -1254,12 +1254,44 @@ class SessionHistoryDialog(QDialog):
         folder = Path(str(selected.get("session_dir") or "").strip())
         if not str(folder) or str(folder) == "--" or not folder.exists():
             self._set_history_status("Session folder is unavailable.", clear_after_ms=2000)
+            self._offer_remove_missing_session_row(selected, folder)
             return
         ok = QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
         if ok:
             self._set_history_status("Opened session folder.", clear_after_ms=1500)
             return
         self._set_history_status("Could not open session folder.", clear_after_ms=2200)
+
+    def _offer_remove_missing_session_row(
+        self,
+        row: dict[str, str | None],
+        folder: Path,
+    ) -> None:
+        if self._profile_store is None:
+            return
+        session_id = str(row.get("session_id") or "").strip()
+        if not session_id:
+            return
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Session Folder Missing")
+        msg.setText(f"Folder not found:\n{folder}")
+        msg.setInformativeText(
+            "Remove this session from history? This deletes indexed history/trend records only."
+        )
+        remove_btn = msg.addButton("Remove from history", QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        _ensure_linux_window_decorations(msg)
+        msg.exec()
+        if msg.clickedButton() != remove_btn:
+            return
+        result = self._profile_store.delete_sessions_by_ids([session_id])
+        if int(result.get("removed_rows") or 0) > 0:
+            self._reload_history()
+            self._set_history_status("Removed missing session from history.", clear_after_ms=2200)
+        else:
+            self._set_history_status("Session was not found in history.", clear_after_ms=2200)
 
     def _on_history_context_menu(self, pos):
         item = self._table.itemAt(pos)
@@ -2704,7 +2736,24 @@ class SessionReassignDialog(QDialog):
             return
         folder = Path(folder_text)
         if not folder.exists():
-            _warning_ok(self, "Open Session Folder", f"Folder not found:\n{folder}")
+            sid_item = self._table.item(row, 2)
+            session_id = str(sid_item.data(Qt.UserRole) if sid_item is not None else "").strip()
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("Open Session Folder")
+            msg.setText(f"Folder not found:\n{folder}")
+            msg.setInformativeText(
+                "Remove this session from history? This deletes indexed history/trend records."
+            )
+            remove_btn = msg.addButton("Remove from history", QMessageBox.ButtonRole.DestructiveRole)
+            msg.addButton(QMessageBox.StandardButton.Cancel)
+            msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            _ensure_linux_window_decorations(msg)
+            msg.exec()
+            if msg.clickedButton() == remove_btn and session_id:
+                result = self._store.delete_sessions_by_ids([session_id])
+                if int(result.get("removed_rows") or 0) > 0:
+                    self._reload_sessions()
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
 
@@ -9447,11 +9496,39 @@ class View(QMainWindow):
         )
         if failed:
             failed_lines = [f"{sid}: {reason}" for sid, reason in failed[:25]]
-            QMessageBox.warning(
-                self,
-                "Session Reassignment Completed with Issues",
-                details + "\n\nFailed session details:\n" + "\n".join(failed_lines),
-            )
+            missing_folder_ids = [
+                sid
+                for sid, reason in failed
+                if sid and sid != "(unknown)" and str(reason).startswith("Session folder not found:")
+            ]
+            if missing_folder_ids:
+                msg = QMessageBox(self)
+                msg.setIcon(QMessageBox.Warning)
+                msg.setWindowTitle("Session Reassignment Completed with Issues")
+                msg.setText(details + "\n\nFailed session details:\n" + "\n".join(failed_lines))
+                msg.setInformativeText(
+                    "Some failures are missing session folders. "
+                    "You can remove those sessions from indexed history/trends."
+                )
+                remove_btn = msg.addButton(
+                    "Remove missing from history", QMessageBox.ButtonRole.DestructiveRole
+                )
+                msg.addButton(QMessageBox.StandardButton.Ok)
+                msg.setDefaultButton(QMessageBox.StandardButton.Ok)
+                _ensure_linux_window_decorations(msg)
+                msg.exec()
+                if msg.clickedButton() == remove_btn:
+                    result = self._profile_store.delete_sessions_by_ids(missing_folder_ids)
+                    removed_rows = int(result.get("removed_rows") or 0)
+                    self.show_status(
+                        f"Removed {removed_rows} missing session(s) from history."
+                    )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Session Reassignment Completed with Issues",
+                    details + "\n\nFailed session details:\n" + "\n".join(failed_lines),
+                )
             self.show_status(
                 f"Session reassignment finished with {len(failed)} failure(s)."
             )

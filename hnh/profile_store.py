@@ -1072,6 +1072,35 @@ class ProfileStore:
                 updated += int(cur.rowcount or 0)
         return updated
 
+    def delete_sessions_by_ids(self, session_ids: list[str]) -> dict[str, int]:
+        """Delete session rows (history + trends) for explicit session IDs."""
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in session_ids:
+            sid = str(raw or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            cleaned.append(sid)
+        if not cleaned:
+            return {"removed_rows": 0, "removed_trends": 0}
+
+        qmarks = ",".join(["?"] * len(cleaned))
+        removed_rows = 0
+        removed_trends = 0
+        with self._db() as conn:
+            cur_history = conn.execute(
+                f"DELETE FROM session_history WHERE session_id IN ({qmarks})",
+                tuple(cleaned),
+            )
+            cur_trends = conn.execute(
+                f"DELETE FROM session_trends WHERE session_id IN ({qmarks})",
+                tuple(cleaned),
+            )
+            removed_rows = int(cur_history.rowcount or 0)
+            removed_trends = int(cur_trends.rowcount or 0)
+        return {"removed_rows": removed_rows, "removed_trends": removed_trends}
+
     def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
         sid = str(session_id).strip()
         if not sid:
