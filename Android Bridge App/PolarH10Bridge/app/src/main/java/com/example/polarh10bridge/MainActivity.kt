@@ -233,6 +233,7 @@ private data class BridgeScreenState(
     /** Outbound TCP session: PC connected to this phone's bridge port. */
     val pcBridgeConnected: Boolean = false,
     val pcBridgeIp: String? = null,
+    val pcBridgeUserName: String? = null,
 )
 
 class MainActivity : ComponentActivity() {
@@ -338,6 +339,7 @@ class MainActivity : ComponentActivity() {
             it.copy(
                 pcBridgeConnected = false,
                 pcBridgeIp = null,
+                pcBridgeUserName = null,
             )
         }
     }
@@ -461,6 +463,19 @@ class MainActivity : ComponentActivity() {
             } catch (e: Exception) {
                 Log.e("HnHBridge", "bridge write failed", e)
             }
+        }
+    }
+
+    private fun handlePcBridgeInboundLine(line: String) {
+        val raw = line.trim()
+        if (raw.isEmpty()) return
+        try {
+            val payload = JSONObject(raw)
+            if (!payload.optString("type").equals("client_info", ignoreCase = true)) return
+            val user = payload.optString("pc_user", "").trim().ifEmpty { null }
+            updateScreen { it.copy(pcBridgeUserName = user) }
+        } catch (_: Exception) {
+            // Keep stream compatibility with older/newer clients.
         }
     }
 
@@ -1094,20 +1109,21 @@ class MainActivity : ComponentActivity() {
                                         screenState.value.copy(
                                             pcBridgeConnected = true,
                                             pcBridgeIp = client.inetAddress?.hostAddress,
+                                            pcBridgeUserName = null,
                                         )
                                 }
 
                                 sendBridgeJsonLine("""{"type":"status","message":"Phone bridge connected","connected":true}""")
 
                                 try {
-                                    val input = client.getInputStream()
-                                    val buf = ByteArray(1024)
+                                    val input = client.getInputStream().bufferedReader(Charsets.UTF_8)
                                     while (true) {
-                                        val n = input.read(buf)
-                                        if (n == -1) {
+                                        val line = input.readLine()
+                                        if (line == null) {
                                             Log.d("HnHBridge", "PC closed TCP (EOF)")
                                             break
                                         }
+                                        handlePcBridgeInboundLine(line)
                                     }
                                 } catch (e: SocketException) {
                                     Log.d("HnHBridge", "TCP connection lost: ${e.message}")
@@ -1121,6 +1137,7 @@ class MainActivity : ComponentActivity() {
                                             screenState.value.copy(
                                                 pcBridgeConnected = false,
                                                 pcBridgeIp = null,
+                                                pcBridgeUserName = null,
                                             )
                                     }
                                     Log.d("HnHBridge", "Bridge session closed")
@@ -1495,6 +1512,7 @@ private fun BridgeMainScreen(
                 BridgeFlowDiagram(
                     sensorConnected = state.sensorConnected,
                     pcBridgeConnected = state.pcBridgeConnected,
+                    pcBridgeUserName = state.pcBridgeUserName,
                     onScanSensors = onScanSensors,
                     modifier = Modifier.padding(bottom = 8.dp),
                 )

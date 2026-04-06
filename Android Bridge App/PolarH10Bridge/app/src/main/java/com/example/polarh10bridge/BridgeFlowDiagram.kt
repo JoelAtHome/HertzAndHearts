@@ -60,6 +60,7 @@ private val NodeGrayTint = Color(0xFF9E9E9E)
 internal fun BridgeFlowDiagram(
     sensorConnected: Boolean,
     pcBridgeConnected: Boolean,
+    pcBridgeUserName: String?,
     onScanSensors: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -317,7 +318,7 @@ internal fun BridgeFlowDiagram(
             }
         }
         Text(
-            text = "PC · Hertz & Hearts",
+            text = "PC - Hertz & Hearts",
             fontSize = 11.sp,
             fontWeight = FontWeight.Medium,
             color = DiagramTextDark,
@@ -326,6 +327,20 @@ internal fun BridgeFlowDiagram(
                 Modifier
                     .fillMaxWidth(),
         )
+        if (pcBridgeConnected && !pcBridgeUserName.isNullOrBlank()) {
+            Text(
+                text = "User: $pcBridgeUserName",
+                fontSize = 10.sp,
+                lineHeight = 9.sp,
+                fontWeight = FontWeight.Normal,
+                color = SmallLabelGray,
+                textAlign = TextAlign.Center,
+                modifier =
+                    Modifier
+                        .fillMaxWidth()
+                        .offset(y = (-4).dp),
+            )
+        }
     }
 }
 

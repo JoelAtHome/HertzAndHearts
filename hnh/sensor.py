@@ -220,9 +220,14 @@ class PhoneBridgeClient(QObject):
         self._buffer = bytearray()
         self._host = ""
         self._port = 0
+        self._client_profile_name = "Admin"
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+
+    def set_client_profile_name(self, profile_name: str) -> None:
+        name = str(profile_name or "").strip()
+        self._client_profile_name = name or "Admin"
 
     def connect_host(self, host: str, port: int) -> None:
         if self.client is not None:
@@ -292,6 +297,29 @@ class PhoneBridgeClient(QObject):
     def _on_connected(self) -> None:
         self.status_update.emit(f"Connected to Phone Bridge ({self._host}:{self._port}).")
         self.battery_update.emit(-1)
+        self._send_client_info()
+
+    def _send_client_info(self) -> None:
+        sock = self.client
+        if sock is None:
+            return
+        username = str(getattr(self, "_client_profile_name", "") or "").strip() or "Admin"
+        try:
+            host = str(platform.node() or "").strip() or socket.gethostname()
+        except Exception:
+            host = ""
+        payload = {
+            "type": "client_info",
+            "app": "HertzAndHearts",
+            "pc_user": username,
+            "pc_host": host,
+        }
+        try:
+            sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            sock.flush()
+        except Exception:
+            # Non-fatal: bridge should continue streaming even if metadata send fails.
+            pass
 
     def _on_disconnected(self) -> None:
         had_client = self.client is not None

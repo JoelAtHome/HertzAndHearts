@@ -5810,6 +5810,8 @@ class View(QMainWindow):
             self._profile_store.get_last_active_profile() or "Admin"
         )
         self._profile_store.ensure_profile(self._session_profile_id)
+        self._profile_header_flash_anim: QPropertyAnimation | None = None
+        self._profile_header_flash_effect: QGraphicsOpacityEffect | None = None
         self._last_profile_switch_monotonic = time.monotonic()
         self._start_new_profile_switch_grace_seconds = 1.0
         self._saved_connection_mode, self._saved_bridge_host, self._saved_bridge_port = (
@@ -6310,11 +6312,8 @@ class View(QMainWindow):
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
         header_row.setSpacing(4)
-        self.profile_header_label = QLabel(f"User: {self._session_profile_id}")
-        self.profile_header_label.setStyleSheet(
-            "font-size: 15px; font-weight: 700; color: #0f3854; "
-            "background: #d8efff; border: 2px solid #5db5f2; border-radius: 3px; padding: 3px 9px;"
-        )
+        self.profile_header_label = QLabel(self._profile_header_rich_text(self._session_profile_id))
+        self._apply_profile_header_style(highlight=False)
         self.profile_header_label.setAlignment(Qt.AlignCenter)
         self._disclaimer_link = QLabel('<a href="open-disclaimer">Legal Disclaimer</a>')
         self._disclaimer_link.setTextFormat(Qt.RichText)
@@ -6666,10 +6665,16 @@ class View(QMainWindow):
             )
             setattr(self.settings, key, value)
 
-    def _set_active_profile(self, profile_id: str, announce: bool = False):
+    def _set_active_profile(
+        self, profile_id: str, announce: bool = False, force_profile_highlight: bool = False
+    ):
+        previous_profile = str(getattr(self, "_session_profile_id", "") or "").strip()
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
-        self.profile_header_label.setText(f"User: {self._session_profile_id}")
+        self.profile_header_label.setText(self._profile_header_rich_text(self._session_profile_id))
         self._last_profile_switch_monotonic = time.monotonic()
+        changed = previous_profile.casefold() != self._session_profile_id.casefold()
+        if changed or force_profile_highlight:
+            self._animate_profile_header_change()
         self._apply_profile_scoped_settings(self._session_profile_id)
         self._load_timeline_span_pref(self._session_profile_id)
         saved_rate = self._profile_store.get_profile_pref(
@@ -6719,6 +6724,57 @@ class View(QMainWindow):
             int(max(0.0, self._start_new_profile_switch_grace_seconds) * 1000.0) + 25,
             self._update_session_actions,
         )
+
+    @staticmethod
+    def _profile_header_rich_text(profile_name: str) -> str:
+        name = str(profile_name or "").strip() or "Admin"
+        return (
+            "<span style='font-size:10px; color:#6b7280; letter-spacing:0.4px;'>ACTIVE USER</span>"
+            f"<br><span style='font-size:14px; font-weight:700; color:#111827;'>{name}</span>"
+        )
+
+    def _apply_profile_header_style(self, *, highlight: bool):
+        if highlight:
+            self.profile_header_label.setStyleSheet(
+                "background: #fef9c3; border: 1px solid #f5d76e; border-radius: 9px; "
+                "padding: 4px 12px; min-width: 170px;"
+            )
+            return
+        self.profile_header_label.setStyleSheet(
+            "background: #f8fafc; border: 1px solid #cbd5e1; border-radius: 9px; "
+            "padding: 4px 12px; min-width: 170px;"
+        )
+
+    def _animate_profile_header_change(self):
+        if self._profile_header_flash_anim is not None:
+            try:
+                self._profile_header_flash_anim.stop()
+            except Exception:
+                pass
+        self._apply_profile_header_style(highlight=True)
+        effect = QGraphicsOpacityEffect(self.profile_header_label)
+        effect.setOpacity(1.0)
+        self.profile_header_label.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(1800)
+        anim.setKeyValueAt(0.0, 1.0)
+        anim.setKeyValueAt(0.18, 0.35)
+        anim.setKeyValueAt(0.36, 1.0)
+        anim.setKeyValueAt(0.58, 0.45)
+        anim.setKeyValueAt(0.78, 1.0)
+        anim.setKeyValueAt(1.0, 1.0)
+        anim.setEasingCurve(QEasingCurve.InOutQuad)
+
+        def _cleanup():
+            self.profile_header_label.setGraphicsEffect(None)
+            self._profile_header_flash_effect = None
+            self._profile_header_flash_anim = None
+            self._apply_profile_header_style(highlight=False)
+
+        anim.finished.connect(_cleanup)
+        self._profile_header_flash_effect = effect
+        self._profile_header_flash_anim = anim
+        anim.start()
 
     def _load_connection_prefs(self, profile_id: str) -> tuple[str, str, int]:
         default_mode = (
@@ -6913,7 +6969,11 @@ class View(QMainWindow):
         if selected_profile is None:
             self.close()
             return
-        self._set_active_profile(selected_profile, announce=True)
+        self._set_active_profile(
+            selected_profile,
+            announce=True,
+            force_profile_highlight=True,
+        )
         if self._should_show_disclaimer_for_profile(selected_profile):
             if not self._show_card0_dialog(selected_profile):
                 self.close()
@@ -7919,6 +7979,7 @@ class View(QMainWindow):
         if self._connection_mode == "phone":
             host = self._phone_bridge_host_value().strip()
             port = int(self.bridge_port_spin.value())
+            self.phone_bridge.set_client_profile_name(self._session_profile_id)
             self._persist_connection_prefs()
             self._stop_connect_hints()
             self.connect_button.setEnabled(False)
