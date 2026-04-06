@@ -992,6 +992,86 @@ class ProfileStore:
             )
         return out
 
+    def get_sessions_by_ids(self, session_ids: list[str]) -> list[dict[str, str | None]]:
+        ids = [str(s).strip() for s in session_ids if str(s).strip()]
+        if not ids:
+            return []
+        qmarks = ",".join(["?"] * len(ids))
+        query = (
+            "SELECT session_id, profile_name, started_at, ended_at, state, session_dir, csv_path, is_hidden "
+            f"FROM session_history WHERE session_id IN ({qmarks}) "
+            "ORDER BY started_at DESC, session_id DESC"
+        )
+        with self._db() as conn:
+            rows = conn.execute(query, tuple(ids)).fetchall()
+        out: list[dict[str, str | None]] = []
+        for row in rows:
+            out.append(
+                {
+                    "session_id": str(row["session_id"]),
+                    "profile_name": str(row["profile_name"]),
+                    "started_at": str(row["started_at"]),
+                    "ended_at": str(row["ended_at"]) if row["ended_at"] is not None else None,
+                    "state": str(row["state"]),
+                    "session_dir": str(row["session_dir"]),
+                    "csv_path": str(row["csv_path"]),
+                    "is_hidden": "1" if int(row["is_hidden"] or 0) else "0",
+                }
+            )
+        return out
+
+    def reassign_sessions(
+        self,
+        *,
+        target_profile: str,
+        updates: list[dict[str, str]],
+    ) -> int:
+        """
+        Reassign session ownership and storage paths.
+
+        Expected update item keys:
+        - session_id (required)
+        - session_dir (required)
+        - csv_path (required)
+        """
+        profile = self.ensure_profile(target_profile)
+        clean_updates: list[tuple[str, str, str]] = []
+        seen: set[str] = set()
+        for row in updates:
+            sid = str(row.get("session_id") or "").strip()
+            session_dir = str(row.get("session_dir") or "").strip()
+            csv_path = str(row.get("csv_path") or "").strip()
+            if not sid or not session_dir or not csv_path:
+                continue
+            if sid in seen:
+                continue
+            seen.add(sid)
+            clean_updates.append((sid, session_dir, csv_path))
+        if not clean_updates:
+            return 0
+
+        updated = 0
+        with self._db() as conn:
+            for sid, session_dir, csv_path in clean_updates:
+                cur = conn.execute(
+                    """
+                    UPDATE session_history
+                    SET profile_name = ?, session_dir = ?, csv_path = ?
+                    WHERE session_id = ?
+                    """,
+                    (profile, session_dir, csv_path, sid),
+                )
+                conn.execute(
+                    """
+                    UPDATE session_trends
+                    SET profile_name = ?
+                    WHERE session_id = ?
+                    """,
+                    (profile, sid),
+                )
+                updated += int(cur.rowcount or 0)
+        return updated
+
     def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
         sid = str(session_id).strip()
         if not sid:

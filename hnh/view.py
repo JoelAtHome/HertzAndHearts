@@ -642,13 +642,21 @@ class ProfileSelectionDialog(QDialog):
         info.setWordWrap(True)
         root.addWidget(info)
 
+        self._active_profile_banner = QLabel("")
+        self._active_profile_banner.setWordWrap(True)
+        self._active_profile_banner.setStyleSheet(
+            "font-size: 12px; font-weight: 700; color: #0f3854; "
+            "background: #e8f6ff; border: 1px solid #8ac6ef; border-radius: 4px; padding: 6px 8px;"
+        )
+        root.addWidget(self._active_profile_banner)
+
         form = QFormLayout()
         form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._combo = QComboBox()
         self._combo.setEditable(False)
         self._combo.setMinimumWidth(195)
         self._combo.setMaximumWidth(195)
-        unique_profiles = []
+        unique_profiles: list[str] = []
         seen: set[str] = set()
         for profile in profiles:
             p = str(profile).strip()
@@ -661,11 +669,36 @@ class ProfileSelectionDialog(QDialog):
             unique_profiles.append(p)
         if not unique_profiles:
             unique_profiles = ["Admin"]
-        self._combo.addItems(unique_profiles)
+
+        profile_info_map: dict[str, dict[str, str | int | bool | None]] = {}
+        if self._profile_store is not None:
+            try:
+                for row in self._profile_store.list_profiles_info(include_archived=False):
+                    name = str(row.get("name") or "").strip()
+                    if name:
+                        profile_info_map[name.casefold()] = row
+            except Exception:
+                profile_info_map = {}
+
+        self._name_by_index: dict[int, str] = {}
+        for name in unique_profiles:
+            info_row = profile_info_map.get(name.casefold(), {})
+            last_used = (
+                str(info_row.get("last_used_at") or "").strip()
+                if isinstance(info_row, dict)
+                else ""
+            )
+            last_used_text = format_datetime_for_display(last_used) if last_used else "never"
+            label = f"{name}   (last used: {last_used_text})"
+            self._combo.addItem(label, userData=name)
+            self._name_by_index[self._combo.count() - 1] = name
+
         if last_profile:
-            idx = self._combo.findText(last_profile, Qt.MatchFixedString)
-            if idx >= 0:
-                self._combo.setCurrentIndex(idx)
+            for idx in range(self._combo.count()):
+                actual = str(self._combo.itemData(idx) or "").strip()
+                if actual.casefold() == str(last_profile).strip().casefold():
+                    self._combo.setCurrentIndex(idx)
+                    break
         form.addRow("User profile:", self._combo)
 
         self._pw_edit = QLineEdit()
@@ -674,6 +707,11 @@ class ProfileSelectionDialog(QDialog):
         self._pw_edit.setMinimumWidth(195)
         self._pw_edit.setMaximumWidth(195)
         form.addRow("Password:", self._pw_edit)
+        self._confirm_on_start_cb = QCheckBox("Ask for confirmation when starting sessions")
+        self._confirm_on_start_cb.setToolTip(
+            "Extra safety check before Start New for this profile."
+        )
+        form.addRow("", self._confirm_on_start_cb)
         root.addLayout(form)
 
         buttons = QHBoxLayout()
@@ -695,6 +733,8 @@ class ProfileSelectionDialog(QDialog):
         self._cancel_btn.clicked.connect(self.reject)
         buttons.addWidget(self._cancel_btn)
         root.addLayout(buttons)
+        self._combo.currentIndexChanged.connect(self._on_profile_changed)
+        self._on_profile_changed()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -725,14 +765,44 @@ class ProfileSelectionDialog(QDialog):
         if not name:
             _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
-        idx = self._combo.findText(name, Qt.MatchFixedString)
+        idx = -1
+        for i in range(self._combo.count()):
+            value = str(self._combo.itemData(i) or "").strip()
+            if value.casefold() == name.casefold():
+                idx = i
+                break
         if idx < 0:
-            self._combo.addItem(name)
+            self._combo.addItem(f"{name}   (last used: never)", userData=name)
             idx = self._combo.count() - 1
         self._combo.setCurrentIndex(idx)
 
+    def _selected_profile_name(self) -> str:
+        data = self._combo.currentData()
+        if data:
+            return str(data).strip()
+        idx = self._combo.currentIndex()
+        if idx >= 0:
+            return str(self._name_by_index.get(idx, "")).strip()
+        return ""
+
+    def _on_profile_changed(self):
+        name = self._selected_profile_name() or "Admin"
+        self._active_profile_banner.setText(
+            f"Current selection: {name}\nNew recordings and history updates will be saved under this user."
+        )
+        if self._profile_store is None:
+            self._confirm_on_start_cb.setChecked(False)
+            return
+        raw = self._profile_store.get_profile_pref(
+            name,
+            "confirm_start_new_session",
+            default="1",
+        )
+        enabled = str(raw).strip().lower() not in {"0", "false", "no", "off"}
+        self._confirm_on_start_cb.setChecked(enabled)
+
     def _accept_selected(self):
-        name = self._combo.currentText().strip()
+        name = self._selected_profile_name()
         if not name:
             _warning_ok(self, "Profile Required", "Please select a profile.")
             return
@@ -749,6 +819,12 @@ class ProfileSelectionDialog(QDialog):
                 self._pw_edit.clear()
                 self._pw_edit.setFocus()
                 return
+        if self._profile_store is not None:
+            self._profile_store.set_profile_pref(
+                name,
+                "confirm_start_new_session",
+                "1" if self._confirm_on_start_cb.isChecked() else "0",
+            )
         self.selected_profile = name
         self.password_entered = self._pw_edit.text()
         self.accept()
@@ -2482,6 +2558,209 @@ class TrendsWindow(QMainWindow):
         self._refresh_plot()
         self._refresh_compare_session_list()
         self._refresh_tag_insights()
+
+
+class SessionReassignDialog(QDialog):
+    """Admin utility to reassign past sessions to a different profile."""
+
+    def __init__(self, store: ProfileStore, active_profile: str, parent=None):
+        super().__init__(parent)
+        self._store = store
+        self._active_profile = str(active_profile or "").strip() or "Admin"
+        self._selected_session_ids: list[str] = []
+        self._source_profile: str = self._active_profile
+        self._target_profile: str = self._active_profile
+        self.setModal(True)
+        self.setWindowTitle("Reassign Session(s)")
+        self.resize(960, 520)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Admin utility: move selected sessions to a new profile, update manifests, and rebuild reports."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        controls = QFormLayout()
+        self._source_combo = QComboBox()
+        self._target_combo = QComboBox()
+        for name in self._store.list_profiles():
+            self._source_combo.addItem(name)
+            self._target_combo.addItem(name)
+        src_idx = self._source_combo.findText(self._active_profile, Qt.MatchFixedString)
+        if src_idx >= 0:
+            self._source_combo.setCurrentIndex(src_idx)
+        tgt_idx = self._target_combo.findText(self._active_profile, Qt.MatchFixedString)
+        if tgt_idx >= 0:
+            self._target_combo.setCurrentIndex(tgt_idx)
+        controls.addRow("Source profile:", self._source_combo)
+        controls.addRow("Target profile:", self._target_combo)
+        root.addLayout(controls)
+
+        quick_actions = QHBoxLayout()
+        self._select_all_btn = QPushButton("Select all")
+        self._select_all_btn.clicked.connect(self._select_all_rows)
+        quick_actions.addWidget(self._select_all_btn)
+        self._clear_btn = QPushButton("Clear selection")
+        self._clear_btn.clicked.connect(self._clear_selection)
+        quick_actions.addWidget(self._clear_btn)
+        quick_actions.addStretch()
+        root.addLayout(quick_actions)
+
+        self._table = QTableWidget()
+        self._table.setColumnCount(5)
+        self._table.setHorizontalHeaderLabels(
+            ["Select", "Started", "Session ID", "State", "Session Folder"]
+        )
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.verticalHeader().setVisible(False)
+        self._table.horizontalHeader().setSectionsClickable(True)
+        self._table.horizontalHeader().setSortIndicatorShown(True)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
+        self._table.setSortingEnabled(True)
+        self._table.cellClicked.connect(self._on_table_cell_clicked)
+        root.addWidget(self._table, stretch=1)
+
+        self._preview = QLabel("")
+        self._preview.setStyleSheet("font-size: 11px; color: #495057;")
+        root.addWidget(self._preview)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self._run_btn = QPushButton("Apply profile change")
+        self._run_btn.clicked.connect(self._accept_with_validation)
+        buttons.addWidget(self._run_btn)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        buttons.addWidget(cancel)
+        root.addLayout(buttons)
+
+        self._source_combo.currentTextChanged.connect(self._reload_sessions)
+        self._target_combo.currentTextChanged.connect(self._update_preview)
+        self._reload_sessions()
+
+    @property
+    def source_profile(self) -> str:
+        return self._source_profile
+
+    @property
+    def target_profile(self) -> str:
+        return self._target_profile
+
+    @property
+    def selected_session_ids(self) -> list[str]:
+        return list(self._selected_session_ids)
+
+    def _reload_sessions(self):
+        source = str(self._source_combo.currentText() or "").strip() or "Admin"
+        rows = self._store.list_sessions(profile_name=source, include_hidden=True, limit=5000)
+        self._table.setSortingEnabled(False)
+        self._table.setRowCount(len(rows))
+        for idx, row in enumerate(rows):
+            sid = str(row.get("session_id") or "").strip()
+            started = format_datetime_for_display(row.get("started_at"))
+            state = str(row.get("state") or "")
+            folder = str(row.get("session_dir") or "")
+
+            cb = QCheckBox()
+            cb.stateChanged.connect(self._update_preview)
+            cb_widget = QWidget()
+            cb_layout = QHBoxLayout(cb_widget)
+            cb_layout.setContentsMargins(8, 0, 8, 0)
+            cb_layout.addWidget(cb)
+            cb_layout.addStretch()
+            self._table.setCellWidget(idx, 0, cb_widget)
+
+            started_item = QTableWidgetItem(started)
+            sid_item = QTableWidgetItem(sid)
+            sid_item.setData(Qt.UserRole, sid)
+            state_item = QTableWidgetItem(state)
+            folder_item = QTableWidgetItem(folder)
+            folder_item.setData(Qt.UserRole, folder)
+            folder_font = folder_item.font()
+            folder_font.setUnderline(True)
+            folder_item.setFont(folder_font)
+            folder_item.setForeground(QColor("#1b6ec2"))
+            folder_item.setToolTip("Click to open folder")
+            self._table.setItem(idx, 1, started_item)
+            self._table.setItem(idx, 2, sid_item)
+            self._table.setItem(idx, 3, state_item)
+            self._table.setItem(idx, 4, folder_item)
+        self._table.resizeRowsToContents()
+        self._table.setSortingEnabled(True)
+        self._update_preview()
+
+    def _on_table_cell_clicked(self, row: int, col: int):
+        if col != 4:
+            return
+        item = self._table.item(row, 4)
+        folder_text = str(item.data(Qt.UserRole) if item is not None else "").strip()
+        if not folder_text:
+            return
+        folder = Path(folder_text)
+        if not folder.exists():
+            _warning_ok(self, "Open Session Folder", f"Folder not found:\n{folder}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _iter_row_checkboxes(self):
+        for row in range(self._table.rowCount()):
+            widget = self._table.cellWidget(row, 0)
+            if widget is None:
+                continue
+            cb = widget.findChild(QCheckBox)
+            if cb is not None:
+                yield row, cb
+
+    def _select_all_rows(self):
+        for _, cb in self._iter_row_checkboxes():
+            cb.setChecked(True)
+        self._update_preview()
+
+    def _clear_selection(self):
+        for _, cb in self._iter_row_checkboxes():
+            cb.setChecked(False)
+        self._update_preview()
+
+    def _collect_selected_session_ids(self) -> list[str]:
+        selected: list[str] = []
+        for row, cb in self._iter_row_checkboxes():
+            if not cb.isChecked():
+                continue
+            item = self._table.item(row, 2)
+            sid = str(item.data(Qt.UserRole) if item is not None else "").strip()
+            if sid:
+                selected.append(sid)
+        return selected
+
+    def _update_preview(self):
+        selected_count = len(self._collect_selected_session_ids())
+        source = str(self._source_combo.currentText() or "").strip() or "Admin"
+        target = str(self._target_combo.currentText() or "").strip() or "Admin"
+        self._preview.setText(
+            f"Preview: {selected_count} session(s) will move from '{source}' to '{target}'."
+        )
+        self._run_btn.setEnabled(selected_count > 0 and source.casefold() != target.casefold())
+
+    def _accept_with_validation(self):
+        source = str(self._source_combo.currentText() or "").strip() or "Admin"
+        target = str(self._target_combo.currentText() or "").strip() or "Admin"
+        if source.casefold() == target.casefold():
+            _warning_ok(self, "Reassign Sessions", "Source and target profiles must differ.")
+            return
+        selected = self._collect_selected_session_ids()
+        if not selected:
+            _warning_ok(self, "Reassign Sessions", "Select at least one session.")
+            return
+        self._source_profile = source
+        self._target_profile = target
+        self._selected_session_ids = selected
+        self.accept()
 
 
 class ProfileManagerDialog(QDialog):
@@ -5531,6 +5810,8 @@ class View(QMainWindow):
             self._profile_store.get_last_active_profile() or "Admin"
         )
         self._profile_store.ensure_profile(self._session_profile_id)
+        self._last_profile_switch_monotonic = time.monotonic()
+        self._start_new_profile_switch_grace_seconds = 1.0
         self._saved_connection_mode, self._saved_bridge_host, self._saved_bridge_port = (
             self._load_connection_prefs(self._session_profile_id)
         )
@@ -5891,6 +6172,7 @@ class View(QMainWindow):
         self._more_menu.addAction("History / Session Replay", self._open_history)
         self._more_menu.addAction("Trend / Compare / Insight", self._open_trends)
         self._more_menu.addAction("Profiles", self._open_profile_manager)
+        self._more_menu.addAction("Reassign Session(s)…", self._open_session_reassign_utility)
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
         self._more_menu.addAction("Settings…", self._open_settings)
         self._more_menu.addAction("Support Development…", self._open_support_options)
@@ -6030,7 +6312,8 @@ class View(QMainWindow):
         header_row.setSpacing(4)
         self.profile_header_label = QLabel(f"User: {self._session_profile_id}")
         self.profile_header_label.setStyleSheet(
-            "font-size: 14px; font-weight: 600; color: #2c3e50;"
+            "font-size: 15px; font-weight: 700; color: #0f3854; "
+            "background: #d8efff; border: 2px solid #5db5f2; border-radius: 3px; padding: 3px 9px;"
         )
         self.profile_header_label.setAlignment(Qt.AlignCenter)
         self._disclaimer_link = QLabel('<a href="open-disclaimer">Legal Disclaimer</a>')
@@ -6386,6 +6669,7 @@ class View(QMainWindow):
     def _set_active_profile(self, profile_id: str, announce: bool = False):
         self._session_profile_id = self._profile_store.set_last_active_profile(profile_id)
         self.profile_header_label.setText(f"User: {self._session_profile_id}")
+        self._last_profile_switch_monotonic = time.monotonic()
         self._apply_profile_scoped_settings(self._session_profile_id)
         self._load_timeline_span_pref(self._session_profile_id)
         saved_rate = self._profile_store.get_profile_pref(
@@ -6430,6 +6714,11 @@ class View(QMainWindow):
             self._set_connection_mode(mode)
             self._apply_connect_ready_state()
         self._load_tier1_morning_baseline_pref()
+        self._update_session_actions()
+        QTimer.singleShot(
+            int(max(0.0, self._start_new_profile_switch_grace_seconds) * 1000.0) + 25,
+            self._update_session_actions,
+        )
 
     def _load_connection_prefs(self, profile_id: str) -> tuple[str, str, int]:
         default_mode = (
@@ -6886,6 +7175,20 @@ class View(QMainWindow):
         self._apply_connect_ready_state()
         self._refresh_connect_hints_if_active()
 
+    def _should_confirm_start_for_profile(self) -> bool:
+        profile = str(getattr(self, "_session_profile_id", "") or "").strip()
+        if not profile:
+            return False
+        pref = self._profile_store.get_profile_pref(
+            profile,
+            "confirm_start_new_session",
+            default="1",
+        )
+        pref_enabled = str(pref).strip().lower() not in {"0", "false", "no", "off"}
+        elapsed = time.monotonic() - float(getattr(self, "_last_profile_switch_monotonic", 0.0))
+        recently_switched = elapsed < 10.0
+        return pref_enabled or recently_switched
+
     def _update_connection_mode_ui(self) -> None:
         phone_mode = self._connection_mode == "phone"
         prompt = "No sensor connected\nPress Scan or Connect to begin"
@@ -7128,7 +7431,13 @@ class View(QMainWindow):
         connecting = self._connect_attempt_timer.isActive()
         is_recording = self._session_state == "recording"
         annotation_available = is_recording
-        self.start_recording_button.setEnabled(connected and not is_recording)
+        elapsed = time.monotonic() - float(getattr(self, "_last_profile_switch_monotonic", 0.0))
+        profile_switch_cooldown = elapsed < float(
+            getattr(self, "_start_new_profile_switch_grace_seconds", 1.0)
+        )
+        self.start_recording_button.setEnabled(
+            connected and not is_recording and not profile_switch_cooldown
+        )
         self.stop_save_button.setEnabled(is_recording)
         if getattr(self, "_morning_baseline_cb", None):
             self._morning_baseline_cb.setEnabled(True)
@@ -7480,6 +7789,29 @@ class View(QMainWindow):
         if not self._is_sensor_connected():
             self.show_status("Connect a sensor before starting a session.")
             return
+        should_confirm_fn = getattr(self, "_should_confirm_start_for_profile", None)
+        should_confirm = bool(should_confirm_fn()) if callable(should_confirm_fn) else False
+        if not auto and should_confirm:
+            msg = QMessageBox(self)
+            msg.setWindowTitle("Confirm Session User")
+            msg.setText(f"Start session as '{self._session_profile_id}'?")
+            msg.setInformativeText(
+                "Use Switch User if this is the wrong profile before recording starts."
+            )
+            start_btn = msg.addButton(
+                f"Start as {self._session_profile_id}", QMessageBox.ButtonRole.AcceptRole
+            )
+            switch_btn = msg.addButton("Switch User", QMessageBox.ButtonRole.ActionRole)
+            cancel_btn = msg.addButton(QMessageBox.Cancel)
+            msg.setDefaultButton(start_btn)
+            msg.exec()
+            chosen = msg.clickedButton()
+            if chosen == switch_btn:
+                self._on_logout_clicked()
+                return
+            if chosen == cancel_btn or chosen != start_btn:
+                self.show_status("Session start cancelled.")
+                return
         try:
             destination_root = self._session_save_path_from_settings()
             self._session_bundle = create_session_bundle(
@@ -8906,6 +9238,163 @@ class View(QMainWindow):
             QTimer.singleShot(150, self._refocus_after_profile_dialog)
         except Exception as exc:
             self.show_status(f"Profile Manager error: {exc}")
+
+    def _derive_target_session_dir(self, session_dir: Path, target_profile: str) -> Path:
+        """
+        Move path by replacing the profile segment:
+        .../Sessions/{profile}/{year}/{date}/{session_id}
+        """
+        path = Path(session_dir)
+        parts = list(path.parts)
+        if len(parts) < 5:
+            raise ValueError(f"Unsupported session path: {path}")
+        session_id = parts[-1]
+        day = parts[-2]
+        year = parts[-3]
+        src_profile = parts[-4]
+        if not re.fullmatch(r"\d{4}", str(year)) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(day)):
+            raise ValueError(f"Unsupported session path layout: {path}")
+        if str(src_profile).casefold() == _slugify_profile(target_profile).casefold():
+            return path
+        profile_parent = Path(*parts[:-4])
+        target_profile_slug = _slugify_profile(target_profile)
+        target = profile_parent / target_profile_slug / year / day / session_id
+        if target.exists() and target.resolve() != path.resolve():
+            for idx in range(1, 1000):
+                candidate = profile_parent / target_profile_slug / year / day / f"{session_id}_{idx:02d}"
+                if not candidate.exists():
+                    return candidate
+            raise RuntimeError(f"Could not allocate destination for: {path}")
+        return target
+
+    def _rewrite_manifest_profile_id(self, session_dir: Path, target_profile: str):
+        manifest_path = Path(session_dir) / "session_manifest.json"
+        if not manifest_path.exists():
+            return
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        payload["profile_id"] = _slugify_profile(target_profile)
+        try:
+            manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        except OSError:
+            return
+
+    def _open_session_reassign_utility(self):
+        if self._session_state == "recording":
+            self.show_status("Session reassignment is unavailable during an active recording.")
+            return
+        if not self._profile_store.profile_is_admin(self._session_profile_id):
+            _warning_ok(
+                self,
+                "Admin Only",
+                "Session reassignment is available to Admin profiles only.",
+            )
+            return
+        dlg = SessionReassignDialog(
+            store=self._profile_store,
+            active_profile=self._session_profile_id,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        source = dlg.source_profile
+        target = dlg.target_profile
+        selected_ids = dlg.selected_session_ids
+        rows = self._profile_store.get_sessions_by_ids(selected_ids)
+        if not rows:
+            _warning_ok(self, "Reassign Sessions", "No matching sessions found.")
+            return
+
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Session Reassignment",
+            (
+                f"Move {len(rows)} session(s) from '{source}' to '{target}'?\n\n"
+                "This will move folders, update indexed history/trends, and rebuild reports."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        moved_updates: list[dict[str, str]] = []
+        rebuilt = 0
+        failed: list[tuple[str, str]] = []
+        self.show_status("Reassigning sessions...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for row in rows:
+                sid = str(row.get("session_id") or "").strip()
+                src_dir = Path(str(row.get("session_dir") or "").strip())
+                src_csv = Path(str(row.get("csv_path") or "").strip())
+                if not sid:
+                    failed.append(("(unknown)", "Missing session_id in history row."))
+                    continue
+                if not src_dir.exists():
+                    failed.append((sid, f"Session folder not found: {src_dir}"))
+                    continue
+                try:
+                    target_dir = self._derive_target_session_dir(src_dir, target)
+                    target_dir.parent.mkdir(parents=True, exist_ok=True)
+                    if src_dir.resolve() != target_dir.resolve():
+                        shutil.move(str(src_dir), str(target_dir))
+                    target_csv = target_dir / src_csv.name if src_csv.name else (target_dir / "session.csv")
+                    moved_updates.append(
+                        {
+                            "session_id": sid,
+                            "session_dir": str(target_dir),
+                            "csv_path": str(target_csv),
+                        }
+                    )
+                    self._rewrite_manifest_profile_id(target_dir, target)
+                    try:
+                        generate_reports_for_session_dir(target_dir, profile_name=target)
+                        rebuilt += 1
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    failed.append((sid, str(exc) or "Unknown reassignment error."))
+
+            updated = self._profile_store.reassign_sessions(
+                target_profile=target,
+                updates=moved_updates,
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        details = (
+            f"Selected: {len(rows)}\n"
+            f"Reassigned in DB: {updated}\n"
+            f"Reports rebuilt: {rebuilt}\n"
+            f"Failures: {len(failed)}"
+        )
+        if failed:
+            failed_lines = [f"{sid}: {reason}" for sid, reason in failed[:25]]
+            QMessageBox.warning(
+                self,
+                "Session Reassignment Completed with Issues",
+                details + "\n\nFailed session details:\n" + "\n".join(failed_lines),
+            )
+            self.show_status(
+                f"Session reassignment finished with {len(failed)} failure(s)."
+            )
+        else:
+            QMessageBox.information(self, "Session Reassignment Complete", details)
+            self.show_status(f"Reassigned {updated} session(s) to {target}.")
+
+        if getattr(self, "_history_window", None) is not None:
+            sessions = self._profile_store.list_sessions(
+                profile_name=self._session_profile_id,
+                include_hidden=True,
+                limit=200,
+            )
+            self._history_window.set_context(self._session_profile_id, sessions)
+        if getattr(self, "_trends_window", None) is not None:
+            self._trends_window.set_active_profile(self._session_profile_id)
 
     def _on_import_session(self):
         """Import external CSV or EDF file as a session. Disabled during recording."""
