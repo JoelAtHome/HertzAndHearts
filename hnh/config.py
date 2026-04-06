@@ -107,7 +107,7 @@ MAIN_PLOT_SYNC_MIN_IBIS: Final[int] = 3
 # Export EDF+ session artifact on finalization (enables ECG in Session Replay).
 EXPORT_EDF_PLUS_D: Final[bool] = True
 
-# Folder where finalized sessions are copied. Empty = use default app data Sessions/{profile}.
+# Folder where finalized sessions are written. Empty = use default app data Sessions/{profile}.
 SESSION_SAVE_PATH: Final[str] = ""
 
 # Open session folder in file manager after Stop & Save.

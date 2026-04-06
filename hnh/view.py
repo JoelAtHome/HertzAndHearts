@@ -60,6 +60,7 @@ from hnh.config import (
     PSD_VAGAL_BAND,
     CONNECTION_MODE_DEFAULT, PHONE_BRIDGE_HOST_DEFAULT, PHONE_BRIDGE_PORT_DEFAULT,
 )
+from hnh import config as _config_defaults
 from hnh.settings import (
     Settings,
     SettingsDialog,
@@ -5429,8 +5430,10 @@ class View(QMainWindow):
                 "1" if bool(getattr(self.settings, "LINUX_ENABLE_PMD_EXPERIMENTAL", False)) else "0"
             )
         self._perf_probe = get_perf_probe()
+        # Use factory defaults as profile fallbacks so one user's saved value
+        # never becomes the implicit default for other profiles.
         self._profile_scoped_setting_defaults: dict[str, object] = {
-            key: getattr(self.settings, key) for key in profile_scoped_keys()
+            key: getattr(_config_defaults, key) for key in profile_scoped_keys()
         }
         self.model = model
         self.baseline_values = []
@@ -7201,7 +7204,12 @@ class View(QMainWindow):
         raw = (getattr(self.settings, "SESSION_SAVE_PATH", "") or "").strip()
         if not raw:
             profile_slug = _slugify_profile(getattr(self, "_session_profile_id", "") or "Admin")
-            return self._session_root / "Sessions" / profile_slug
+            default_path = self._session_root / "Sessions" / profile_slug
+            try:
+                default_path.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            return default_path
         candidate = Path(raw)
         if not candidate.exists():
             try:
@@ -7473,9 +7481,11 @@ class View(QMainWindow):
             self.show_status("Connect a sensor before starting a session.")
             return
         try:
+            destination_root = self._session_save_path_from_settings()
             self._session_bundle = create_session_bundle(
-                root=self._session_root,
+                root=destination_root,
                 profile_id=self._session_profile_id,
+                include_profile_subpath=False,
             )
         except Exception as exc:
             self.show_status(f"Unable to create session folder: {exc}")
@@ -7532,7 +7542,7 @@ class View(QMainWindow):
         self._set_session_state("finalized")
 
     def _stop_and_save(self):
-        """Stop recording and save session (CSV, report, EDF+) to Settings path."""
+        """Stop recording and save session (CSV, report, EDF+) to Session Save Path."""
         self.finalize_session(show_message=True, build_final_report=True)
 
     def finalize_session(self, show_message: bool = True, build_final_report: bool = True):
@@ -7564,11 +7574,11 @@ class View(QMainWindow):
         try:
             copied_dir = self._copy_session_folder_to(destination_root)
             if copied_dir is not None:
-                self.show_status(f"Saved session copy to: {copied_dir}")
+                self.show_status(f"Saved session to: {copied_dir}")
                 if getattr(self.settings, "OPEN_SESSION_FOLDER_ON_SAVE", True):
                     QDesktopServices.openUrl(QUrl.fromLocalFile(str(copied_dir)))
         except Exception as exc:
-            self.show_status(f"Session copy failed: {exc}")
+            self.show_status(f"Session save failed: {exc}")
         if show_message and self._session_bundle is not None:
             self.show_status(f"Session finalized: {self._session_bundle.session_dir}")
             self._show_post_session_support_prompt()

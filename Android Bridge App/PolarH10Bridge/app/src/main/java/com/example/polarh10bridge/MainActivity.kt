@@ -1422,13 +1422,14 @@ private fun BridgeMainScreen(
                     }
                 }
             }
-            if (!wifiRadioEnabled) {
+            val showWifiClientOffBanner = !wifiRadioEnabled && !state.pcBridgeConnected
+            if (showWifiClientOffBanner) {
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     color = Color(0xFFFFF3CD),
                 ) {
                     Text(
-                        text = "Phone Wi-Fi seems to be turned off. Please check.",
+                        text = "Wi-Fi client is off. If you're using mobile hotspot, this can be normal.",
                         modifier =
                             Modifier
                                 .fillMaxWidth()
@@ -1543,7 +1544,7 @@ private fun BridgeMainScreen(
                     )
                     val phoneIp =
                         if (!wifiRadioEnabled) {
-                            "Wi-Fi off"
+                            "Wi-Fi client off (hotspot may still work)"
                         } else {
                             connectHintIpv4
                                 ?: state.phoneWifiIpv4

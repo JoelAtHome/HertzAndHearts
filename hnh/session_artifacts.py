@@ -36,12 +36,20 @@ class SessionBundle:
     started_at: datetime
 
 
-def create_session_bundle(root: Path, profile_id: str = "Admin") -> SessionBundle:
+def create_session_bundle(
+    root: Path,
+    profile_id: str = "Admin",
+    *,
+    include_profile_subpath: bool = True,
+) -> SessionBundle:
     now = datetime.now()
     safe_profile = _slugify(profile_id)
     date_key = now.strftime("%Y-%m-%d")
     session_id = now.strftime("%Y%m%d-%H%M%S")
-    base_dir = root / "Sessions" / safe_profile / now.strftime("%Y") / date_key / session_id
+    if include_profile_subpath:
+        base_dir = root / "Sessions" / safe_profile / now.strftime("%Y") / date_key / session_id
+    else:
+        base_dir = root / now.strftime("%Y") / date_key / session_id
     session_dir = _next_available_dir(base_dir)
     session_dir.mkdir(parents=True, exist_ok=False)
 

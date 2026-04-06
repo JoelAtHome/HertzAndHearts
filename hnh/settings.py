@@ -76,7 +76,7 @@ REGISTRY = OrderedDict([
     ("SESSION_SAVE_PATH", {
         "display": "Session Save Path",
         "tooltip": (
-            "Folder where finalized sessions (CSV, report, EDF+) are copied. "
+            "Folder where finalized sessions (CSV, report, EDF+) are written. "
             "Leave empty to use the app data folder's Sessions/{profile} location. "
             "Stored when you confirm Save & Close; the next Stop & Save uses this path "
             "(no app restart)."
