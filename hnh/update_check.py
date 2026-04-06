@@ -92,6 +92,7 @@ class ReleaseInfo:
     version_display: str
     html_url: str
     tag_name: str
+    published_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,11 +190,44 @@ def pick_newest_release(releases: list[dict[str, Any]]) -> ReleaseInfo | None:
             version_display=norm or str(pv),
             html_url=url,
             tag_name=tag,
+            published_at=str(r.get("published_at") or "").strip() or None,
         )
         if best_v is None or pv > best_v:
             best_v = pv
             best_info = info
     return best_info
+
+
+def get_installed_release_info(timeout: float = 5.0) -> ReleaseInfo | None:
+    """Return release metadata for the installed app version, if available."""
+    try:
+        payload = fetch_releases_payload(timeout=timeout)
+    except Exception:
+        return None
+    target = installed_version()
+    best: ReleaseInfo | None = None
+    for r in payload:
+        if not isinstance(r, dict):
+            continue
+        if r.get("draft"):
+            continue
+        tag = str(r.get("tag_name") or "")
+        pv = parse_release_version(tag)
+        if pv is None or pv != target:
+            continue
+        url = str(r.get("html_url") or RELEASES_PAGE_URL)
+        norm = _normalize_tag(tag)
+        info = ReleaseInfo(
+            version=pv,
+            version_key=str(pv),
+            version_display=norm or str(pv),
+            html_url=url,
+            tag_name=tag,
+            published_at=str(r.get("published_at") or "").strip() or None,
+        )
+        if best is None or info.version > best.version:
+            best = info
+    return best
 
 
 def check_github_for_update() -> UpdateCheckResult:

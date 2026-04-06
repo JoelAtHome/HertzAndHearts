@@ -22,7 +22,7 @@ from PySide6.QtGui import (
 from PySide6.QtCore import (
     Qt, QThread, Signal, Slot, QObject, QTimer, QMargins, QSize, QPointF, QEvent, QPoint,
     QRect, QEasingCurve, QPropertyAnimation, QParallelAnimationGroup, QAbstractAnimation,
-    QEventLoop, QUrl, QDate,
+    QEventLoop, QUrl, QDate, QLocale,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo, QBluetoothLocalDevice
 from PySide6.QtNetwork import QAbstractSocket
@@ -6171,13 +6171,13 @@ class View(QMainWindow):
         self._more_menu = QMenu()
         self._more_menu.addAction("History / Session Replay", self._open_history)
         self._more_menu.addAction("Trend / Compare / Insight", self._open_trends)
-        self._more_menu.addAction("Profiles", self._open_profile_manager)
+        self._more_menu.addAction("Manage Profiles", self._open_profile_manager)
         self._more_menu.addAction("Reassign Session(s)…", self._open_session_reassign_utility)
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
         self._more_menu.addAction("Settings…", self._open_settings)
         self._more_menu.addAction("Support Development…", self._open_support_options)
         self._more_menu.addSeparator()
-        self._import_action = self._more_menu.addAction("Import session…", self._on_import_session)
+        self._import_action = self._more_menu.addAction("Import Session to History", self._on_import_session)
         self._more_menu.addSeparator()
         self._help_menu = QMenu("Help", self._more_menu)
         self._help_menu.addAction("Check for Updates…", self._check_for_updates)
@@ -8656,6 +8656,18 @@ class View(QMainWindow):
 
     def _show_about_dialog(self) -> None:
         v = _display_version_label(version)
+        release_label = f"Version {v}"
+        release_info = update_check.get_installed_release_info(timeout=2.5)
+        if release_info is not None and release_info.published_at:
+            raw = str(release_info.published_at).strip()
+            # GitHub API uses ISO 8601 with trailing Z; keep date-only semantics.
+            iso_date = raw[:10] if len(raw) >= 10 else raw
+            parsed = QDate.fromString(iso_date, "yyyy-MM-dd")
+            if parsed.isValid():
+                localized = QLocale.system().toString(parsed, QLocale.FormatType.ShortFormat).strip()
+                if not localized:
+                    localized = parsed.toString("MM-dd-yyyy")
+                release_label = f"{release_label} — Released {localized}"
         msg = QMessageBox(self)
         msg.setWindowTitle("About Hertz & Hearts")
         msg.setIcon(QMessageBox.Icon.Information)
@@ -8665,7 +8677,7 @@ class View(QMainWindow):
         msg.setTextFormat(Qt.TextFormat.RichText)
         msg.setText(
             "<p style='margin-top:0'><b>Hertz & Hearts</b></p>"
-            f"<p>Version {v}</p>"
+            f"<p>{release_label}</p>"
             f"<p>{_RESEARCH_USE_WARNING}</p>"
             f"<p>Developed by {_SUPPORT_BRAND_NAME}.</p>"
         )
