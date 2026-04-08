@@ -16,15 +16,12 @@ jobs:
       matrix:
         include:
           - os: ubuntu-24.04
-            package_name: Hertz-and-Hearts-linux-x64.tar.gz
             artifact_name: Hertz-and-Hearts-linux-x64
             artifact_path: dist/Hertz-and-Hearts
           - os: windows-2022
-            package_name: Hertz-and-Hearts-windows-x64.zip
             artifact_name: Hertz-and-Hearts-windows-x64
             artifact_path: dist/Hertz-and-Hearts
           - os: macos-14
-            package_name: Hertz-and-Hearts-macos.zip
             artifact_name: Hertz-and-Hearts-macos
             artifact_path: dist/Hertz-and-Hearts.app
 
@@ -42,6 +39,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e .[build]
 
+      - name: Compute release version label
+        id: version
+        shell: bash
+        run: |
+          V="$(python - <<'PY'
+          import re, tomllib
+          v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+          m = re.fullmatch(r"(\d+\.\d+\.\d+)b(\d+)", v)
+          if m:
+              n = int(m.group(2))
+              print(f"{m.group(1)}-beta" if n == 0 else f"{m.group(1)}-beta.{n}")
+          else:
+              print(v)
+          PY
+          )"
+          echo "label=$V" >> "$GITHUB_OUTPUT"
+
       - name: Build app bundle (all platforms)
         run: |
           pyinstaller Hertz-and-Hearts.spec --clean --noconfirm
@@ -49,18 +63,24 @@ jobs:
       - name: Package Linux artifact
         if: runner.os == 'Linux'
         run: |
-          tar -C dist -czf "dist/${{ matrix.package_name }}" Hertz-and-Hearts
+          PACKAGE_NAME="Hertz-and-Hearts-${{ steps.version.outputs.label }}-linux-x64.tar.gz"
+          tar -C dist -czf "dist/${PACKAGE_NAME}" Hertz-and-Hearts
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "$GITHUB_ENV"
 
       - name: Package macOS artifact
         if: runner.os == 'macOS'
         run: |
-          ditto -c -k --sequesterRsrc --keepParent dist/Hertz-and-Hearts.app "dist/${{ matrix.package_name }}"
+          PACKAGE_NAME="Hertz-and-Hearts-${{ steps.version.outputs.label }}-macos.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/Hertz-and-Hearts.app "dist/${PACKAGE_NAME}"
+          echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "$GITHUB_ENV"
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/Hertz-and-Hearts/*" -DestinationPath "dist/${{ matrix.package_name }}" -Force
+          $packageName = "Hertz-and-Hearts-${{ steps.version.outputs.label }}-windows-x64.zip"
+          Compress-Archive -Path "dist/Hertz-and-Hearts/*" -DestinationPath "dist/$packageName" -Force
+          Add-Content -Path $env:GITHUB_ENV -Value "PACKAGE_NAME=$packageName"
 
       - name: Build Windows installer (.exe)
         if: runner.os == 'Windows'
@@ -75,14 +95,14 @@ jobs:
       - name: Upload platform artifact
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.artifact_name }}
+          name: ${{ matrix.artifact_name }}-${{ steps.version.outputs.label }}
           path: ${{ matrix.artifact_path }}
 
       - name: Upload Windows setup artifact
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v7
         with:
-          name: Hertz-and-Hearts-Windows-Setup
+          name: Hertz-and-Hearts-Windows-Setup-${{ steps.version.outputs.label }}
           path: installer_output/*.exe
 
       - name: Upload artifacts to GitHub release
@@ -91,7 +111,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          gh release upload "${{ github.ref_name }}" "dist/${{ matrix.package_name }}" --clobber
+          gh release upload "${{ github.ref_name }}" "dist/${PACKAGE_NAME}" --clobber
           if [ "${{ runner.os }}" = "Windows" ]; then
             gh release upload "${{ github.ref_name }}" installer_output/*.exe --clobber
           fi

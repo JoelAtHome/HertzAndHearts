@@ -6,7 +6,20 @@ python -m pip install -e ".[build]"
 
 python -m PyInstaller Hertz-and-Hearts.spec --clean --noconfirm
 
-mkdir -p dist
-tar -C dist -czf dist/Hertz-and-Hearts-linux-x64.tar.gz Hertz-and-Hearts
+version_label="$(python - <<'PY'
+import re, tomllib
+v = tomllib.load(open("pyproject.toml", "rb"))["project"]["version"]
+m = re.fullmatch(r"(\d+\.\d+\.\d+)b(\d+)", v)
+if m:
+    n = int(m.group(2))
+    print(f"{m.group(1)}-beta" if n == 0 else f"{m.group(1)}-beta.{n}")
+else:
+    print(v)
+PY
+)"
 
-echo "Linux package created: dist/Hertz-and-Hearts-linux-x64.tar.gz"
+mkdir -p dist
+out="dist/Hertz-and-Hearts-${version_label}-linux-x64.tar.gz"
+tar -C dist -czf "$out" Hertz-and-Hearts
+
+echo "Linux package created: $out"

@@ -10,9 +10,10 @@ Current beta target: **1.0.0-beta.2** (Python package version: `1.0.0b2`).
 
 ## Build Outputs
 
-- Windows: `dist/Hertz-and-Hearts-windows-x64.zip`
-- macOS: `dist/Hertz-and-Hearts-macos.zip`
-- Linux: `dist/Hertz-and-Hearts-linux-x64.tar.gz`
+- Windows: `dist/Hertz-and-Hearts-<version>-windows-x64.zip`
+- macOS: `dist/Hertz-and-Hearts-<version>-macos.zip`
+- Linux: `dist/Hertz-and-Hearts-<version>-linux-x64.tar.gz`
+- Windows installer: `installer_output/Hertz-and-Hearts-Windows-Setup-<version>.exe`
 
 ## Windows
 
