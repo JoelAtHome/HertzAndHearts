@@ -1,0 +1,18 @@
+How to do Android phone app development
+
+1) On phone, go to Settings -> About phone -> Software information -> Find Build number and tap on it 7 times. 
+This enters Developer Mode.
+
+2) Settings -> Developer options (bottom of list) -> USB debugging ON.
+
+3) Connect phone to PC with USB cable. Select file transfer option for USB functionality.
+
+4) Launch Android Studio.
+
+5) Make sure project is in place where Cursor can reach it and have Cursor do the Kotlin program development. 
+Expect Android Studio to silently see changes made by Cursor.
+
+6) In Android Studio, make sure device selected in middle of top toolbar is the phone.
+
+7) In Android Studio, click green Play button to build and deploy to phone.
+

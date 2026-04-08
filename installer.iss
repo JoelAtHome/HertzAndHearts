@@ -3,9 +3,9 @@
 
 #define MyAppName "Hertz-and-Hearts"
 ; MyAppVersion is passed via /DMyAppVersion="x.y.z" on the command line.
-; Falls back to "1.0.0-beta.1" if not provided (e.g. local builds).
+; Falls back to "1.0.0-beta.2" if not provided (e.g. local builds).
 #ifndef MyAppVersion
-  #define MyAppVersion "1.0.0-beta.1"
+  #define MyAppVersion "1.0.0-beta.2"
 #endif
 #define MyAppPublisher "Hertz-and-Hearts"
 #define MyAppExeName "Hertz-and-Hearts.exe"

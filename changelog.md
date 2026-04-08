@@ -1,9 +1,23 @@
 # Changelog
 
 ### Unreleased
+### Version 1.0.0-beta.2 (April 08 2026)
++ docs: Added dedicated Phone Bridge release notes at `Android Bridge App/CHANGELOG.md`.
++ enhancement: Added Session Integrity Audit admin utility (`More -> Session Integrity Audit...`) to scan DB history vs manifests, report missing/mismatched rows, repair index drift, and fill missing trend rows from manifests.
++ enhancement: Added duplicate session-folder resolution workflow to choose which copy to keep and remove other disk locations, then upsert the kept manifest into session history.
++ enhancement: Improved profile naming rules and prompts to enforce filesystem-safe display names with actionable suggestions before create/rename.
++ enhancement: Updated profile manager delete flow to stage profiles as `Pending delete` until `Save & Close`, with cancel-safe rollback behavior.
++ enhancement: Improved session-history and reassign tables with left-click open behavior, folder-path context menus, and hover/cursor affordances.
++ test: Added tests for profile display-name validation and session-folder slug behavior (`test/test_session_artifacts.py`).
++ test: Added coverage for filling missing trend rows from `session_manifest.json` (`test/test_profile_store.py`).
++ docs: Added `Android Bridge App/Android Dev Workflow.txt` for USB-debug deployment workflow notes.
+
+### Version 1.0.0-beta.1
 + release: Bumped pre-release version to `1.0.0b1` (public label: `1.0.0-beta.1`); aligned Polar H10 Bridge and Windows installer metadata.
 + docs: Extended `docs/USER_GUIDE.md` with Tier 1 morning baseline protocol, Session Trends / Compare / Tag Insights, and RMSSD recovery zones.
 + enhancement: Tier 1 trend guidance—morning baseline protocol (checkbox, in-session banner, `session_manifest.json` → `trend_guidance.morning_baseline_protocol`), RMSSD recovery zone strip under Session Trends with configurable baseline window and “Why these zones?” explainer (`hnh/view.py`; prefs `tier1_morning_baseline_protocol`, `tier1_recovery_baseline_sessions`).
+
+### Version 1.0.0-beta
 + release: Set project pre-release version to `1.0.0b0` (public label: `1.0.0-beta`) and added beta launch collateral/templates.
 + enhancement: Added in-app Support Development flow under More menu with two donation methods (GitHub Sponsors and Buy Me a Coffee), including profile-aware post-session prompts and guest-safe behavior.
 + enhancement: Added a richer support dialog with clickable links and QR display support (with graceful fallback when QR generation is unavailable).

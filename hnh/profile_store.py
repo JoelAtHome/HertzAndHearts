@@ -6,9 +6,11 @@ import secrets
 import re
 import sqlite3
 import shutil
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from typing import Any
 
 from hnh.session_artifacts import SessionBundle
 
@@ -899,6 +901,74 @@ class ProfileStore:
             )
         return out
 
+    def _ingest_session_trend_from_manifest(
+        self,
+        *,
+        session_id: str,
+        profile_name: str,
+        ended_at: str,
+        session_dir: str,
+    ) -> bool:
+        """Read session_manifest.json under session_dir and upsert session_trends. Returns True if written."""
+        sid = str(session_id).strip()
+        if not sid:
+            return False
+        manifest_path = Path(str(session_dir).strip()) / "session_manifest.json"
+        if not manifest_path.is_file():
+            return False
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return False
+        metrics = payload.get("metrics") or {}
+        if not isinstance(metrics, dict):
+            metrics = {}
+        qtc_data = metrics.get("qtc") if isinstance(metrics.get("qtc"), dict) else {}
+        qtc_ms = qtc_data.get("session_value_ms")
+        if qtc_ms is not None:
+            try:
+                qtc_ms = float(qtc_ms)
+            except (TypeError, ValueError):
+                qtc_ms = None
+        self.record_session_trend(
+            profile_name=str(profile_name),
+            session_id=sid,
+            ended_at=str(ended_at),
+            avg_hr=_float_or_none(metrics.get("last_hr")),
+            avg_rmssd=_float_or_none(metrics.get("last_rmssd")),
+            avg_sdnn=None,
+            qtc_ms=qtc_ms,
+            baseline_hr=_float_or_none(metrics.get("baseline_hr")),
+            baseline_rmssd=_float_or_none(metrics.get("baseline_rmssd")),
+        )
+        return True
+
+    def fill_missing_session_trends_from_manifests(self) -> int:
+        """
+        Insert session_trends rows for completed session_history rows that have no trend row yet,
+        using metrics from each folder's session_manifest.json (same rules as the one-time backfill).
+        """
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT h.session_id, h.profile_name, h.ended_at, h.session_dir
+                FROM session_history h
+                LEFT JOIN session_trends t ON t.session_id = h.session_id
+                WHERE h.ended_at IS NOT NULL AND t.session_id IS NULL
+                ORDER BY h.ended_at ASC
+                """
+            ).fetchall()
+        filled = 0
+        for row in rows:
+            if self._ingest_session_trend_from_manifest(
+                session_id=str(row["session_id"]),
+                profile_name=str(row["profile_name"]),
+                ended_at=str(row["ended_at"]),
+                session_dir=str(row["session_dir"]),
+            ):
+                filled += 1
+        return filled
+
     def _backfill_session_trends(self) -> int:
         """One-time backfill of session_trends from existing manifests."""
         if self._get_app_state(self._TRENDS_BACKFILL_KEY) == "done":
@@ -914,34 +984,13 @@ class ProfileStore:
                 """
             ).fetchall()
         for row in rows:
-            session_dir = Path(str(row["session_dir"]))
-            manifest_path = session_dir / "session_manifest.json"
-            if not manifest_path.exists():
-                continue
-            try:
-                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                continue
-            metrics = payload.get("metrics") or {}
-            qtc_data = metrics.get("qtc") if isinstance(metrics.get("qtc"), dict) else {}
-            qtc_ms = qtc_data.get("session_value_ms")
-            if qtc_ms is not None:
-                try:
-                    qtc_ms = float(qtc_ms)
-                except (TypeError, ValueError):
-                    qtc_ms = None
-            self.record_session_trend(
-                profile_name=str(row["profile_name"]),
+            if self._ingest_session_trend_from_manifest(
                 session_id=str(row["session_id"]),
+                profile_name=str(row["profile_name"]),
                 ended_at=str(row["ended_at"]),
-                avg_hr=_float_or_none(metrics.get("last_hr")),
-                avg_rmssd=_float_or_none(metrics.get("last_rmssd")),
-                avg_sdnn=None,
-                qtc_ms=qtc_ms,
-                baseline_hr=_float_or_none(metrics.get("baseline_hr")),
-                baseline_rmssd=_float_or_none(metrics.get("baseline_rmssd")),
-            )
-            migrated += 1
+                session_dir=str(row["session_dir"]),
+            ):
+                migrated += 1
         self._set_app_state(self._TRENDS_BACKFILL_KEY, "done")
         return migrated
 
@@ -1019,6 +1068,394 @@ class ProfileStore:
                 }
             )
         return out
+
+    def _session_record_from_manifest(
+        self,
+        *,
+        manifest_path: Path,
+        scan_root: Path,
+        fallback_now: datetime,
+    ) -> dict[str, str | None] | None:
+        session_dir = manifest_path.parent
+        payload: dict[str, Any] = {}
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+
+        session_id = str(payload.get("session_id") or session_dir.name).strip() or session_dir.name
+        timing = payload.get("timing") if isinstance(payload.get("timing"), dict) else {}
+        started_at = str(
+            timing.get("started_at")
+            or payload.get("updated_at")
+            or self._safe_started_at(session_id, fallback_now)
+        )
+        ended_at_val = timing.get("ended_at") if isinstance(timing, dict) else None
+        ended_at = str(ended_at_val).strip() if ended_at_val else None
+        state = str(payload.get("state") or "finalized").strip() or "finalized"
+        profile_name = str(payload.get("profile_id") or "").strip()
+        if not profile_name:
+            profile_name = self._infer_profile_name(session_dir, scan_root)
+        profile_name = self._normalize_profile(profile_name or self._LEGACY_PROFILE_NAME)
+
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        csv_meta = artifacts.get("csv") if isinstance(artifacts, dict) else {}
+        csv_raw = csv_meta.get("path") if isinstance(csv_meta, dict) else None
+        if csv_raw:
+            csv_path = Path(str(csv_raw))
+            if not csv_path.is_absolute():
+                csv_path = session_dir / csv_path
+        else:
+            csv_path = session_dir / "session.csv"
+
+        return {
+            "session_id": session_id,
+            "profile_name": profile_name,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "state": state,
+            "session_dir": str(session_dir),
+            "csv_path": str(csv_path),
+        }
+
+    @staticmethod
+    def _disk_record_strip_meta(row: dict[str, Any]) -> dict[str, str | None]:
+        return {
+            "session_id": str(row.get("session_id") or ""),
+            "profile_name": str(row.get("profile_name") or ""),
+            "started_at": str(row.get("started_at") or ""),
+            "ended_at": row.get("ended_at"),
+            "state": str(row.get("state") or ""),
+            "session_dir": str(row.get("session_dir") or ""),
+            "csv_path": str(row.get("csv_path") or ""),
+        }
+
+    def resolve_disk_duplicate_session(
+        self,
+        *,
+        keep_session_dir: str,
+        remove_session_dirs: list[str],
+    ) -> dict[str, int]:
+        """
+        Keep one session folder and delete other duplicate locations on disk, then upsert DB from the kept manifest.
+        remove_session_dirs must not include keep_session_dir.
+        """
+        keep = Path(str(keep_session_dir).strip()).resolve()
+        if not keep.exists():
+            raise ValueError(f"Keep path does not exist: {keep}")
+        manifest_keep = keep / "session_manifest.json"
+        if not manifest_keep.is_file():
+            raise ValueError(f"Missing manifest in keep folder: {manifest_keep}")
+
+        removed = 0
+        for raw in remove_session_dirs:
+            p = Path(str(raw).strip()).resolve()
+            if not str(raw).strip() or p == keep:
+                continue
+            if not p.exists():
+                continue
+            shutil.rmtree(p, ignore_errors=False)
+            removed += 1
+
+        rec = self._session_record_from_manifest(
+            manifest_path=manifest_keep,
+            scan_root=self._root / "Sessions",
+            fallback_now=datetime.now(),
+        )
+        if rec is None:
+            raise ValueError("Could not read kept session manifest.")
+        upserted = self._upsert_session_history_rows([self._disk_record_strip_meta(rec)])
+        return {"removed_folders": removed, "upserted_rows": upserted}
+
+    def _upsert_session_history_rows(
+        self,
+        rows: list[dict[str, str | None]],
+    ) -> int:
+        cleaned: list[dict[str, str | None]] = []
+        seen: set[str] = set()
+        for row in rows:
+            sid = str(row.get("session_id") or "").strip()
+            profile = str(row.get("profile_name") or "").strip()
+            started_at = str(row.get("started_at") or "").strip()
+            state = str(row.get("state") or "").strip()
+            session_dir = str(row.get("session_dir") or "").strip()
+            csv_path = str(row.get("csv_path") or "").strip()
+            ended_at_raw = row.get("ended_at")
+            ended_at = str(ended_at_raw).strip() if ended_at_raw else None
+            if not sid or sid in seen:
+                continue
+            if not profile or not started_at or not state or not session_dir or not csv_path:
+                continue
+            seen.add(sid)
+            cleaned.append(
+                {
+                    "session_id": sid,
+                    "profile_name": profile,
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "state": state,
+                    "session_dir": session_dir,
+                    "csv_path": csv_path,
+                }
+            )
+        if not cleaned:
+            return 0
+
+        for profile_name in sorted({str(r["profile_name"]) for r in cleaned}):
+            self.ensure_profile(profile_name)
+
+        with self._db() as conn:
+            for row in cleaned:
+                profile = str(row["profile_name"])
+                sid = str(row["session_id"])
+                conn.execute(
+                    """
+                    INSERT INTO session_history (
+                        session_id, profile_name, started_at, ended_at, state, session_dir, csv_path
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        profile_name = excluded.profile_name,
+                        started_at = excluded.started_at,
+                        ended_at = excluded.ended_at,
+                        state = excluded.state,
+                        session_dir = excluded.session_dir,
+                        csv_path = excluded.csv_path
+                    """,
+                    (
+                        sid,
+                        profile,
+                        str(row["started_at"]),
+                        str(row["ended_at"]) if row["ended_at"] else None,
+                        str(row["state"]),
+                        str(row["session_dir"]),
+                        str(row["csv_path"]),
+                    ),
+                )
+                conn.execute(
+                    """
+                    UPDATE session_trends
+                    SET profile_name = ?
+                    WHERE session_id = ?
+                    """,
+                    (profile, sid),
+                )
+        return len(cleaned)
+
+    def audit_session_history_integrity(
+        self,
+        *,
+        scan_roots: list[Path],
+    ) -> dict[str, Any]:
+        roots: list[Path] = []
+        seen_roots: set[str] = set()
+        for root in scan_roots:
+            p = Path(root).expanduser()
+            key = str(p).casefold()
+            if key in seen_roots:
+                continue
+            seen_roots.add(key)
+            roots.append(p)
+
+        now = datetime.now()
+        entries_by_sid: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        manifest_count = 0
+        for root in roots:
+            if not root.exists():
+                continue
+            for manifest_path in root.rglob("session_manifest.json"):
+                manifest_count += 1
+                rec = self._session_record_from_manifest(
+                    manifest_path=manifest_path,
+                    scan_root=root,
+                    fallback_now=now,
+                )
+                if rec is None:
+                    continue
+                sid = str(rec.get("session_id") or "").strip()
+                if not sid:
+                    continue
+                try:
+                    man_mtime = manifest_path.stat().st_mtime
+                except OSError:
+                    man_mtime = 0.0
+                session_dir = Path(str(rec.get("session_dir") or manifest_path.parent))
+                try:
+                    dir_mtime = session_dir.stat().st_mtime
+                except OSError:
+                    dir_mtime = 0.0
+                row: dict[str, Any] = dict(rec)
+                row["manifest_mtime"] = man_mtime
+                row["session_dir_mtime"] = dir_mtime
+                entries_by_sid[sid].append(row)
+
+        disk_by_id: dict[str, dict[str, str | None]] = {}
+        duplicate_disk_groups: list[dict[str, Any]] = []
+        for sid in sorted(entries_by_sid.keys()):
+            entries = entries_by_sid[sid]
+            if len(entries) == 1:
+                disk_by_id[sid] = self._disk_record_strip_meta(entries[0])
+                continue
+            sorted_by_time = sorted(entries, key=lambda e: float(e.get("manifest_mtime") or 0.0))
+            duplicate_disk_groups.append(
+                {
+                    "session_id": sid,
+                    "locations": [
+                        {
+                            "session_dir": str(e.get("session_dir") or ""),
+                            "csv_path": str(e.get("csv_path") or ""),
+                            "profile_name": str(e.get("profile_name") or ""),
+                            "manifest_mtime": float(e.get("manifest_mtime") or 0.0),
+                            "session_dir_mtime": float(e.get("session_dir_mtime") or 0.0),
+                        }
+                        for e in sorted_by_time
+                    ],
+                }
+            )
+            best = max(entries, key=lambda e: float(e.get("manifest_mtime") or 0.0))
+            disk_by_id[sid] = self._disk_record_strip_meta(best)
+
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, profile_name, started_at, ended_at, state, session_dir, csv_path
+                FROM session_history
+                """
+            ).fetchall()
+        db_by_id: dict[str, dict[str, str | None]] = {}
+        for row in rows:
+            sid = str(row["session_id"] or "").strip()
+            if not sid:
+                continue
+            db_by_id[sid] = {
+                "session_id": sid,
+                "profile_name": str(row["profile_name"] or ""),
+                "started_at": str(row["started_at"] or ""),
+                "ended_at": str(row["ended_at"]) if row["ended_at"] is not None else None,
+                "state": str(row["state"] or ""),
+                "session_dir": str(row["session_dir"] or ""),
+                "csv_path": str(row["csv_path"] or ""),
+            }
+
+        missing_on_disk: list[dict[str, str | None]] = []
+        missing_in_db: list[dict[str, str | None]] = []
+        path_mismatch: list[dict[str, str | None]] = []
+        profile_mismatch: list[dict[str, str | None]] = []
+
+        for sid, db_row in db_by_id.items():
+            disk_row = disk_by_id.get(sid)
+            if disk_row is None:
+                missing_on_disk.append(db_row)
+                continue
+            db_dir = str(db_row.get("session_dir") or "").strip()
+            disk_dir = str(disk_row.get("session_dir") or "").strip()
+            if db_dir != disk_dir:
+                path_mismatch.append(
+                    {
+                        "session_id": sid,
+                        "db_session_dir": db_dir,
+                        "disk_session_dir": disk_dir,
+                        "disk_csv_path": str(disk_row.get("csv_path") or ""),
+                    }
+                )
+            db_profile = str(db_row.get("profile_name") or "").strip()
+            disk_profile = str(disk_row.get("profile_name") or "").strip()
+            if db_profile.casefold() != disk_profile.casefold():
+                profile_mismatch.append(
+                    {
+                        "session_id": sid,
+                        "db_profile": db_profile,
+                        "disk_profile": disk_profile,
+                    }
+                )
+
+        for sid, disk_row in disk_by_id.items():
+            if sid not in db_by_id:
+                missing_in_db.append(disk_row)
+
+        return {
+            "scan_roots": [str(p) for p in roots],
+            "db_rows": len(db_by_id),
+            "manifest_count": manifest_count,
+            "disk_unique_sessions": len(disk_by_id),
+            "disk_records": list(disk_by_id.values()),
+            "missing_on_disk": missing_on_disk,
+            "missing_in_db": missing_in_db,
+            "path_mismatch": path_mismatch,
+            "profile_mismatch": profile_mismatch,
+            "duplicate_disk_groups": duplicate_disk_groups,
+            "duplicate_disk_session_ids": sorted(
+                {str(g.get("session_id") or "").strip() for g in duplicate_disk_groups if str(g.get("session_id") or "").strip()}
+            ),
+            "has_issues": bool(
+                missing_on_disk
+                or missing_in_db
+                or path_mismatch
+                or profile_mismatch
+                or duplicate_disk_groups
+            ),
+        }
+
+    def repair_session_history_integrity(
+        self,
+        *,
+        audit: dict[str, Any],
+        remove_missing_on_disk: bool = True,
+        add_missing_in_db: bool = True,
+        repair_mismatched_rows: bool = True,
+        fill_missing_session_trends: bool = True,
+    ) -> dict[str, int]:
+        removed_rows = 0
+        removed_trends = 0
+        upserted_rows = 0
+        filled_trends_rows = 0
+
+        if remove_missing_on_disk:
+            ids = [
+                str(row.get("session_id") or "").strip()
+                for row in list(audit.get("missing_on_disk") or [])
+                if str(row.get("session_id") or "").strip()
+            ]
+            if ids:
+                deleted = self.delete_sessions_by_ids(ids)
+                removed_rows = int(deleted.get("removed_rows") or 0)
+                removed_trends = int(deleted.get("removed_trends") or 0)
+
+        if add_missing_in_db:
+            rows = [r for r in list(audit.get("missing_in_db") or []) if isinstance(r, dict)]
+            upserted_rows += self._upsert_session_history_rows(rows)
+
+        if repair_mismatched_rows:
+            repair_ids: set[str] = set()
+            for row in list(audit.get("path_mismatch") or []):
+                sid = str(row.get("session_id") or "").strip()
+                if sid:
+                    repair_ids.add(sid)
+            for row in list(audit.get("profile_mismatch") or []):
+                sid = str(row.get("session_id") or "").strip()
+                if sid:
+                    repair_ids.add(sid)
+            if repair_ids:
+                disk_rows = [
+                    r for r in list(audit.get("disk_records") or []) if isinstance(r, dict)
+                ]
+                disk_by_id = {
+                    str(r.get("session_id") or "").strip(): r
+                    for r in disk_rows
+                    if str(r.get("session_id") or "").strip()
+                }
+                rows_to_fix = [disk_by_id[sid] for sid in sorted(repair_ids) if sid in disk_by_id]
+                upserted_rows += self._upsert_session_history_rows(rows_to_fix)
+
+        if fill_missing_session_trends:
+            filled_trends_rows = self.fill_missing_session_trends_from_manifests()
+
+        return {
+            "removed_rows": removed_rows,
+            "removed_trends": removed_trends,
+            "upserted_rows": upserted_rows,
+            "filled_trends_rows": filled_trends_rows,
+        }
 
     def reassign_sessions(
         self,

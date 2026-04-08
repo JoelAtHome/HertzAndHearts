@@ -287,6 +287,61 @@ class ProfileStoreTests(unittest.TestCase):
             self.assertTrue(b3.session_dir.exists())
             self.assertEqual(len(store.list_sessions(state="recording", include_hidden=True)), 0)
 
+    def test_fill_missing_session_trends_from_manifests(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Sandy")
+            b = _bundle(root, "20260205-120000")
+            ended = "2026-02-05T12:30:00"
+            (b.session_dir / "session_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "session_id": "20260205-120000",
+                        "state": "finalized",
+                        "metrics": {
+                            "last_hr": 72.0,
+                            "last_rmssd": 45.5,
+                            "baseline_hr": 70.0,
+                            "baseline_rmssd": 50.0,
+                            "qtc": {"session_value_ms": 420.0},
+                        },
+                        "artifacts": {"csv": {"path": "session.csv"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with store._db() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO session_history (
+                        session_id, profile_name, started_at, ended_at, state, session_dir, csv_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "20260205-120000",
+                        "Sandy",
+                        "2026-02-05T12:00:00",
+                        ended,
+                        "finalized",
+                        str(b.session_dir),
+                        str(b.csv_path),
+                    ),
+                )
+
+            self.assertEqual(len(store.list_session_trends("Sandy", span="year")), 0)
+            n = store.fill_missing_session_trends_from_manifests()
+            self.assertEqual(n, 1)
+            rows = store.list_session_trends("Sandy", span="year")
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["session_id"], "20260205-120000")
+            self.assertEqual(rows[0]["avg_hr"], 72.0)
+            self.assertEqual(rows[0]["avg_rmssd"], 45.5)
+            self.assertEqual(rows[0]["qtc_ms"], 420.0)
+
+            self.assertEqual(store.fill_missing_session_trends_from_manifests(), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

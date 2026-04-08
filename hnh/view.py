@@ -27,7 +27,7 @@ from PySide6.QtCore import (
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo, QBluetoothLocalDevice
 from PySide6.QtNetwork import QAbstractSocket
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QWidget, QLabel,
+    QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
     QProgressBar, QSizePolicy, QStatusBar, QFrame, QCompleter,
     QGraphicsView,
@@ -78,6 +78,7 @@ from hnh.session_artifacts import (
     SessionBundle,
     create_session_bundle,
     default_qtc_payload,
+    validate_profile_display_name,
     write_manifest,
 )
 from hnh.session_artifacts import _slugify as _slugify_profile
@@ -244,6 +245,49 @@ def _info_ok(parent, title: str, text: str) -> None:
     msg.setDefaultButton(QMessageBox.Ok)
     _ensure_linux_window_decorations(msg)
     msg.exec()
+
+
+def _get_profile_name_from_user(
+    parent,
+    *,
+    title: str,
+    label: str,
+    initial: str = "",
+) -> str | None:
+    """Prompt until the user supplies an empty-cancel, valid profile label, or picks a suggestion."""
+    default = (initial or "").strip()
+    while True:
+        text, ok = QInputDialog.getText(parent, title, label, text=default)
+        if not ok:
+            return None
+        clean = str(text).strip()
+        if not clean:
+            _warning_ok(parent, "Invalid Profile", "Profile name cannot be empty.")
+            default = (initial or "").strip()
+            continue
+        valid, reason, suggested = validate_profile_display_name(clean)
+        if valid:
+            return clean
+        msg = QMessageBox(parent)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Profile name not allowed")
+        msg.setText(
+            "This profile name is not acceptable because it would not work as part of "
+            "session folder paths on Windows and other systems."
+        )
+        msg.setInformativeText(f"{reason}\n\nSuggested name: {suggested}")
+        use = msg.addButton("Use suggested name", QMessageBox.AcceptRole)
+        retry = msg.addButton("Enter a different name", QMessageBox.ActionRole)
+        cancel = msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(use)
+        _ensure_linux_window_decorations(msg)
+        msg.exec()
+        clicked = msg.clickedButton()
+        if clicked in (None, cancel):
+            return None
+        if clicked == use:
+            return suggested
+        default = suggested
 
 
 def _ensure_linux_window_decorations(widget) -> None:
@@ -758,12 +802,8 @@ class ProfileSelectionDialog(QDialog):
         self.move(frame.topLeft())
 
     def _create_profile(self):
-        text, ok = QInputDialog.getText(self, "New Profile", "Profile name:")
-        if not ok:
-            return
-        name = text.strip()
+        name = _get_profile_name_from_user(self, title="New Profile", label="Profile name:")
         if not name:
-            _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
         idx = -1
         for i in range(self._combo.count()):
@@ -900,6 +940,7 @@ class SessionHistoryDialog(QDialog):
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SingleSelection)
         self._table.itemSelectionChanged.connect(self._sync_history_buttons)
+        self._table.cellClicked.connect(self._on_history_cell_clicked)
         self._table.cellDoubleClicked.connect(self._on_history_cell_double_clicked)
         self._table.cellEntered.connect(self._on_history_cell_hovered)
         self._table.setMouseTracking(True)
@@ -1094,7 +1135,7 @@ class SessionHistoryDialog(QDialog):
                     link_font.setUnderline(True)
                     item.setFont(link_font)
                     item.setForeground(QColor(0, 102, 204))
-                    item.setToolTip("Double-click to open location. Right-click for actions.")
+                    item.setToolTip("Left-click to open location. Right-click for actions.")
                 self._table.setItem(row_idx, col_idx, item)
             if selected_session_id and session_id == selected_session_id:
                 selected_row_idx = row_idx
@@ -1209,8 +1250,15 @@ class SessionHistoryDialog(QDialog):
             return
         self._copy_text_to_clipboard(str(selected.get("csv_path") or ""), "CSV path")
 
+    def _on_history_cell_clicked(self, row: int, col: int):
+        self._open_history_path_cell(row, col)
+
     def _on_history_cell_double_clicked(self, row: int, col: int):
-        # Path-focused shortcut: double-click folder/csv cells to navigate quickly.
+        # Keep double-click parity while left-click is primary interaction.
+        self._open_history_path_cell(row, col)
+
+    def _open_history_path_cell(self, row: int, col: int):
+        # Path-focused shortcut: click folder/csv cells to navigate quickly.
         if row < 0:
             return
         if col == 3:
@@ -2646,6 +2694,9 @@ class SessionReassignDialog(QDialog):
         )
         self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setMouseTracking(True)
+        self._table.setContextMenuPolicy(Qt.CustomContextMenu)
         self._table.verticalHeader().setVisible(False)
         self._table.horizontalHeader().setSectionsClickable(True)
         self._table.horizontalHeader().setSortIndicatorShown(True)
@@ -2656,6 +2707,9 @@ class SessionReassignDialog(QDialog):
         self._table.horizontalHeader().setSectionResizeMode(4, QHeaderView.Stretch)
         self._table.setSortingEnabled(True)
         self._table.cellClicked.connect(self._on_table_cell_clicked)
+        self._table.cellEntered.connect(self._on_table_cell_hovered)
+        self._table.customContextMenuRequested.connect(self._on_table_context_menu)
+        self._table.viewport().installEventFilter(self)
         root.addWidget(self._table, stretch=1)
 
         self._preview = QLabel("")
@@ -2718,7 +2772,7 @@ class SessionReassignDialog(QDialog):
             folder_font.setUnderline(True)
             folder_item.setFont(folder_font)
             folder_item.setForeground(QColor("#1b6ec2"))
-            folder_item.setToolTip("Click to open folder")
+            folder_item.setToolTip("Left-click to open folder. Right-click for actions.")
             self._table.setItem(idx, 1, started_item)
             self._table.setItem(idx, 2, sid_item)
             self._table.setItem(idx, 3, state_item)
@@ -2730,14 +2784,50 @@ class SessionReassignDialog(QDialog):
     def _on_table_cell_clicked(self, row: int, col: int):
         if col != 4:
             return
-        item = self._table.item(row, 4)
-        folder_text = str(item.data(Qt.UserRole) if item is not None else "").strip()
+        self._table.setCurrentCell(row, col)
+        self._open_selected_folder()
+
+    def _on_table_cell_hovered(self, _row: int, col: int):
+        if col == 4:
+            self._table.viewport().setCursor(Qt.PointingHandCursor)
+            return
+        self._table.viewport().unsetCursor()
+
+    def eventFilter(self, watched, event):
+        if watched is self._table.viewport() and event.type() == QEvent.Type.Leave:
+            self._table.viewport().unsetCursor()
+        return super().eventFilter(watched, event)
+
+    def _selected_session_row(self) -> tuple[str, str] | None:
+        row = self._table.currentRow()
+        if row < 0:
+            return None
+        sid_item = self._table.item(row, 2)
+        folder_item = self._table.item(row, 4)
+        session_id = str(sid_item.data(Qt.UserRole) if sid_item is not None else "").strip()
+        folder = str(folder_item.data(Qt.UserRole) if folder_item is not None else "").strip()
+        if not session_id and not folder:
+            return None
+        return session_id, folder
+
+    def _copy_selected_folder_path(self):
+        selected = self._selected_session_row()
+        if selected is None:
+            return
+        _, folder_text = selected
+        if not folder_text:
+            return
+        QApplication.clipboard().setText(folder_text)
+
+    def _open_selected_folder(self):
+        selected = self._selected_session_row()
+        if selected is None:
+            return
+        session_id, folder_text = selected
         if not folder_text:
             return
         folder = Path(folder_text)
         if not folder.exists():
-            sid_item = self._table.item(row, 2)
-            session_id = str(sid_item.data(Qt.UserRole) if sid_item is not None else "").strip()
             msg = QMessageBox(self)
             msg.setIcon(QMessageBox.Warning)
             msg.setWindowTitle("Open Session Folder")
@@ -2756,6 +2846,30 @@ class SessionReassignDialog(QDialog):
                     self._reload_sessions()
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(folder)))
+
+    def _on_table_context_menu(self, pos):
+        item = self._table.itemAt(pos)
+        if item is not None:
+            self._table.setCurrentItem(item)
+        selected = self._selected_session_row()
+        if selected is None:
+            return
+        _, folder_text = selected
+        folder_ok = bool(folder_text and folder_text != "--")
+        folder_exists = Path(folder_text).exists() if folder_ok else False
+
+        menu = QMenu(self)
+        copy_folder_action = menu.addAction("Copy folder path")
+        copy_folder_action.setEnabled(folder_ok)
+        menu.addSeparator()
+        open_folder_action = menu.addAction("Open folder")
+        open_folder_action.setEnabled(folder_exists)
+
+        chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
+        if chosen == copy_folder_action:
+            self._copy_selected_folder_path()
+        elif chosen == open_folder_action:
+            self._open_selected_folder()
 
     def _iter_row_checkboxes(self):
         for row in range(self._table.rowCount()):
@@ -2810,6 +2924,538 @@ class SessionReassignDialog(QDialog):
         self._target_profile = target
         self._selected_session_ids = selected
         self.accept()
+
+
+class DuplicateSessionResolveDialog(QDialog):
+    """Explorer-style resolution for duplicate session folders sharing one session ID."""
+
+    def __init__(self, session_id: str, locations: list[dict], parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Duplicate session — {session_id}")
+        self.resize(900, 420)
+        self._session_id = session_id
+        self._locations = list(locations)
+        self._result_kind: str = "skip"  # older | newer | path | skip_one
+        self._apply_all_same_rule = False
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            f"Multiple folders claim session ID <b>{session_id}</b>. "
+            "Choose which folder to keep; other locations will be deleted from disk."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        self._table = QTableWidget(len(self._locations), 3)
+        self._table.setHorizontalHeaderLabels(["Session folder", "Profile", "Manifest modified"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
+        self._table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        for row, loc in enumerate(self._locations):
+            p = str(loc.get("session_dir") or "")
+            self._table.setItem(row, 0, QTableWidgetItem(p))
+            self._table.setItem(row, 1, QTableWidgetItem(str(loc.get("profile_name") or "")))
+            mt = float(loc.get("manifest_mtime") or 0.0)
+            try:
+                ts = datetime.fromtimestamp(mt).strftime("%Y-%m-%d %H:%M")
+            except (OSError, ValueError, OverflowError):
+                ts = "—"
+            self._table.setItem(row, 2, QTableWidgetItem(ts))
+        self._table.selectRow(0)
+        root.addWidget(self._table, stretch=1)
+
+        self._apply_all_cb = QCheckBox(
+            "Apply the same Older/Newer choice to all remaining duplicate sessions"
+        )
+        self._apply_all_cb.setToolTip(
+            "Only applies when you click Keep older or Keep newer. "
+            "Choosing a specific folder is always per-session."
+        )
+        root.addWidget(self._apply_all_cb)
+
+        actions = QHBoxLayout()
+        actions.addWidget(QLabel("Actions:"))
+        btn_newer = QPushButton("Keep newer (manifest time)")
+        btn_newer.clicked.connect(self._on_keep_newer)
+        actions.addWidget(btn_newer)
+        btn_older = QPushButton("Keep older (manifest time)")
+        btn_older.clicked.connect(self._on_keep_older)
+        actions.addWidget(btn_older)
+        btn_pick = QPushButton("Keep selected folder")
+        btn_pick.clicked.connect(self._on_keep_selected)
+        actions.addWidget(btn_pick)
+        actions.addStretch()
+        root.addLayout(actions)
+
+        bottom = QHBoxLayout()
+        bottom.addStretch()
+        skip_btn = QPushButton("Skip this duplicate")
+        skip_btn.setToolTip("Leave this session unresolved and continue to the next duplicate, if any.")
+        skip_btn.clicked.connect(self._on_skip_one)
+        bottom.addWidget(skip_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setToolTip("Stop resolving duplicates.")
+        cancel_btn.clicked.connect(self.reject)
+        bottom.addWidget(cancel_btn)
+        root.addLayout(bottom)
+
+    def _on_keep_newer(self):
+        self._result_kind = "newer"
+        self._apply_all_same_rule = self._apply_all_cb.isChecked()
+        self.accept()
+
+    def _on_keep_older(self):
+        self._result_kind = "older"
+        self._apply_all_same_rule = self._apply_all_cb.isChecked()
+        self.accept()
+
+    def _on_keep_selected(self):
+        self._result_kind = "path"
+        self._apply_all_same_rule = False
+        self._apply_all_cb.setChecked(False)
+        self.accept()
+
+    def _on_skip_one(self):
+        self._result_kind = "skip_one"
+        self._apply_all_same_rule = False
+        self.accept()
+
+    @property
+    def result_kind(self) -> str:
+        return self._result_kind
+
+    @property
+    def apply_all_same_rule(self) -> bool:
+        return self._apply_all_same_rule
+
+    def selected_location_index(self) -> int:
+        return max(0, int(self._table.currentRow()))
+
+
+class DuplicateSessionIdLabel(QLabel):
+    """Selectable ID label: context menu names selection clearly; Ctrl+A selects full text."""
+
+    def __init__(self, text: str, parent=None):
+        super().__init__(text, parent)
+        self.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        shortcut = QShortcut(QKeySequence.StandardKey.SelectAll, self)
+        shortcut.setContext(Qt.ShortcutContext.WidgetShortcut)
+        shortcut.activated.connect(self._select_entire_folder_name)
+
+    def _select_entire_folder_name(self) -> None:
+        t = self.text()
+        if t:
+            self.setSelection(0, len(t))
+
+    def contextMenuEvent(self, event):
+        menu = QMenu(self)
+        copy_action = menu.addAction("Copy")
+        select_action = menu.addAction("Select entire folder name (Ctrl+A)")
+        chosen = menu.exec(event.globalPos())
+        if chosen == copy_action:
+            txt = self.selectedText() or self.text()
+            if txt:
+                QApplication.clipboard().setText(txt)
+        elif chosen == select_action:
+            self._select_entire_folder_name()
+
+
+class SessionIntegrityDialog(QDialog):
+    """Admin utility to audit and repair session index integrity."""
+
+    def __init__(self, store: ProfileStore, scan_roots: list[Path], parent=None):
+        super().__init__(parent)
+        self._store = store
+        self._scan_roots = [Path(p) for p in scan_roots]
+        self._last_audit: dict | None = None
+
+        self.setModal(True)
+        self.setWindowTitle("Session History Integrity")
+        self.resize(920, 620)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Audit DB session history vs session folders on disk, then apply targeted repairs."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        roots_label = QLabel("\n".join([f"Scan root: {p}" for p in self._scan_roots]) or "Scan roots: (none)")
+        roots_label.setStyleSheet("font-size: 11px; color: #495057;")
+        roots_label.setWordWrap(True)
+        root.addWidget(roots_label)
+
+        opts = QHBoxLayout()
+        self._remove_missing_db_cb = QCheckBox("Remove DB rows for sessions missing on disk")
+        self._remove_missing_db_cb.setChecked(True)
+        opts.addWidget(self._remove_missing_db_cb)
+        self._add_missing_db_cb = QCheckBox("Add missing disk sessions to DB")
+        self._add_missing_db_cb.setChecked(True)
+        opts.addWidget(self._add_missing_db_cb)
+        self._repair_mismatch_cb = QCheckBox("Repair DB paths/profile from manifests")
+        self._repair_mismatch_cb.setChecked(True)
+        opts.addWidget(self._repair_mismatch_cb)
+        opts.addStretch()
+        root.addLayout(opts)
+
+        trends_row = QHBoxLayout()
+        self._fill_trends_cb = QCheckBox("Fill missing Trends rows from session manifests")
+        self._fill_trends_cb.setToolTip(
+            "Adds session_trends rows for completed history entries that lack them, "
+            "using each folder's session_manifest.json (required for the Trends window)."
+        )
+        self._fill_trends_cb.setChecked(True)
+        trends_row.addWidget(self._fill_trends_cb)
+        trends_row.addStretch()
+        root.addLayout(trends_row)
+
+        for cb in (
+            self._remove_missing_db_cb,
+            self._add_missing_db_cb,
+            self._repair_mismatch_cb,
+            self._fill_trends_cb,
+        ):
+            cb.stateChanged.connect(self._update_apply_enabled)
+
+        self._report = QTextEdit()
+        self._report.setReadOnly(True)
+        self._report.setPlaceholderText("Click Analyze to inspect integrity.")
+        root.addWidget(self._report, stretch=1)
+
+        self._dup_wrap = QWidget()
+        dup_outer = QVBoxLayout(self._dup_wrap)
+        dup_outer.setContentsMargins(0, 0, 0, 0)
+        self._dup_header = QLabel("")
+        self._dup_header.setWordWrap(True)
+        dup_outer.addWidget(self._dup_header)
+        dup_scroll = QScrollArea()
+        dup_scroll.setWidgetResizable(True)
+        dup_scroll.setMaximumHeight(180)
+        self._dup_grid_host = QWidget()
+        self._dup_grid = QGridLayout(self._dup_grid_host)
+        self._dup_grid.setContentsMargins(4, 4, 4, 4)
+        dup_scroll.setWidget(self._dup_grid_host)
+        dup_outer.addWidget(dup_scroll)
+        root.addWidget(self._dup_wrap)
+        self._dup_wrap.hide()
+
+        buttons = QHBoxLayout()
+        self._analyze_btn = QPushButton("Analyze")
+        self._analyze_btn.clicked.connect(self._analyze)
+        buttons.addWidget(self._analyze_btn)
+        self._apply_btn = QPushButton("Apply Repair")
+        self._apply_btn.setEnabled(False)
+        self._apply_btn.clicked.connect(self._apply_repair)
+        buttons.addWidget(self._apply_btn)
+        self._resolve_dup_btn = QPushButton("Resolve duplicate folders…")
+        self._resolve_dup_btn.setToolTip(
+            "Step through duplicate session folders (same session ID on disk). "
+            "You choose which copy to keep; others are removed."
+        )
+        self._resolve_dup_btn.setEnabled(False)
+        self._resolve_dup_btn.clicked.connect(self._resolve_duplicates_wizard)
+        buttons.addWidget(self._resolve_dup_btn)
+        buttons.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        buttons.addWidget(close_btn)
+        root.addLayout(buttons)
+
+        self._update_apply_enabled()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._last_audit:
+            ids = list(self._last_audit.get("duplicate_disk_session_ids") or [])
+            if ids:
+                self._populate_duplicate_id_grid(ids)
+
+    def _apply_can_run(self) -> bool:
+        """Apply is allowed after Analyze if any selected action applies (including Trends-only)."""
+        if self._last_audit is None:
+            return False
+        audit = self._last_audit
+        ft = bool(self._fill_trends_cb.isChecked())
+        if ft:
+            return True
+        rm = bool(self._remove_missing_db_cb.isChecked())
+        ad = bool(self._add_missing_db_cb.isChecked())
+        rp = bool(self._repair_mismatch_cb.isChecked())
+        if not (rm or ad or rp):
+            return False
+        missing_on_disk = list(audit.get("missing_on_disk") or [])
+        missing_in_db = list(audit.get("missing_in_db") or [])
+        path_mismatch = list(audit.get("path_mismatch") or [])
+        profile_mismatch = list(audit.get("profile_mismatch") or [])
+        if rm and missing_on_disk:
+            return True
+        if ad and missing_in_db:
+            return True
+        if rp and (path_mismatch or profile_mismatch):
+            return True
+        return False
+
+    def _update_apply_enabled(self) -> None:
+        self._apply_btn.setEnabled(self._apply_can_run())
+
+    @staticmethod
+    def _sample_lines(rows: list[dict], key: str, limit: int = 10) -> list[str]:
+        out: list[str] = []
+        for row in rows[:max(0, int(limit))]:
+            val = str(row.get(key) or "").strip()
+            sid = str(row.get("session_id") or "").strip()
+            if sid and val:
+                out.append(f"  - {sid}: {val}")
+            elif sid:
+                out.append(f"  - {sid}")
+        return out
+
+    def _render_audit_report(self, audit: dict) -> str:
+        missing_on_disk = list(audit.get("missing_on_disk") or [])
+        missing_in_db = list(audit.get("missing_in_db") or [])
+        path_mismatch = list(audit.get("path_mismatch") or [])
+        profile_mismatch = list(audit.get("profile_mismatch") or [])
+        dup_ids = list(audit.get("duplicate_disk_session_ids") or [])
+        lines: list[str] = [
+            "Session integrity audit",
+            "",
+            f"DB rows: {int(audit.get('db_rows') or 0)}",
+            f"Manifest files scanned: {int(audit.get('manifest_count') or 0)}",
+            f"Unique disk sessions: {int(audit.get('disk_unique_sessions') or 0)}",
+            "",
+            f"Missing on disk (DB-only): {len(missing_on_disk)}",
+            f"Missing in DB (disk-only): {len(missing_in_db)}",
+            f"Path mismatches: {len(path_mismatch)}",
+            f"Profile mismatches: {len(profile_mismatch)}",
+            f"Duplicate session IDs (folders) on disk: {len(dup_ids)}",
+            "",
+        ]
+        if missing_on_disk:
+            lines.append("Sample missing on disk:")
+            lines.extend(self._sample_lines(missing_on_disk, "session_dir"))
+            lines.append("")
+        if missing_in_db:
+            lines.append("Sample missing in DB:")
+            lines.extend(self._sample_lines(missing_in_db, "session_dir"))
+            lines.append("")
+        if path_mismatch:
+            lines.append("Sample path mismatches:")
+            lines.extend(self._sample_lines(path_mismatch, "disk_session_dir"))
+            lines.append("")
+        if profile_mismatch:
+            lines.append("Sample profile mismatches:")
+            lines.extend(self._sample_lines(profile_mismatch, "disk_profile"))
+            lines.append("")
+        if dup_ids:
+            lines.append(
+                "Duplicate session IDs (folders) are listed in the grid below (all IDs). "
+                "Use “Resolve duplicate folders…” to choose which copy to keep."
+            )
+        return "\n".join(lines)
+
+    def _clear_dup_grid(self) -> None:
+        while self._dup_grid.count():
+            item = self._dup_grid.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+
+    def _populate_duplicate_id_grid(self, dup_ids: list[str]) -> None:
+        self._clear_dup_grid()
+        if not dup_ids:
+            self._dup_wrap.hide()
+            return
+        w = max(400, self.width())
+        ncols = max(2, min(10, max(1, (w - 48) // 150)))
+        for i, sid in enumerate(dup_ids):
+            lbl = DuplicateSessionIdLabel(sid)
+            lbl.setStyleSheet("font-family: 'Consolas', 'Courier New', monospace; font-size: 11px;")
+            lbl.setWordWrap(False)
+            self._dup_grid.addWidget(lbl, i // ncols, i % ncols)
+        self._dup_header.setText(
+            f"Duplicate session IDs (folders) on disk ({len(dup_ids)} total) — "
+            'click an ID, then right-click: "Select entire folder name (Ctrl+A)" or drag to select part.'
+        )
+        self._dup_wrap.show()
+
+    def _refresh_duplicate_ui(self, audit: dict) -> None:
+        dup_ids = list(audit.get("duplicate_disk_session_ids") or [])
+        groups = list(audit.get("duplicate_disk_groups") or [])
+        self._populate_duplicate_id_grid(dup_ids)
+        self._resolve_dup_btn.setEnabled(bool(groups))
+
+    @staticmethod
+    def _pick_keep_dir_for_rule(locs: list[dict], rule: str) -> str:
+        if not locs:
+            return ""
+        if rule == "older":
+            best = min(locs, key=lambda x: float(x.get("manifest_mtime") or 0.0))
+        elif rule == "newer":
+            best = max(locs, key=lambda x: float(x.get("manifest_mtime") or 0.0))
+        else:
+            return ""
+        return str(best.get("session_dir") or "").strip()
+
+    def _resolve_duplicates_wizard(self) -> None:
+        if self._last_audit is None:
+            self._analyze()
+        audit = self._last_audit
+        if not audit:
+            return
+        groups = list(audit.get("duplicate_disk_groups") or [])
+        if not groups:
+            _info_ok(self, "Resolve duplicates", "No duplicate session folders were found.")
+            return
+
+        warn = QMessageBox.question(
+            self,
+            "Resolve duplicate folders",
+            "For each duplicate session ID you will choose one folder to keep.\n\n"
+            "All other copies of that session will be permanently deleted from disk.\n\n"
+            "Continue?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if warn != QMessageBox.Yes:
+            return
+
+        bulk_rule: str | None = None
+        removed_folders = 0
+        upserted = 0
+        errors: list[str] = []
+
+        for group in groups:
+            sid = str(group.get("session_id") or "").strip()
+            locs = list(group.get("locations") or [])
+            if not sid or len(locs) < 2:
+                continue
+
+            kind = "skip"
+            apply_all = False
+            selected_idx = 0
+
+            if bulk_rule in ("older", "newer"):
+                kind = bulk_rule
+                apply_all = False
+                selected_idx = 0
+            else:
+                dlg = DuplicateSessionResolveDialog(sid, locs, parent=self)
+                if dlg.exec() != QDialog.Accepted:
+                    break
+                kind = dlg.result_kind
+                apply_all = dlg.apply_all_same_rule
+                selected_idx = dlg.selected_location_index()
+
+            if kind == "skip_one":
+                continue
+
+            if kind in ("older", "newer") and apply_all and bulk_rule is None:
+                bulk_rule = kind
+
+            if kind == "older":
+                keep_dir = self._pick_keep_dir_for_rule(locs, "older")
+            elif kind == "newer":
+                keep_dir = self._pick_keep_dir_for_rule(locs, "newer")
+            elif kind == "path":
+                idx = max(0, min(selected_idx, len(locs) - 1))
+                keep_dir = str(locs[idx].get("session_dir") or "").strip()
+            else:
+                continue
+
+            if not keep_dir:
+                errors.append(f"{sid}: could not determine folder to keep.")
+                continue
+
+            remove_dirs = [
+                str(loc.get("session_dir") or "").strip()
+                for loc in locs
+                if str(loc.get("session_dir") or "").strip()
+                and str(loc.get("session_dir") or "").strip().casefold() != keep_dir.casefold()
+            ]
+            try:
+                result = self._store.resolve_disk_duplicate_session(
+                    keep_session_dir=keep_dir,
+                    remove_session_dirs=remove_dirs,
+                )
+                removed_folders += int(result.get("removed_folders") or 0)
+                upserted += int(result.get("upserted_rows") or 0)
+            except Exception as exc:
+                errors.append(f"{sid}: {exc}")
+
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            refreshed = self._store.audit_session_history_integrity(scan_roots=self._scan_roots)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._last_audit = refreshed
+        err_block = ""
+        if errors:
+            err_block = "\n  Errors:\n" + "\n".join(f"    - {e}" for e in errors[:20])
+        self._report.setPlainText(
+            self._render_audit_report(refreshed)
+            + "\n\nDuplicate resolution summary:\n"
+            + f"  Folders removed: {removed_folders}\n"
+            + f"  DB rows upserted: {upserted}"
+            + err_block
+        )
+        self._refresh_duplicate_ui(refreshed)
+        self._update_apply_enabled()
+
+    def _analyze(self):
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            audit = self._store.audit_session_history_integrity(scan_roots=self._scan_roots)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._last_audit = audit
+        self._report.setPlainText(self._render_audit_report(audit))
+        self._refresh_duplicate_ui(audit)
+        self._update_apply_enabled()
+
+    def _apply_repair(self):
+        if self._last_audit is None:
+            self._analyze()
+            if self._last_audit is None:
+                return
+        if not self._apply_can_run():
+            return
+        confirm = QMessageBox.question(
+            self,
+            "Apply Session Repair",
+            "Apply selected repairs to session history index now?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            result = self._store.repair_session_history_integrity(
+                audit=self._last_audit,
+                remove_missing_on_disk=bool(self._remove_missing_db_cb.isChecked()),
+                add_missing_in_db=bool(self._add_missing_db_cb.isChecked()),
+                repair_mismatched_rows=bool(self._repair_mismatch_cb.isChecked()),
+                fill_missing_session_trends=bool(self._fill_trends_cb.isChecked()),
+            )
+            refreshed = self._store.audit_session_history_integrity(scan_roots=self._scan_roots)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._last_audit = refreshed
+        self._report.setPlainText(
+            self._render_audit_report(refreshed)
+            + "\n\nApplied repair:\n"
+            + f"  Removed DB rows: {int(result.get('removed_rows') or 0)}\n"
+            + f"  Removed trends rows: {int(result.get('removed_trends') or 0)}\n"
+            + f"  Upserted DB rows: {int(result.get('upserted_rows') or 0)}\n"
+            + f"  Filled Trends rows: {int(result.get('filled_trends_rows') or 0)}"
+        )
+        self._refresh_duplicate_ui(refreshed)
+        self._update_apply_enabled()
 
 
 class ProfileManagerDialog(QDialog):
@@ -2957,9 +3603,20 @@ class ProfileManagerDialog(QDialog):
 
         self._table.itemSelectionChanged.connect(self._on_selection_changed)
         self._last_selected_profile: str | None = None
+        # Profiles marked here are removed from the DB only when Save && Close succeeds.
+        self._pending_delete_keys: dict[str, str] = {}
         for btn in (self._create_btn, self._rename_btn, self._archive_btn, self._restore_btn, self._delete_btn):
             btn.setVisible(self._is_admin)
         self._refresh()
+
+    def _is_pending_delete(self, name: str | None) -> bool:
+        if not name:
+            return False
+        return name.casefold() in self._pending_delete_keys
+
+    def reject(self):
+        self._pending_delete_keys.clear()
+        super().reject()
 
     def _update_age_from_dob(self):
         qd = self._dob_input.date()
@@ -3004,7 +3661,12 @@ class ProfileManagerDialog(QDialog):
         for idx, row in enumerate(rows):
             name = str(row.get("name") or "")
             archived = bool(row.get("archived"))
-            status = "Archived" if archived else "Active"
+            if name.casefold() in self._pending_delete_keys:
+                status = "Pending delete"
+            elif archived:
+                status = "Archived"
+            else:
+                status = "Active"
             if name.casefold() == self._active_profile.casefold():
                 status = f"{status} (current)"
 
@@ -3058,18 +3720,26 @@ class ProfileManagerDialog(QDialog):
             row = self._table.currentRow()
             archived_item = self._table.item(row, 1)
             archived = archived_item is not None and "Archived" in archived_item.text()
-        self._rename_btn.setEnabled(has_selection)
-        self._archive_btn.setEnabled(has_selection and not archived and not is_current)
-        self._restore_btn.setEnabled(has_selection and archived)
+        is_pending = self._is_pending_delete(name)
+        self._rename_btn.setEnabled(has_selection and not is_pending)
+        self._archive_btn.setEnabled(
+            has_selection and not archived and not is_current and not is_pending
+        )
+        self._restore_btn.setEnabled(has_selection and archived and not is_pending)
         self._delete_btn.setEnabled(has_selection and not is_current)
-        self._password_btn.setEnabled(has_selection)
+        self._password_btn.setEnabled(has_selection and not is_pending)
 
     def _on_selection_changed(self):
         new_name = self._selected_profile_name()
-        if self._last_selected_profile and self._last_selected_profile != new_name:
-            if not self._save_details(self._last_selected_profile):
-                self._select_row_by_profile(self._last_selected_profile)
-                return
+        prev = self._last_selected_profile
+        if (
+            prev
+            and prev != new_name
+            and not self._is_pending_delete(prev)
+            and not self._save_details(prev)
+        ):
+            self._select_row_by_profile(prev)
+            return
         self._last_selected_profile = new_name
         self._update_action_states()
         self._load_selected_details()
@@ -3117,6 +3787,8 @@ class ProfileManagerDialog(QDialog):
         name = target_name or self._selected_profile_name()
         if not name:
             return True
+        if self._is_pending_delete(name):
+            return True
         qd = self._dob_input.date()
         dob: str | None = None
         if qd != QDate(1900, 1, 1):
@@ -3160,16 +3832,22 @@ class ProfileManagerDialog(QDialog):
         return True
 
     def _save_and_close(self):
-        if self._save_details():
-            self.accept()
+        sel = self._selected_profile_name()
+        if sel and not self._is_pending_delete(sel):
+            if not self._save_details():
+                return
+        for display_name in list(self._pending_delete_keys.values()):
+            try:
+                self._store.delete_profile(display_name)
+            except ValueError as exc:
+                _warning_ok(self, "Delete Failed", str(exc))
+                return
+        self._pending_delete_keys.clear()
+        self.accept()
 
     def _create_profile(self):
-        text, ok = QInputDialog.getText(self, "Create Profile", "Profile name:")
-        if not ok:
-            return
-        name = text.strip()
+        name = _get_profile_name_from_user(self, title="Create Profile", label="Profile name:")
         if not name:
-            _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
         self._store.ensure_profile(name)
         self._refresh()
@@ -3178,14 +3856,13 @@ class ProfileManagerDialog(QDialog):
         current = self._selected_profile_name()
         if not current:
             return
-        text, ok = QInputDialog.getText(
-            self, "Rename Profile", "New profile name:", text=current
+        new_name = _get_profile_name_from_user(
+            self,
+            title="Rename Profile",
+            label="New profile name:",
+            initial=current,
         )
-        if not ok:
-            return
-        new_name = text.strip()
         if not new_name:
-            _warning_ok(self, "Invalid Profile", "Profile name cannot be empty.")
             return
         try:
             renamed = self._store.rename_profile(current, new_name)
@@ -3218,20 +3895,33 @@ class ProfileManagerDialog(QDialog):
         current = self._selected_profile_name()
         if not current:
             return
+        cf = current.casefold()
+        if cf in self._pending_delete_keys:
+            reply = QMessageBox.question(
+                self,
+                "Keep Profile",
+                f"Profile '{current}' is marked for deletion when you save. "
+                f"Remove it from the deletion list and keep it?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            del self._pending_delete_keys[cf]
+            self._refresh()
+            return
         reply = QMessageBox.question(
             self,
             "Delete Profile",
-            f"Delete profile '{current}' and its indexed history records?",
+            f"Mark profile '{current}' for deletion? It will be removed and its indexed "
+            f"history records deleted when you click Save & Close. "
+            f"(Click Cancel on the main window to discard.)",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
-        try:
-            self._store.delete_profile(current)
-        except ValueError as exc:
-            _warning_ok(self, "Delete Failed", str(exc))
-            return
+        self._pending_delete_keys[cf] = current
         self._refresh()
 
     def _set_reset_password(self):
@@ -6211,11 +6901,11 @@ class View(QMainWindow):
         self.logout_button.setToolTip("Switch user profile (same popup as startup).")
         self.logout_button.clicked.connect(self._on_logout_clicked)
 
-        # More menu — History, Trends, Profiles, Switch User, Settings, Import, Help, About
+        # More menu — History, Trends, Profiles, Session Admin, Switch User, Settings, Import, Help, About
         self._more_button = QToolButton()
         self._more_button.setText("More")
         self._more_button.setToolTip(
-            "Additional actions: History, Trends, Profiles, Settings, "
+            "Additional actions: History, Trends, Profiles, Session Admin, Settings, "
             "Support Development, Import, Help, About."
         )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -6224,6 +6914,7 @@ class View(QMainWindow):
         self._more_menu.addAction("Trend / Compare / Insight", self._open_trends)
         self._more_menu.addAction("Manage Profiles", self._open_profile_manager)
         self._more_menu.addAction("Reassign Session(s)…", self._open_session_reassign_utility)
+        self._more_menu.addAction("Session Integrity Audit…", self._open_session_integrity_utility)
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
         self._more_menu.addAction("Settings…", self._open_settings)
         self._more_menu.addAction("Support Development…", self._open_support_options)
@@ -9402,6 +10093,46 @@ class View(QMainWindow):
             manifest_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         except OSError:
             return
+
+    def _session_integrity_scan_roots(self) -> list[Path]:
+        roots: list[Path] = []
+        roots.append(self._session_root / "Sessions")
+        save_key = self._profile_setting_pref_key("SESSION_SAVE_PATH")
+        for profile in self._profile_store.list_profiles(include_archived=True):
+            raw = str(self._profile_store.get_profile_pref(profile, save_key, "") or "").strip()
+            if not raw:
+                continue
+            roots.append(Path(raw))
+        current_path = str(getattr(self.settings, "SESSION_SAVE_PATH", "") or "").strip()
+        if current_path:
+            roots.append(Path(current_path))
+        deduped: list[Path] = []
+        seen: set[str] = set()
+        for p in roots:
+            key = str(Path(p)).strip().casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            deduped.append(Path(p))
+        return deduped
+
+    def _open_session_integrity_utility(self):
+        if self._session_state == "recording":
+            self.show_status("Session integrity audit is unavailable during an active recording.")
+            return
+        if not self._profile_store.profile_is_admin(self._session_profile_id):
+            _warning_ok(
+                self,
+                "Admin Only",
+                "Session integrity audit is available to Admin profiles only.",
+            )
+            return
+        dlg = SessionIntegrityDialog(
+            store=self._profile_store,
+            scan_roots=self._session_integrity_scan_roots(),
+            parent=self,
+        )
+        dlg.exec()
 
     def _open_session_reassign_utility(self):
         if self._session_state == "recording":
