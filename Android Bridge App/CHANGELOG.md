@@ -15,4 +15,3 @@ This changelog tracks changes specific to the Android Phone Bridge app (`PolarH1
 ## Version 1.0.0-beta.1
 - release: Published `PolarH10Bridge-debug-v1.0.0-beta.1.apk` to GitHub Releases via the Android bridge release workflow.
 - maintenance: Aligned APK asset naming with release tag format (`PolarH10Bridge-debug-<tag>.apk`) for predictable install/update guidance.
-

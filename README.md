@@ -44,13 +44,13 @@ Most users can connect the strap directly with **PC BLE**. **Phone Bridge** is o
 
 **Download and install the bridge app**
 
-1. Open **Releases** (same page as the desktop downloads):  
-   https://github.com/JoelAtHome/HertzAndHearts/releases  
+1. Open **Releases** (same page as the desktop downloads):
+   https://github.com/JoelAtHome/HertzAndHearts/releases
 2. On the release you are using, download **`PolarH10Bridge-debug-<tag>.apk`** (debug build of the Polar H10-to-PC bridge app).
 3. Copy the APK to your Android phone (USB, cloud storage, etc.).
 4. On the phone, allow installation from your file manager or browser if prompted (“unknown apps”), then open the APK and install.
 
-If you need a build from **`main`** that is not on a release yet, use **Actions** → workflow **`android-bridge`** → artifact **`PolarH10Bridge-debug-apk`** (`app-debug.apk` inside the zip):  
+If you need a build from **`main`** that is not on a release yet, use **Actions** → workflow **`android-bridge`** → artifact **`PolarH10Bridge-debug-apk`** (`app-debug.apk` inside the zip):
 https://github.com/JoelAtHome/HertzAndHearts/actions/workflows/android-bridge.yml
 
 **Use it with Hertz & Hearts**
