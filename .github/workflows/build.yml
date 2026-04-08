@@ -2,6 +2,12 @@ name: build
 
 on:
   workflow_dispatch:
+    inputs:
+      upload_to_release_tag:
+        description: "Optional. Published release tag to upload desktop artifacts to (e.g. v1.0.0-beta.2). Leave empty for build-only artifacts."
+        required: false
+        type: string
+        default: ""
   release:
     types:
       - published
@@ -56,6 +62,19 @@ jobs:
           )"
           echo "label=$V" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve release tag
+        id: release_tag
+        shell: bash
+        env:
+          MANUAL_TAG: ${{ github.event.inputs.upload_to_release_tag }}
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            T="${{ github.ref_name }}"
+          else
+            T=$(printf '%s' "$MANUAL_TAG" | tr -d '\r' | xargs)
+          fi
+          echo "tag=$T" >> "$GITHUB_OUTPUT"
+
       - name: Build app bundle (all platforms)
         run: |
           pyinstaller Hertz-and-Hearts.spec --clean --noconfirm
@@ -106,12 +125,12 @@ jobs:
           path: installer_output/*.exe
 
       - name: Upload artifacts to GitHub release
-        if: github.event_name == 'release'
+        if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_release_tag != '')
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         shell: bash
         run: |
-          gh release upload "${{ github.ref_name }}" "dist/${PACKAGE_NAME}" --clobber
+          gh release upload "${{ steps.release_tag.outputs.tag }}" "dist/${PACKAGE_NAME}" --clobber
           if [ "${{ runner.os }}" = "Windows" ]; then
-            gh release upload "${{ github.ref_name }}" installer_output/*.exe --clobber
+            gh release upload "${{ steps.release_tag.outputs.tag }}" installer_output/*.exe --clobber
           fi
