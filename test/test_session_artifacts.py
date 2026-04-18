@@ -8,6 +8,7 @@ import unittest
 
 from hnh.session_artifacts import (
     _slugify,
+    canonicalize_disk_profile_label,
     create_session_bundle,
     validate_profile_display_name,
 )
@@ -37,6 +38,15 @@ class ValidateProfileDisplayNameTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("empty", reason.lower())
         self.assertEqual(suggested, "")
+
+
+class CanonicalizeDiskProfileLabelTests(unittest.TestCase):
+    def test_hyphen_after_period_from_legacy_space_replace(self):
+        self.assertEqual(canonicalize_disk_profile_label("J.-Kobe"), "J. Kobe")
+
+    def test_noop_when_no_period_hyphen_pattern(self):
+        self.assertEqual(canonicalize_disk_profile_label("J. Kobe"), "J. Kobe")
+        self.assertEqual(canonicalize_disk_profile_label("Alice-Bob"), "Alice-Bob")
 
 
 class SessionArtifactsSlugifyTests(unittest.TestCase):

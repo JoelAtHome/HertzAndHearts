@@ -82,6 +82,28 @@ def validate_profile_display_name(name: str) -> tuple[bool, str, str]:
     return False, reason, suggested
 
 
+def canonicalize_disk_profile_label(name: str) -> str:
+    """
+    Repair legacy profile labels read from disk (folder names or old manifests).
+
+    Older builds sometimes turned spaces into hyphens for path segments, which turns
+    a display name like "J. Kobe" into "J.-Kobe" (the space after the period becomes
+    a hyphen). Modern rules keep spaces; map that pattern back to the canonical form
+    when it is a valid profile label.
+    """
+    raw = str(name).strip()
+    if not raw or ".-" not in raw:
+        return raw
+    expanded = raw
+    while ".-" in expanded:
+        expanded = expanded.replace(".-", ". ", 1)
+    expanded = re.sub(r"\s+", " ", expanded).strip()
+    ok, _, suggested = validate_profile_display_name(expanded)
+    if ok and suggested:
+        return suggested
+    return raw
+
+
 def _next_available_dir(path: Path) -> Path:
     if not path.exists():
         return path

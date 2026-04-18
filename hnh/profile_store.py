@@ -12,7 +12,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any
 
-from hnh.session_artifacts import SessionBundle
+from hnh.session_artifacts import SessionBundle, canonicalize_disk_profile_label
 
 
 def _float_or_none(value) -> float | None:
@@ -240,8 +240,10 @@ class ProfileStore:
                 payload = {}
 
             session_id = str(payload.get("session_id") or session_dir.name).strip() or session_dir.name
-            profile_name = self._normalize_profile(
-                str(payload.get("profile_id") or self._infer_profile_name(session_dir, sessions_root))
+            profile_name = canonicalize_disk_profile_label(
+                self._normalize_profile(
+                    str(payload.get("profile_id") or self._infer_profile_name(session_dir, sessions_root))
+                )
             )
             state = str(payload.get("state") or "finalized").strip() or "finalized"
             timing = payload.get("timing") if isinstance(payload.get("timing"), dict) else {}
@@ -611,6 +613,10 @@ class ProfileStore:
             )
             conn.execute(
                 "DELETE FROM session_history WHERE profile_name = ? COLLATE NOCASE",
+                (profile,),
+            )
+            conn.execute(
+                "DELETE FROM session_trends WHERE profile_name = ? COLLATE NOCASE",
                 (profile,),
             )
             conn.execute(
@@ -1096,7 +1102,9 @@ class ProfileStore:
         profile_name = str(payload.get("profile_id") or "").strip()
         if not profile_name:
             profile_name = self._infer_profile_name(session_dir, scan_root)
-        profile_name = self._normalize_profile(profile_name or self._LEGACY_PROFILE_NAME)
+        profile_name = canonicalize_disk_profile_label(
+            self._normalize_profile(profile_name or self._LEGACY_PROFILE_NAME)
+        )
 
         artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
         csv_meta = artifacts.get("csv") if isinstance(artifacts, dict) else {}
