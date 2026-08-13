@@ -37,4 +37,5 @@ jobs:
           python -m pytest -q \
             test/test_logger.py \
             test/test_profile_store.py \
-            test/test_replay_loader.py
+            test/test_replay_loader.py \
+            test/test_update_check.py

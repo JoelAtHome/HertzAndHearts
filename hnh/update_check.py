@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from packaging.version import InvalidVersion, Version
 
+import hnh
 from hnh.data_paths import app_data_root
 
 GITHUB_RELEASES_API = (
@@ -25,18 +26,19 @@ _STATE_FILENAME = "update_notify_state.json"
 _BETA_TAG_RE = re.compile(r"^(\d+\.\d+\.\d+)-beta(?:\.(\d+))?$", re.IGNORECASE)
 
 
-def _installed_version_string() -> str:
-    try:
-        from importlib.metadata import version as pkg_version
+def installed_version_string() -> str:
+    """Running build's version, identical to the label in the window title."""
+    token = str(getattr(hnh, "__version__", "") or "").strip()
+    return token or hnh.UNKNOWN_VERSION
 
-        return pkg_version("Hertz-and-Hearts")
-    except Exception:
-        return "0.0.0-dev"
+
+def is_version_known() -> bool:
+    return installed_version_string() != hnh.UNKNOWN_VERSION
 
 
 def _user_agent() -> str:
     return (
-        f"Hertz-and-Hearts/{_installed_version_string()} "
+        f"Hertz-and-Hearts/{installed_version_string()} "
         "(+https://github.com/JoelAtHome/HertzAndHearts)"
     )
 
@@ -80,7 +82,7 @@ def parse_release_version(tag_name: str) -> Version | None:
 
 def installed_version() -> Version:
     try:
-        return Version(_installed_version_string())
+        return Version(_coerce_pep440(installed_version_string()))
     except InvalidVersion:
         return Version("0")
 
@@ -97,7 +99,7 @@ class ReleaseInfo:
 
 @dataclass(frozen=True)
 class UpdateCheckResult:
-    outcome: Literal["newer", "current", "error", "no_releases"]
+    outcome: Literal["newer", "current", "unknown_version", "error", "no_releases"]
     release: ReleaseInfo | None
     user_message: str
     detail: str | None = None
@@ -200,6 +202,8 @@ def pick_newest_release(releases: list[dict[str, Any]]) -> ReleaseInfo | None:
 
 def get_installed_release_info(timeout: float = 5.0) -> ReleaseInfo | None:
     """Return release metadata for the installed app version, if available."""
+    if not is_version_known():
+        return None
     try:
         payload = fetch_releases_payload(timeout=timeout)
     except Exception:
@@ -271,9 +275,16 @@ def check_github_for_update() -> UpdateCheckResult:
             "No published releases with a recognized version tag were found.",
         )
 
+    if not is_version_known():
+        return UpdateCheckResult(
+            "unknown_version",
+            newest,
+            "This build does not report its own version, so it cannot be compared "
+            f"with GitHub. The latest public release is {newest.version_display}.",
+        )
+
     inst = installed_version()
-    cur = _installed_version_string()
-    cur_disp = _display_installed(cur)
+    cur_disp = _display_installed(installed_version_string())
     if newest.version > inst:
         return UpdateCheckResult(
             "newer",
