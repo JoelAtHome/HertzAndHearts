@@ -7,7 +7,7 @@ import re
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules
+from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, copy_metadata
 
 # PyInstaller accepts POSIX-style destinations; avoids flaky handling of "\\.libs".
 _SKLEARN_LIBS_DEST = (Path("sklearn") / ".libs").as_posix()
@@ -66,6 +66,13 @@ block_cipher = None
 with open("pyproject.toml", encoding="utf-8") as f:
     _match = re.search(r'^version\s*=\s*"([^"]+)"', f.read(), re.MULTILINE)
 VERSION = _match.group(1) if _match else "1.0.0b2"
+
+try:
+    _app_metadata = copy_metadata("Hertz-and-Hearts")
+except Exception:
+    # Building from a checkout that was never pip-installed; the bundled
+    # pyproject.toml below still carries the version.
+    _app_metadata = []
 
 IS_MAC = platform.system() == "Darwin"
 IS_WIN = platform.system() == "Windows"
@@ -134,7 +141,11 @@ a = Analysis(
     binaries=_win_sklearn_binaries if IS_WIN else _sklearn_dlls,
     datas=[
         ("LICENSE", "."),
-    ],
+        # Version source for the frozen app. Without it the build reports the
+        # dev placeholder version, and the update check then treats every
+        # published release — including the installed one — as an upgrade.
+        ("pyproject.toml", "."),
+    ] + _app_metadata,
     hiddenimports=_hiddenimports,
     hookspath=[],
     hooksconfig={},

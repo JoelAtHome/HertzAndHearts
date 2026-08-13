@@ -9443,7 +9443,7 @@ class View(QMainWindow):
         if result.outcome == "current":
             _info_ok(self, "Check for Updates", result.user_message)
             return
-        if result.outcome == "no_releases":
+        if result.outcome in ("no_releases", "unknown_version"):
             _info_ok(self, "Check for Updates", result.user_message)
             return
         detail = (result.detail or "").strip()
