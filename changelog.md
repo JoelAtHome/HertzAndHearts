@@ -1,6 +1,10 @@
 # Changelog
 
 ### Unreleased
++ bugfix: Update check now compares GitHub releases against the same version shown in the window title, so the app no longer offers an "upgrade" to the release it is already running.
++ bugfix: Frozen desktop builds now ship their version metadata; previously they reported a dev placeholder version to the update check and the About dialog.
++ test: Added update-check version comparison coverage (`test/test_update_check.py`).
+
 ### Version 1.0.0-beta.2 (April 08 2026)
 + docs: Added dedicated Phone Bridge release notes at `Android Bridge App/CHANGELOG.md`.
 + enhancement: Added Session Integrity Audit admin utility (`More -> Session Integrity Audit...`) to scan DB history vs manifests, report missing/mismatched rows, repair index drift, and fill missing trend rows from manifests.
