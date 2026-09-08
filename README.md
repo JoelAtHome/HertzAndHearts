@@ -42,20 +42,22 @@ Cardiac theory notes (QRS + HRV compendium, Markdown):
 
 Most users can connect the strap directly with **PC BLE**. **Phone Bridge** is optional, but it can be much more stable when your computer’s Bluetooth stack struggles (scan failures, frequent disconnects, choppy streaming). In that setup your **phone** keeps the BLE link to the strap and forwards live data to Hertz & Hearts on the PC over **Wi‑Fi** (same LAN as the PC).
 
+The Android bridge app lives in a separate repo: **[ECG-Phone-Bridge](https://github.com/JoelAtHome/ECG-Phone-Bridge)**.
+
 **Download and install the bridge app**
 
-1. Open **Releases** (same page as the desktop downloads):
-   https://github.com/JoelAtHome/HertzAndHearts/releases
-2. On the release you are using, download **`PolarH10Bridge-debug-<tag>.apk`** (debug build of the Polar H10-to-PC bridge app).
+1. Open **ECG-Phone-Bridge Releases**:
+   https://github.com/JoelAtHome/ECG-Phone-Bridge/releases
+2. Download **`PolarH10Bridge-debug-<tag>.apk`** (or the latest published bridge APK).
 3. Copy the APK to your Android phone (USB, cloud storage, etc.).
 4. On the phone, allow installation from your file manager or browser if prompted (“unknown apps”), then open the APK and install.
 
-If you need a build from **`main`** that is not on a release yet, use **Actions** → workflow **`android-bridge`** → artifact **`PolarH10Bridge-debug-apk`** (`app-debug.apk` inside the zip):
-https://github.com/JoelAtHome/HertzAndHearts/actions/workflows/android-bridge.yml
+If you need a build from **`main`** that is not on a release yet, use **ECG-Phone-Bridge Actions** → workflow **`android-bridge`** → APK artifact:
+https://github.com/JoelAtHome/ECG-Phone-Bridge/actions
 
 **Use it with Hertz & Hearts**
 
-- In Hertz & Hearts, set **Connection Mode** to **Phone Bridge**, enter your **phone’s Wi‑Fi IP address** and port (**8765** by default), then **Connect**. The bridge app shows the address to use (your numbers will differ from any screenshot).
+- In Hertz & Hearts, set **Connection Mode** to **Phone Bridge**, enter your **phone’s Wi‑Fi IP address** and port (**8765** by default), then **Connect**. The bridge app shows the address to use (your numbers will differ from any screenshot). You can also use **Scan** to discover bridges on the LAN.
 - Full walkthrough, permissions (Bluetooth, location for BLE scan), and troubleshooting: **`docs/PHONE_BRIDGE_QUICKSTART.md`**.
 
 ## Compatible Sensors

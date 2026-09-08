@@ -27,11 +27,41 @@ from PySide6.QtNetwork import (
     QTcpSocket,
 )
 from math import ceil
-from typing import Union
+from typing import Final, Union
 from hnh.utils import get_sensor_address, get_sensor_remote_address
 from hnh.config import COMPATIBLE_SENSORS, DEBUG, PHONE_BRIDGE_PORT_DEFAULT
 from hnh.perf_probe import get_perf_probe
 from hnh.ble_diagnostics import append_ble_diagnostic
+
+PHONE_BRIDGE_CLIENT_APP: Final[str] = "hertz_and_hearts"
+
+
+def build_phone_bridge_client_info(
+    *,
+    pc_user: str,
+    pc_host: str = "",
+    client_version: str | None = None,
+) -> dict[str, object]:
+    """PC → phone identity payload (shipping + additive protocol fields)."""
+    username = str(pc_user or "").strip() or "Admin"
+    host = str(pc_host or "").strip()
+    if client_version is None:
+        try:
+            from hnh import __version__ as app_version
+        except Exception:
+            app_version = ""
+        client_version = str(app_version or "").strip()
+    payload: dict[str, object] = {
+        "type": "client_info",
+        # Legacy field kept for older bridge builds that key off display name.
+        "app": "HertzAndHearts",
+        "client_app": PHONE_BRIDGE_CLIENT_APP,
+        "pc_user": username,
+        "pc_host": host,
+    }
+    if client_version:
+        payload["client_version"] = client_version
+    return payload
 
 
 def ble_adapter_blocked_message() -> str | None:
@@ -204,6 +234,9 @@ class PhoneBridgeClient(QObject):
       {"type":"status","message":"...","connected":true}
       {"type":"rr","rr_ms":812}
       {"type":"ecg","samples_mv":[0.12,0.18,...]}
+
+    Unknown `type` values are ignored for forward compatibility (e.g. future
+    `rmssd` / `session_state` messages from ECG-Phone-Bridge).
     """
 
     ibi_update = Signal(object)
@@ -308,12 +341,7 @@ class PhoneBridgeClient(QObject):
             host = str(platform.node() or "").strip() or socket.gethostname()
         except Exception:
             host = ""
-        payload = {
-            "type": "client_info",
-            "app": "HertzAndHearts",
-            "pc_user": username,
-            "pc_host": host,
-        }
+        payload = build_phone_bridge_client_info(pc_user=username, pc_host=host)
         try:
             sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
             sock.flush()
@@ -415,12 +443,59 @@ class PhoneBridgeClient(QObject):
                 self.ecg_ready.emit()
                 self.status_update.emit("Phone Bridge ECG stream started.")
             self.ecg_update.emit(out)
+            return
+        # Forward-compatible: ignore unknown types (rmssd, session_state, …).
 
 
 # UDP: Hertz & Hearts broadcasts on PHONE_BRIDGE_APP_DISCOVERY_PORT; the Android
 # Polar H10 bridge app responds (see discover_phone_bridge_hosts).
 PHONE_BRIDGE_APP_DISCOVERY_PORT: int = 45124
 PHONE_BRIDGE_APP_DISCOVER: bytes = b"HnH_PHONE_BRIDGE_DISCOVER_V1\n"
+
+
+def parse_phone_bridge_discover_reply(
+    payload: object,
+    *,
+    ip: str,
+    default_port: int = PHONE_BRIDGE_PORT_DEFAULT,
+) -> dict[str, object] | None:
+    """
+    Normalize a UDP discover JSON reply into a host dict, or None if invalid.
+
+    Accepts any `role: phone_bridge` reply (does not require a fixed `app` name).
+    Optional additive fields (`protocol`, `features`, `bridge_version`) are kept.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("role", "")).strip().lower() != "phone_bridge":
+        return None
+    try:
+        port = int(payload.get("port", default_port))
+    except (TypeError, ValueError):
+        port = int(default_port)
+    if port < 1 or port > 65535:
+        port = int(default_port)
+    host = str(payload.get("hostname", "")).strip() or ip
+    row: dict[str, object] = {
+        "ip": ip,
+        "hostname": host,
+        "port": port,
+    }
+    app = str(payload.get("app", "")).strip()
+    if app:
+        row["app"] = app
+    protocol = str(payload.get("protocol", "")).strip()
+    if protocol:
+        row["protocol"] = protocol
+    bridge_version = str(payload.get("bridge_version", "")).strip()
+    if bridge_version:
+        row["bridge_version"] = bridge_version
+    features = payload.get("features")
+    if isinstance(features, list):
+        cleaned = [str(f).strip() for f in features if str(f).strip()]
+        if cleaned:
+            row["features"] = cleaned
+    return row
 
 
 def _lan_ipv4_broadcast_strings() -> list[str]:
@@ -562,8 +637,9 @@ def _tcp_probe_phone_bridge_hosts(
 
 def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object]]:
     """
-    Discover Android PolarH10Bridge instances on the LAN. Returns:
-    [{"ip": str, "hostname": str, "port": int}, ...]
+    Discover Android phone-bridge instances on the LAN. Returns rows like:
+    [{"ip": str, "hostname": str, "port": int, "app"?: str,
+      "protocol"?: str, "bridge_version"?: str, "features"?: list[str]}, ...]
     """
     found: dict[str, dict[str, object]] = {}
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -603,18 +679,10 @@ def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object
                 continue
             if not isinstance(payload, dict):
                 continue
-            if str(payload.get("app", "")) != "PolarH10Bridge":
+            row = parse_phone_bridge_discover_reply(payload, ip=ip)
+            if row is None:
                 continue
-            if str(payload.get("role", "")) != "phone_bridge":
-                continue
-            try:
-                port = int(payload.get("port", PHONE_BRIDGE_PORT_DEFAULT))
-            except (TypeError, ValueError):
-                port = int(PHONE_BRIDGE_PORT_DEFAULT)
-            if port < 1 or port > 65535:
-                port = int(PHONE_BRIDGE_PORT_DEFAULT)
-            host = str(payload.get("hostname", "")).strip() or ip
-            found[ip] = {"ip": ip, "hostname": host, "port": port}
+            found[ip] = row
     finally:
         try:
             sock.close()

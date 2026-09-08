@@ -4,7 +4,7 @@ This guide gets `Phone Bridge` mode running with the least friction.
 
 ## Goal
 
-- Phone connects to Polar H10 over BLE.
+- Phone connects to Polar H10 (or Feather) over BLE.
 - Phone forwards live data to your PC over Wi-Fi.
 - HnH on PC receives that stream in `Phone Bridge` mode.
 - `Phone Bridge` is optional, but can be more reliable when your PC's BLE stack is unstable.
@@ -17,25 +17,28 @@ This guide gets `Phone Bridge` mode running with the least friction.
 
 ## Install the Android bridge app
 
+The bridge lives in a separate repo: **[ECG-Phone-Bridge](https://github.com/JoelAtHome/ECG-Phone-Bridge)**  
+(local pointer: `Android Bridge App/README.md` in this repo).
+
 Choose one route:
 
 ### A) Download prebuilt APK from GitHub Releases (recommended for most users)
 
-1. Open [Releases](https://github.com/JoelAtHome/HertzAndHearts/releases).
-2. Choose the release you are matching to Hertz & Hearts on the PC.
-3. Download **`PolarH10Bridge-debug-<tag>.apk`**.
+1. Open [ECG-Phone-Bridge Releases](https://github.com/JoelAtHome/ECG-Phone-Bridge/releases).
+2. Choose a recent release.
+3. Download the published debug/release APK for PolarH10Bridge.
 4. Copy it to your phone and install (enable install from unknown sources for your file manager or browser if Android asks).
 
 ### B) Download from GitHub Actions (bleeding-edge / not on a release yet)
 
-1. Open the repo Actions tab and select workflow `android-bridge`.
-2. Open the latest successful run for `main`.
-3. Download artifact `PolarH10Bridge-debug-apk`.
-4. Extract and copy `app-debug.apk` to your phone, then install as above.
+1. Open the [ECG-Phone-Bridge Actions](https://github.com/JoelAtHome/ECG-Phone-Bridge/actions) tab.
+2. Open the latest successful Android APK build on `main`.
+3. Download the APK artifact from that run.
+4. Extract and copy the APK to your phone, then install as above.
 
 ### C) Build locally from source
 
-1. Open `Android Bridge App/PolarH10Bridge` in Android Studio.
+1. Clone or open [ECG-Phone-Bridge](https://github.com/JoelAtHome/ECG-Phone-Bridge) in Android Studio (the `PolarH10Bridge` project).
 2. Let Gradle sync finish.
 3. Build and install Debug app on your Android phone.
    - CLI option: run `./gradlew assembleDebug` in that folder and install `app/build/outputs/apk/debug/app-debug.apk`.
@@ -44,16 +47,13 @@ Choose one route:
 
 1. Open HnH.
 2. In the toolbar `Connection Mode`, select `Phone Bridge`.
-3. Set `Host` to your phone's Wi-Fi IP (example: `192.168.1.42`).
-4. Set `Port` to your bridge app port (default in HnH is `8765`).
+3. Click `Scan` (or `Find phones`) to discover bridges on the LAN, **or** set `Host` to your phone's Wi-Fi IP (example: `192.168.1.42`).
+4. Set `Port` to your bridge app port (default in HnH is `8765`; discovery can fill this in).
 5. Click `Connect`.
 
 ## 2) Phone setup
 
-Use one of these options:
-
-- Use the in-repo reference app (`PolarH10Bridge`) from the install section above.
-- Or try an existing Android app first (fastest validation), then move to dedicated bridge app if it is not HnH-compatible.
+Use the ECG-Phone-Bridge Android app from the install section above.
 
 ### Required phone permissions/settings
 
@@ -81,7 +81,7 @@ Use one of these options:
 
 HnH expects newline-delimited JSON (`NDJSON`), one JSON object per line.
 
-Examples:
+**Shipping today** (required for live charts):
 
 ```json
 {"type":"status","message":"Phone bridge connected to H10","connected":true,"battery":87}
@@ -94,6 +94,10 @@ Notes:
 - `type=status`: optional `battery` (0-100) is supported.
 - `type=rr`: `rr_ms` (or `ibi_ms`) is consumed by HnH.
 - `type=ecg`: `samples_mv` (or `samples`) list is consumed by HnH.
+- On connect, HnH sends `client_info` with `pc_user`, `client_app: "hertz_and_hearts"`, and `client_version`.
+- Discovery uses UDP probe prefix `HnH_PHONE_BRIDGE_DISCOVER_V1` on port **45124**.
+
+**Coming next** (ignored safely until the phone emits them): `rmssd` snapshots, `session_control` / `session_state`, and discover fields `protocol` / `features` / `bridge_version`. See [ECG-Phone-Bridge PROTOCOL.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [HOST_HANDOFF.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/HOST_HANDOFF.md).
 
 ## 5) Smoke test sequence
 

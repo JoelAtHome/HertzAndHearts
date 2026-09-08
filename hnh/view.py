@@ -7971,6 +7971,7 @@ class View(QMainWindow):
         self._set_connection_mode(str(mode or "ble"))
 
     def _on_phone_bridge_endpoint_changed(self, *_args) -> None:
+        self._apply_selected_phone_bridge_port()
         self._persist_connection_prefs()
         self._apply_connect_ready_state()
         self._refresh_connect_hints_if_active()
@@ -8017,6 +8018,10 @@ class View(QMainWindow):
             item_text = self.bridge_host_combo.itemText(idx)
             if self.bridge_host_combo.currentText().strip() == item_text.strip():
                 d = self.bridge_host_combo.itemData(idx)
+                if isinstance(d, dict):
+                    ip = str(d.get("ip", "")).strip()
+                    if ip:
+                        return ip
                 if d and isinstance(d, str) and d.strip():
                     return d.strip()
         raw = self.bridge_host_combo.currentText().strip()
@@ -8024,6 +8029,23 @@ class View(QMainWindow):
         if m:
             return m.group(1)
         return raw
+
+    def _apply_selected_phone_bridge_port(self) -> None:
+        """If the host combo selection carries a discovered port, apply it."""
+        idx = self.bridge_host_combo.currentIndex()
+        if idx < 0:
+            return
+        d = self.bridge_host_combo.itemData(idx)
+        if not isinstance(d, dict):
+            return
+        try:
+            port = int(d.get("port", 0))
+        except (TypeError, ValueError):
+            return
+        if 1024 <= port <= 65535 and int(self.bridge_port_spin.value()) != port:
+            self.bridge_port_spin.blockSignals(True)
+            self.bridge_port_spin.setValue(port)
+            self.bridge_port_spin.blockSignals(False)
 
     def _focus_bridge_host_line_edit_without_select_all(self) -> None:
         """Give keyboard focus to the phone bridge host field without selecting all text."""
@@ -8072,13 +8094,26 @@ class View(QMainWindow):
             if not ip:
                 continue
             host = str(p.get("hostname", "")).strip() or ip
+            version = str(p.get("bridge_version", "")).strip()
             if host == ip:
                 label = f"Phone at {ip}"
             else:
                 label = f"{host} ({ip})"
-            self.bridge_host_combo.addItem(label, ip)
+            if version:
+                label = f"{label} · {version}"
+            self.bridge_host_combo.addItem(label, dict(p))
         self.bridge_host_combo.blockSignals(False)
-        idx = self.bridge_host_combo.findData(current)
+        idx = -1
+        for i in range(self.bridge_host_combo.count()):
+            data = self.bridge_host_combo.itemData(i)
+            item_ip = ""
+            if isinstance(data, dict):
+                item_ip = str(data.get("ip", "")).strip()
+            elif isinstance(data, str):
+                item_ip = data.strip()
+            if item_ip and item_ip == current:
+                idx = i
+                break
         if idx >= 0:
             self.bridge_host_combo.setCurrentIndex(idx)
             self.bridge_host_combo.setEditText(self.bridge_host_combo.itemText(idx))
@@ -8099,11 +8134,20 @@ class View(QMainWindow):
                     with socket.create_connection((candidate, port), timeout=1.2):
                         label = f"Phone at {candidate}"
                         self.bridge_host_combo.blockSignals(True)
-                        self.bridge_host_combo.addItem(label, candidate)
-                        self.bridge_host_combo.blockSignals(False)
-                        self.bridge_host_combo.setCurrentIndex(
-                            self.bridge_host_combo.findData(candidate)
+                        self.bridge_host_combo.addItem(
+                            label, {"ip": candidate, "hostname": candidate, "port": port}
                         )
+                        self.bridge_host_combo.blockSignals(False)
+                        for i in range(self.bridge_host_combo.count()):
+                            data = self.bridge_host_combo.itemData(i)
+                            item_ip = (
+                                str(data.get("ip", "")).strip()
+                                if isinstance(data, dict)
+                                else str(data or "").strip()
+                            )
+                            if item_ip == candidate:
+                                self.bridge_host_combo.setCurrentIndex(i)
+                                break
                         self.bridge_host_combo.setEditText(
                             self.bridge_host_combo.currentText()
                         )
@@ -8117,8 +8161,17 @@ class View(QMainWindow):
                 except OSError:
                     pass
         if n:
+            feature_hint = ""
+            for p in phones:
+                if not isinstance(p, dict):
+                    continue
+                feats = p.get("features")
+                if isinstance(feats, list) and feats:
+                    feature_hint = f" Features: {', '.join(str(f) for f in feats[:6])}."
+                    break
             self.show_status(
                 f"Found {n} phone bridge app(s). Choose host/port above, then Connect."
+                f"{feature_hint}"
             )
         else:
             self.show_status(

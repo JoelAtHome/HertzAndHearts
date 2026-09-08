@@ -25,7 +25,7 @@ Hertz & Hearts now supports two connection modes:
 3. Click `Connect`.
 4. Optional on phone app: open `Connection settings` and enable `Keep bridge active in background` to reduce dropouts when switching apps.
 
-Current bridge protocol expected by HnH is newline-delimited JSON with `status`, `rr`, and `ecg` messages.
+Current bridge protocol expected by HnH is newline-delimited JSON with `status`, `rr`, and `ecg` messages. Unknown future message types are ignored safely.
 
 If connection fails, try `Disconnect` then reconnect.
 
@@ -40,9 +40,9 @@ When to use this mode:
 ### Android bridge app options
 
 - Existing apps can connect to H10 and record/forward data (for example MQTT-oriented logger apps), but compatibility with HnH's live protocol is not guaranteed out of the box.
-- Recommended path: test an existing Android app first; if live RR/ECG forwarding into HnH is not stable, use a dedicated lightweight Android bridge built with Polar BLE SDK.
-- The in-repo reference project is `Android Bridge App/PolarH10Bridge`.
-- Install/download options are in `docs/PHONE_BRIDGE_QUICKSTART.md` (GitHub Releases APK, optional Actions artifact, or local build).
+- Recommended path: use the dedicated bridge app from **[ECG-Phone-Bridge](https://github.com/JoelAtHome/ECG-Phone-Bridge)**.
+- Install/download options are in `docs/PHONE_BRIDGE_QUICKSTART.md` (GitHub Releases APK, optional Actions artifact, or local build from that repo).
+- This repo keeps only a pointer at `Android Bridge App/README.md`.
 
 ## 2) Start and Run a Session
 

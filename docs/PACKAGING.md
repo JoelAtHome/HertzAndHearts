@@ -48,6 +48,4 @@ The GitHub Actions workflow `.github/workflows/build.yml` builds packages on:
 
 On release events, the workflow uploads artifacts directly to the GitHub Release.
 
-The **android-bridge** workflow (`.github/workflows/android-bridge.yml`) also runs on **`release` (published)** and attaches **`PolarH10Bridge-debug-<tag>.apk`** to the same release, so the phone bridge download stays alongside the desktop packages.
-
-To attach (or re-attach) the APK without cutting a new release: run **Actions → android-bridge → Run workflow**, set **upload_to_release_tag** to an **already published** release tag. Leave that field empty for a build-only run (APK stays as the workflow artifact).
+The Android phone bridge APK is **not** built in this repository. It is published from **[ECG-Phone-Bridge](https://github.com/JoelAtHome/ECG-Phone-Bridge)** (GitHub Actions workflow `android-bridge` and that repo’s Releases as `PolarH10Bridge-debug-<tag>.apk`). See `docs/PHONE_BRIDGE_QUICKSTART.md` and `Android Bridge App/README.md` for download links.
