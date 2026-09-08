@@ -9,13 +9,14 @@ Please follow this process so results are consistent and actionable.
 - Confirm app version and OS version.
 - Pair your sensor with the OS first.
 - Use realistic session lengths: include at least one short session (about 2-5 minutes) and one medium session (about 10-20 minutes).
+- **Windows** is the development and test platform. Linux and macOS testers are welcome; those builds are **best-effort** (platform-specific issues may not be fixed).
 
 ## 2) Run The Checklist
 
 Run all items in:
 
 - `docs/PUBLIC_RELEASE_CHECKLIST.md`
-- `docs/BLE_PLATFORM_VALIDATION_MATRIX.md` (for Win11 vs Linux BLE reliability comparisons)
+- `docs/BLE_PLATFORM_VALIDATION_MATRIX.md` (optional; Windows is the current BLE baseline, Linux comparison is best-effort)
 
 Mark each item as:
 

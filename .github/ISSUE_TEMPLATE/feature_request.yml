@@ -9,6 +9,8 @@ body:
       value: |
         Thanks for sharing an idea. Clear problem statements help us prioritize effectively.
 
+        Windows is the development and test platform. Linux- or macOS-specific requests are **best-effort** and may stay unscheduled.
+
   - type: textarea
     id: problem
     attributes:

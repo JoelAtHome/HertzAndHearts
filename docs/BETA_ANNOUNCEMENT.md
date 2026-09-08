@@ -10,7 +10,7 @@ This is a desktop HRV biofeedback app for research and educational workflows usi
 
 ## What We Need From Beta Testers
 
-We are validating stability, usability, and export/report workflows across real hardware and operating systems.
+We are validating stability, usability, and export/report workflows on real hardware. **Windows** is the development and test platform; Linux and macOS builds remain available as **best-effort**.
 
 Please run through:
 

@@ -8,6 +8,7 @@ How to use
 1) Run your source and/or packaged smoke tests.
 2) Capture requirements snapshot as described in:
    Windows + Linux instructions for HnH testing.txt
+   (Windows is the current test platform; Linux is best-effort.)
 3) Copy the template block below and fill it out.
 4) Append a new block for each test run (do not overwrite old runs).
 

@@ -110,7 +110,7 @@ For a stopped session without final report, generate from Session History.
 ## 8) Troubleshooting
 
 - See `docs/troubleshooting.md`
-- If BLE behavior varies by platform, use `docs/BLE_PLATFORM_VALIDATION_MATRIX.md`
+- Windows is the current BLE test baseline. Linux/macOS comparison notes in `docs/BLE_PLATFORM_VALIDATION_MATRIX.md` are best-effort.
 - For phone-as-gateway setup and message format, use `docs/PHONE_BRIDGE_QUICKSTART.md`
 
 ## 9) Important Safety/Scope Notes

@@ -1,6 +1,7 @@
 # Changelog
 
 ### Unreleased
++ docs: Documented Windows as the development and test platform; Linux and macOS remain available as best-effort builds.
 + bugfix: Update check now compares GitHub releases against the same version shown in the window title, so the app no longer offers an "upgrade" to the release it is already running.
 + bugfix: Frozen desktop builds now ship their version metadata; previously they reported a dev placeholder version to the update check and the About dialog.
 + test: Added update-check version comparison coverage (`test/test_update_check.py`).

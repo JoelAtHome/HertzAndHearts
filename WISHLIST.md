@@ -8,6 +8,7 @@ Keep entries short and actionable so they can be moved through the stages.
 - `idea`: captured, not triaged
 - `triaged`: reviewed and prioritized
 - `planned`: ready for implementation
+- `deferred`: not planned while the area is best-effort / out of active development
 - `done`: shipped and documented
 
 ## Item Template
@@ -57,16 +58,16 @@ Raw ideas go here first.
 - Proposed approach: Add a short "Linux PMD mode" section to Help/F1 screens (main dashboard + ECG/QTc windows) with clear ON/OFF decision rules and the Settings path.
 - Effort: S
 - Impact: High
-- Status: idea
-- Notes: Keep language practical: "OFF for stable HR/RR plotting, ON only when ECG/QTc PMD is needed and stable on this adapter."
+- Status: deferred
+- Notes: Linux is best-effort; revisit only if Linux development resumes. Keep language practical: "OFF for stable HR/RR plotting, ON only when ECG/QTc PMD is needed and stable on this adapter."
 
 ### Linux startup BLE prep behavior in Help screens
 - Problem: Linux users may not realize the app can run a startup Bluetooth reset/prep step before the main window appears, which can feel like a launch delay unless explained.
 - Proposed approach: Add a short Help/F1 note that explains the BLE prep popup, expected wait time, and why scan-first flow is recommended.
 - Effort: S
 - Impact: Med
-- Status: idea
-- Notes: Include troubleshooting guidance for "scan sees device but connect fails" and clarify that this startup behavior is Linux-specific.
+- Status: deferred
+- Notes: Linux is best-effort; revisit only if Linux development resumes. Include troubleshooting guidance for "scan sees device but connect fails" and clarify that this startup behavior is Linux-specific.
 
 ### Data folder & dual-boot guidance in Help/F1 screens
 - Problem: Users on dual-boot/shared-drive setups can accidentally split session data across multiple paths without realizing it.

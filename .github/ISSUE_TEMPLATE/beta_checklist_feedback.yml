@@ -13,6 +13,8 @@ body:
         Please run the checklist first:
         - docs/PUBLIC_RELEASE_CHECKLIST.md
 
+        Windows is the development and test platform. Linux and macOS builds remain available as **best-effort**: reports are welcome, but platform-specific issues may not be fixed.
+
   - type: input
     id: app_version
     attributes:
@@ -25,6 +27,7 @@ body:
     id: os
     attributes:
       label: Operating system
+      description: Windows is the primary platform. Linux and macOS are best-effort.
       placeholder: e.g., Windows 11, Ubuntu 24.04, macOS 14
     validations:
       required: true

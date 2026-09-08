@@ -2,6 +2,8 @@
 
 Use this checklist before publishing a public build.
 
+**Platform:** Must-pass items are signed off on **Windows**. Linux and macOS packages may still be published from CI as **best-effort** builds.
+
 ## 1) Core Functionality (Must Pass)
 
 - [ ] Start a session with a real sensor and confirm live HR/RMSSD updates.

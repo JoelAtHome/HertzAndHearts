@@ -23,7 +23,7 @@ If using the desktop shortcut, ensure `Run-HnH.bat` points to this repository.
 
 ## Linux notes
 
-For GUI/runtime dependency requirements, see Qt docs:
+Linux is a **best-effort** platform: builds remain available, but Linux-specific issues may not be fixed. For GUI/runtime dependency requirements, see Qt docs:
 
 - https://doc.qt.io/qt-6/linux-requirements.html
 - https://doc.qt.io/qt-6/linux.html

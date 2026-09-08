@@ -2,14 +2,16 @@
 
 Use this document to compare BLE reliability across Windows 11 and Linux candidates for Hertz & Hearts.
 
+**Current policy:** **Windows** is the development and test platform. Linux remains available as a **best-effort** build; Linux rows below are historical / optional, not a release gate.
+
 Who should run this:
 
-- Beta testers with supported sensors
+- Beta testers with supported sensors (Windows preferred)
 - Maintainer/operator (you) as the reference baseline
 
 Goal:
 
-- Identify the platform with the best real-world BLE stability and lowest operational friction.
+- Record real-world BLE stability and operational friction. Windows 11 is the current baseline.
 
 ## Test Scope
 

@@ -7,12 +7,17 @@ Current beta: **1.0.0-beta.2**.
 
 **Research use only. Not for clinical diagnosis or treatment.**
 
+## Supported platforms
+
+- **Windows** is the development and test platform.
+- **Linux** and **macOS** builds remain available (Releases and install-from-source) as **best-effort**: they are not actively tested, and platform-specific issues may not be fixed.
+
 ## Start Here
 
-- Recommended for most users (Windows/macOS/Linux):
+- Recommended for most users:
   - Download a prebuilt package from Releases:
     - https://github.com/JoelAtHome/HertzAndHearts/releases
-- Install from source (all platforms):
+- Install from source:
   - `python -m pip install .`
 - Launch:
   - Windows: `py -3 -m hnh.app` (or `python -m hnh.app`)
