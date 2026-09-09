@@ -582,6 +582,22 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
         textColor=colors.HexColor("#9C2727"),
         fontName="Helvetica-Bold",
     )
+    cell_style = ParagraphStyle(
+        "ShareTableCell",
+        parent=body_style,
+        fontSize=9,
+        leading=11,
+    )
+    header_cell_style = ParagraphStyle(
+        "ShareTableHeader",
+        parent=cell_style,
+        fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#1A5276"),
+    )
+
+    def _cell(text: str, *, header: bool = False) -> Paragraph:
+        # ReportLab Paragraphs wrap; plain table strings overflow the cell.
+        return Paragraph(str(text), header_cell_style if header else cell_style)
 
     session_end = data.get("session_end") or datetime.now()
     if not isinstance(session_end, datetime):
@@ -627,14 +643,23 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     )
     lf_hf_avg = f"{sum(stress_vals)/len(stress_vals):.2f}" if stress_vals else "--"
     metrics_rows = [
-        ["Metric", "Value"],
-        ["HR (baseline/latest)", f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"],
-        ["RMSSD (baseline/latest)", f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"],
-        ["HRV(SDNN) (session avg / \u0394)", f"{hrv_avg} / {delta_hrv}"],
-        ["LF/HF (session avg)", lf_hf_avg],
-        ["QTc (session median)", _fmt_qtc_session_value(qtc_data)],
-        ["QRS (session average)", _fmt_qrs_session_value(qtc_data)],
-        ["QTc method guidance", _fmt_qtc_method_suggestion(qtc_data)],
+        [_cell("Metric", header=True), _cell("Value", header=True)],
+        [
+            _cell("HR (baseline/latest)"),
+            _cell(f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"),
+        ],
+        [
+            _cell("RMSSD (baseline/latest)"),
+            _cell(f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"),
+        ],
+        [
+            _cell("HRV(SDNN) (session avg / \u0394)"),
+            _cell(f"{hrv_avg} / {delta_hrv}"),
+        ],
+        [_cell("LF/HF (session avg)"), _cell(lf_hf_avg)],
+        [_cell("QTc (session median)"), _cell(_fmt_qtc_session_value(qtc_data))],
+        [_cell("QRS (session average)"), _cell(_fmt_qrs_session_value(qtc_data))],
+        [_cell("QTc method guidance"), _cell(_fmt_qtc_method_suggestion(qtc_data))],
     ]
     metrics_table = Table(
         metrics_rows,
@@ -646,10 +671,6 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
         TableStyle(
             [
                 ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EAF2F8")),
-                ("TEXTCOLOR", (0, 0), (-1, 0), colors.HexColor("#1A5276")),
-                ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-                ("FONTNAME", (0, 1), (-1, -1), "Helvetica"),
-                ("FONTSIZE", (0, 0), (-1, -1), 9),
                 ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#D5D8DC")),
                 ("VALIGN", (0, 0), (-1, -1), "TOP"),
                 ("LEFTPADDING", (0, 0), (-1, -1), 5),
