@@ -10,7 +10,6 @@ from hnh.utils import get_sensor_address, NamedSignal
 from hnh.config import (
     HRV_BUFFER_SIZE,
     IBI_BUFFER_SIZE,
-    MAX_BREATHING_RATE,
     MIN_IBI,
     MAX_IBI,
     MIN_HRV_TARGET,
@@ -67,7 +66,6 @@ class Model(QObject):
         # - http://nestedsoftware.com/2018/04/04/exponential-moving-average-on-streaming-data-4hhl.24876.html
         self.ewma_hrv: float = 1.0
         self.sensors: list[QBluetoothDeviceInfo] = []
-        self.breathing_rate: float = float(MAX_BREATHING_RATE)
         self.hrv_target: int = math.ceil((MIN_HRV_TARGET + MAX_HRV_TARGET) / 2)
         self._last_ibi_phase: int = -1
         self._last_ibi_extreme: int = 0

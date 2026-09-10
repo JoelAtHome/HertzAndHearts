@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis, QAreaSeries
+from PySide6.QtCharts import QLineSeries, QChartView, QChart, QValueAxis
 from PySide6.QtGui import (
     QPen, QIcon, QImage, QBrush, QColor, QPixmap, QFont,
     QKeySequence, QShortcut, QDesktopServices, QPainter,
@@ -49,7 +49,6 @@ from hnh.sensor import (
 )
 from hnh.linux_ble_prep import LinuxBlePrepWorker
 from hnh.logger import Logger
-from hnh.pacer import Pacer
 from hnh.model import Model
 from hnh.config import (
     PLOT_WARMUP_SECONDS, MAIN_PLOT_START_SECONDS, MAIN_PLOT_SYNC_MIN_IBIS,
@@ -115,54 +114,7 @@ class PhoneBridgeFindWorker(QThread):
             self.finished_err.emit(str(exc))
 
 
-class PacerWorker(QObject):
-    """Drives breathing pacer geometry on a dedicated thread."""
-
-    coordinates_ready = Signal(list, list)
-
-    def __init__(self, fps: int = 15):
-        super().__init__()
-        self._pacer = Pacer()
-        self._fps = max(1, int(fps))
-        self._timer: QTimer | None = None
-        self._breathing_rate = 6.0
-        self._enabled = True
-
-    @Slot()
-    def start(self) -> None:
-        if self._timer is not None:
-            return
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.PreciseTimer)
-        self._timer.setInterval(max(10, int(round(1000.0 / float(self._fps)))))
-        self._timer.timeout.connect(self._tick)
-        self._timer.start()
-
-    @Slot()
-    def stop(self) -> None:
-        if self._timer is None:
-            return
-        self._timer.stop()
-        self._timer.deleteLater()
-        self._timer = None
-
-    @Slot(float)
-    def set_breathing_rate(self, rate: float) -> None:
-        self._breathing_rate = float(rate)
-
-    @Slot(bool)
-    def set_enabled(self, enabled: bool) -> None:
-        self._enabled = bool(enabled)
-
-    @Slot()
-    def _tick(self) -> None:
-        if not self._enabled:
-            return
-        x, y = self._pacer.update(self._breathing_rate)
-        self.coordinates_ready.emit(x, y)
-
-BLUE = QColor(135, 206, 250)
-PACER_WIDGET_SIZE = 134
+SIDE_METRICS_COLUMN_WIDTH = 150
 
 # Tier 1 trend-guidance prefs (per profile; see WISHLIST progressive disclosure roadmap)
 TIER1_PREF_MORNING_BASELINE = "tier1_morning_baseline_protocol"
@@ -4019,43 +3971,6 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
-class PacerWidget(QChartView):
-    def __init__(self, x_values, y_values, color=BLUE):
-        super().__init__()
-        self.setSizePolicy(QSizePolicy(QSizePolicy.Fixed, QSizePolicy.Preferred))
-        self.plot = QChart()
-        self.plot.legend().setVisible(False)
-        self.plot.setBackgroundRoundness(0)
-        self.plot.setMargins(QMargins(0, 0, 0, 0))
-        self.outline = QLineSeries()
-        for x, y in zip(x_values, y_values):
-            self.outline.append(x, y)
-        self.disk = QAreaSeries(self.outline)
-        self.disk.setColor(color)
-        self.disk.setBorderColor(QColor(0, 0, 0, 0))
-        self.plot.addSeries(self.disk)
-
-        self.x_axis = QValueAxis()
-        self.x_axis.setRange(-1, 1)
-        self.x_axis.setVisible(False)
-        self.plot.addAxis(self.x_axis, Qt.AlignBottom)
-        self.disk.attachAxis(self.x_axis)
-
-        self.y_axis = QValueAxis()
-        self.y_axis.setRange(-1, 1)
-        self.y_axis.setVisible(False)
-        self.plot.addAxis(self.y_axis, Qt.AlignLeft)
-        self.disk.attachAxis(self.y_axis)
-        self.setChart(self.plot)
-
-    def update_series(self, x_values, y_values):
-        self.outline.replace([QPointF(x, y) for x, y in zip(x_values, y_values)])
-
-    def sizeHint(self):
-        height = self.size().height()
-        return QSize(height, height)
-
-
 class XYSeriesWidget(QChartView):
     xRangeInteracted = Signal(float, float)
 
@@ -6577,13 +6492,6 @@ class View(QMainWindow):
         # 3. COMPONENT INITIALIZATION
         self.signals = ViewSignals()
         self.signals.request_buffer_reset.connect(self._handle_stream_reset)
-        self.pacer = Pacer()
-        self._pacer_thread = QThread(self)
-        self._pacer_worker = PacerWorker(fps=15)
-        self._pacer_worker.moveToThread(self._pacer_thread)
-        self._pacer_thread.started.connect(self._pacer_worker.start)
-        self._pacer_thread.finished.connect(self._pacer_worker.deleteLater)
-        self._pacer_worker.coordinates_ready.connect(self._on_pacer_coordinates)
         self._chart_update_timer = QTimer(self)
         self._chart_update_timer.setInterval(125)
         self._chart_update_timer.setTimerType(Qt.PreciseTimer)
@@ -6709,9 +6617,6 @@ class View(QMainWindow):
         self.sdnn_series.attachAxis(self.hrv_widget.x_axis)
         self.sdnn_series.attachAxis(self.hrv_y_axis_right)
 
-        self.pacer_widget = PacerWidget(self.pacer.lung_x, self.pacer.lung_y)
-        self.pacer_widget.setFixedSize(PACER_WIDGET_SIZE, PACER_WIDGET_SIZE)
-
         self._hr_overlay = self._make_chart_overlay(self.ibis_widget)
         self._hr_overlay.show()
         self._hrv_overlay = self._make_chart_overlay(self.hrv_widget)
@@ -6750,6 +6655,8 @@ class View(QMainWindow):
         self.recording_statusbar = StatusBanner()
 
         # Labels
+        self.baseline_hr_label = QLabel("Baseline HR: --")
+        self.baseline_rmssd_label = QLabel("Baseline RMSSD: --")
         self.current_hr_label = QLabel("HR: --")
         self.rmssd_label = QLabel("RMSSD: --")
         self.sdnn_label = QLabel("SDNN: --")
@@ -6758,42 +6665,7 @@ class View(QMainWindow):
         self.health_indicator = QLabel("\u25cf")
         self.health_indicator.setStyleSheet("color: gray; font-size: 18px;")
         self.health_label = QLabel("Signal: Waiting for sensor")
-
-        # Pacer controls
-        self.pacer_label = QLabel("Rate: 6")
-        self.pacer_rate = QSlider(Qt.Horizontal)
-        self.pacer_rate.setRange(3, 15)
-        self.pacer_rate.setValue(6)
-        self.pacer_rate.setTickPosition(QSlider.TicksBelow)
-        self.pacer_rate.setTickInterval(1)
-        self.pacer_rate.setSingleStep(1)
-        self.pacer_rate.valueChanged.connect(self._update_breathing_rate)
-        saved_rate = self._profile_store.get_profile_pref(
-            self._session_profile_id, "breathing_rate", "6"
-        )
-        try:
-            rate = int(saved_rate)
-            if 3 <= rate <= 15:
-                self.pacer_rate.setValue(rate)
-                self.model.breathing_rate = float(rate)
-                self.pacer_label.setText(f"Rate: {rate}")
-        except (ValueError, TypeError):
-            pass
-        self.pacer_toggle = QCheckBox("Show Pacer")
-        self.pacer_toggle.setChecked(True)
-        self.pacer_toggle.stateChanged.connect(self.toggle_pacer)
-        self._perf_probe.set_pacer_renderer("current_lungs")
-
-        self.pacer_group = QGroupBox("Breathing Pacer")
-        self.pacer_group.setStyleSheet(
-            "QGroupBox { margin-top: 8px; } "
-            "QGroupBox::title { subcontrol-origin: margin; left: 6px; padding: 0 2px; }"
-        )
-        self.pacer_config = QFormLayout(self.pacer_group)
-        self.pacer_config.setContentsMargins(6, 2, 6, 4)
-        self.pacer_config.setVerticalSpacing(2)
-        self.pacer_config.addRow(self.pacer_label, self.pacer_rate)
-        self.pacer_config.addRow(self.pacer_toggle)
+        self._refresh_baseline_monitors()
 
         # Buttons
         self.scan_button = QPushButton("Scan")
@@ -7000,8 +6872,12 @@ class View(QMainWindow):
         )
         self.annotation.setToolTip("Choose or type a session annotation.")
         self.annotation_button.setToolTip("Add the current annotation to the session log.")
-        self.pacer_rate.setToolTip("Breathing pacer rate in breaths per minute.")
-        self.pacer_toggle.setToolTip("Show or hide the breathing pacer animation.")
+        self.baseline_hr_label.setToolTip(
+            "Session baseline heart rate locked after the settling + baseline window."
+        )
+        self.baseline_rmssd_label.setToolTip(
+            "Session baseline RMSSD locked after the settling + baseline window."
+        )
         self.current_hr_label.setToolTip("Current averaged heart rate in beats per minute.")
         self.rmssd_label.setToolTip("Current RMSSD heart rate variability metric.")
         self.sdnn_label.setToolTip("Current SDNN heart rate variability metric.")
@@ -7102,7 +6978,7 @@ class View(QMainWindow):
             _w.installEventFilter(self)
         self._refresh_debug_mode_ui()
 
-        # Main content row: equal-height plots on left, pacer stack on right.
+        # Main content row: equal-height plots on left, metrics stack on right.
         self.content_row = QHBoxLayout()
         self.content_row.setContentsMargins(0, 0, 0, 0)
         self.content_row.setSpacing(2)
@@ -7150,17 +7026,34 @@ class View(QMainWindow):
         plots_column.addWidget(self.hrv_widget, stretch=1)
         self.content_row.addLayout(plots_column, stretch=1)
 
-        pacer_column = QVBoxLayout()
-        pacer_column.setContentsMargins(0, 0, 0, 0)
-        pacer_column.setSpacing(2)
-        pacer_column.addWidget(self.pacer_widget, alignment=Qt.AlignHCenter)
-        pacer_column.addWidget(self.pacer_group, alignment=Qt.AlignTop)
-        pacer_column.addStretch()
+        metrics_column = QVBoxLayout()
+        metrics_column.setContentsMargins(0, 4, 0, 0)
+        metrics_column.setSpacing(12)
 
-        pacer_container = QWidget()
-        pacer_container.setFixedWidth(150)
-        pacer_container.setLayout(pacer_column)
-        self.content_row.addWidget(pacer_container, stretch=0, alignment=Qt.AlignTop)
+        _stat_style = (
+            "font-size: 11px; color: #2c3e50; "
+            "border: 1px solid #bdc3c7; border-radius: 3px; "
+            "padding: 4px 6px; background: #f8f9fa;"
+        )
+        for lbl in (
+            self.baseline_hr_label,
+            self.baseline_rmssd_label,
+            self.current_hr_label,
+            self.rmssd_label,
+            self.sdnn_label,
+            self.stress_ratio_label,
+            self.qrs_label,
+        ):
+            lbl.setFixedWidth(SIDE_METRICS_COLUMN_WIDTH - 8)
+            lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+            lbl.setStyleSheet(_stat_style)
+            metrics_column.addWidget(lbl, alignment=Qt.AlignHCenter)
+        metrics_column.addStretch()
+
+        metrics_container = QWidget()
+        metrics_container.setFixedWidth(SIDE_METRICS_COLUMN_WIDTH)
+        metrics_container.setLayout(metrics_column)
+        self.content_row.addWidget(metrics_container, stretch=0, alignment=Qt.AlignTop)
         self.vlayout0.addLayout(self.content_row, stretch=90)
 
         # Tier 1: Morning baseline protocol banner (shown only while recording when enabled)
@@ -7263,28 +7156,6 @@ class View(QMainWindow):
         toolbar_top.addWidget(_sep1)
         toolbar_top.addStretch()
 
-        _stat_style = (
-            "font-size: 11px; color: #2c3e50; "
-            "border: 1px solid #bdc3c7; border-radius: 3px; "
-            "padding: 1px 4px 1px 18px; background: #f8f9fa;"
-        )
-        stat_labels = [
-            self.current_hr_label,
-            self.rmssd_label,
-            self.sdnn_label,
-            self.stress_ratio_label,
-            self.qrs_label,
-        ]
-        stat_width = 120
-        spacer = QWidget()
-        spacer.setFixedHeight(88)
-        self.pacer_config.addRow(spacer)
-        for lbl in stat_labels:
-            lbl.setFixedWidth(stat_width)
-            lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
-            lbl.setStyleSheet(_stat_style)
-            self.pacer_config.addRow(lbl)
-
         _sep2 = QFrame()
         _sep2.setFixedSize(1, 18)
         _sep2.setStyleSheet("background: #bdc3c7;")
@@ -7318,9 +7189,6 @@ class View(QMainWindow):
         self.statusbar.addPermanentWidget(self.health_indicator)
         self.statusbar.addPermanentWidget(self.health_label)
         self.logger_thread.start()
-        self._pacer_worker.set_breathing_rate(float(self.model.breathing_rate))
-        self._pacer_worker.set_enabled(bool(self.pacer_toggle.isChecked()))
-        self._pacer_thread.start()
         self._update_connection_mode_ui()
         self._apply_connect_ready_state()
         self._start_connect_hints()
@@ -7417,17 +7285,6 @@ class View(QMainWindow):
             self._animate_profile_header_change()
         self._apply_profile_scoped_settings(self._session_profile_id)
         self._load_timeline_span_pref(self._session_profile_id)
-        saved_rate = self._profile_store.get_profile_pref(
-            self._session_profile_id, "breathing_rate", "6"
-        )
-        try:
-            rate = int(saved_rate)
-            if 3 <= rate <= 15:
-                self.pacer_rate.setValue(rate)
-                self.model.breathing_rate = float(rate)
-                self.pacer_label.setText(f"Rate: {rate}")
-        except (ValueError, TypeError):
-            pass
         self._set_debug_mode(bool(self.settings.DEBUG), announce=False, persist=False)
         if announce:
             self.show_status(f"Active user: {self._session_profile_id}")
@@ -7869,10 +7726,6 @@ class View(QMainWindow):
             self.signals.save_recording.emit()
             self.logger_thread.quit()
             self.logger_thread.wait(2000)
-        if self._pacer_thread.isRunning():
-            self._pacer_worker.stop()
-            self._pacer_thread.quit()
-            self._pacer_thread.wait(1000)
         super().closeEvent(event)
 
     def _is_sensor_connected(self) -> bool:
@@ -8866,6 +8719,7 @@ class View(QMainWindow):
             self.baseline_rmssd = None
             self.baseline_hr_values = []
             self.baseline_hr = None
+            self._refresh_baseline_monitors()
             self._set_main_plot_started(False)
         self.is_phase_active = False
         self._fault_active = False
@@ -10506,6 +10360,7 @@ class View(QMainWindow):
         self.baseline_values = []
         self.baseline_hr = None
         self.baseline_hr_values = []
+        self._refresh_baseline_monitors()
         self.is_phase_active = False
         self._fault_active = False
         self._consecutive_good = 0
@@ -10981,6 +10836,7 @@ class View(QMainWindow):
                 )
                 if self.settings.DEBUG:
                     print(f"--- BASELINES LOCKED: RMSSD={self.baseline_rmssd:.2f} ms, HR={hr_text} bpm ---")
+                self._refresh_baseline_monitors()
 
             # PHASE 3: LOCKED STATE
             if self.baseline_rmssd is not None:
@@ -11067,11 +10923,19 @@ class View(QMainWindow):
         if self.sensor.client is None:
             self.scan_button.setEnabled(True)
 
-    @Slot(list, list)
-    def _on_pacer_coordinates(self, x: list[float], y: list[float]):
-        if not self.pacer_toggle.isChecked():
-            return
-        self.pacer_widget.update_series(x, y)
+    def _refresh_baseline_monitors(self) -> None:
+        hr_lbl = getattr(self, "baseline_hr_label", None)
+        rmssd_lbl = getattr(self, "baseline_rmssd_label", None)
+        if hr_lbl is not None:
+            if self.baseline_hr is not None:
+                hr_lbl.setText(f"Baseline HR: {float(self.baseline_hr):.0f} bpm")
+            else:
+                hr_lbl.setText("Baseline HR: --")
+        if rmssd_lbl is not None:
+            if self.baseline_rmssd is not None:
+                rmssd_lbl.setText(f"Baseline RMSSD: {float(self.baseline_rmssd):.1f} ms")
+            else:
+                rmssd_lbl.setText("Baseline RMSSD: --")
 
     def update_hrv_target(self, target: NamedSignal):
         # Do not overwrite RMSSD axis when user has reset Y axes (data-driven range)
@@ -11261,25 +11125,6 @@ class View(QMainWindow):
             self._set_main_plot_xrange(x_lo, x_hi, sync_aux=True)
             self.show_status("All plots resumed — synchronized live timeline restored.")
         self._apply_freeze_button_states()
-
-    def toggle_pacer(self):
-        if self.pacer_toggle.isChecked():
-            self.pacer_widget.disk.setColor(BLUE)
-            self.pacer_widget.disk.setBorderColor(QColor(0, 0, 0, 0))
-            self._pacer_worker.set_enabled(True)
-        else:
-            self.pacer_widget.update_series(self.pacer.lung_x, self.pacer.lung_y)
-            self.pacer_widget.disk.setColor(QColor(200, 210, 225))
-            self.pacer_widget.disk.setBorderColor(QColor(0, 0, 0, 0))
-            self._pacer_worker.set_enabled(False)
-
-    def _update_breathing_rate(self, value):
-        self.model.breathing_rate = float(value)
-        self._pacer_worker.set_breathing_rate(float(value))
-        self.pacer_label.setText(f"Rate: {value}")
-        self._profile_store.set_profile_pref(
-            self._session_profile_id, "breathing_rate", str(int(value))
-        )
 
     def show_recording_status(self, status: int):
         self.recording_statusbar.setRange(0, max(status, 1))
@@ -12028,6 +11873,7 @@ class View(QMainWindow):
                 self.baseline_hr_values.append(self._hr_ewma)
             elif self.baseline_hr is None and self.baseline_hr_values:
                 self.baseline_hr = sum(self.baseline_hr_values) / len(self.baseline_hr_values)
+                self._refresh_baseline_monitors()
 
             if not self._main_plot_draw_gate(elapsed, now):
                 return

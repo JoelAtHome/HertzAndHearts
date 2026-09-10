@@ -127,11 +127,6 @@ SMOOTH_SECONDS: Final[int] = 18
 # Higher = snappier response to HR changes; lower = smoother but laggier.
 HR_EWMA_WEIGHT: Final[float] = 0.33
 
-# ──────────────────────────────────────────────────────────────────────
-#  BREATHING PACER
-# ──────────────────────────────────────────────────────────────────────
-MAX_BREATHING_RATE: Final[float] = 7.0  # breaths per minute
-
 
 # ──────────────────────────────────────────────────────────────────────
 #  ECG MONITOR (Floating Window)
