@@ -57,7 +57,7 @@ from hnh.config import (
     RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
     SIGNAL_POPUP_AUTO_DISMISS_MS,
     PSD_VAGAL_BAND,
-    CONNECTION_MODE_DEFAULT, PHONE_BRIDGE_HOST_DEFAULT, PHONE_BRIDGE_PORT_DEFAULT,
+    PHONE_BRIDGE_HOST_DEFAULT, PHONE_BRIDGE_PORT_DEFAULT,
 )
 from hnh import config as _config_defaults
 from hnh.settings import (
@@ -6659,6 +6659,7 @@ class View(QMainWindow):
         self.baseline_rmssd_label = QLabel("Baseline RMSSD: --")
         self.current_hr_label = QLabel("HR: --")
         self.rmssd_label = QLabel("RMSSD: --")
+        self.bridge_rmssd_label = QLabel("Bridge RMSSD: --")
         self.sdnn_label = QLabel("SDNN: --")
         self.stress_ratio_label = QLabel("LF/HF: --")
         self.qrs_label = QLabel("QRS: -- ms")
@@ -6830,10 +6831,11 @@ class View(QMainWindow):
 
         # Tooltips for buttons and key data fields.
         self.scan_button.setToolTip(
-            "Scan for nearby Bluetooth heart sensors (PC BLE mode) or discover phone bridges (Phone Bridge mode)."
+            "Discover phone bridge apps on your local Wi-Fi network."
         )
+        self.connection_mode_combo.setVisible(False)
         self.connection_mode_combo.setToolTip(
-            "Choose how to connect: PC BLE (direct Bluetooth) or Phone Bridge (Wi-Fi via phone app)."
+            "Phone Bridge is the only connection path. PC BLE remains in code but is not selectable."
         )
         self.address_menu.setToolTip("Select the sensor to connect.")
         self.bridge_host_combo.setToolTip(
@@ -6880,6 +6882,9 @@ class View(QMainWindow):
         )
         self.current_hr_label.setToolTip("Current averaged heart rate in beats per minute.")
         self.rmssd_label.setToolTip("Current RMSSD heart rate variability metric.")
+        self.bridge_rmssd_label.setToolTip(
+            "Official RMSSD snapshot from the phone. Does not replace the live PC RMSSD above."
+        )
         self.sdnn_label.setToolTip("Current SDNN heart rate variability metric.")
         self.stress_ratio_label.setToolTip("Current LF/HF ratio estimate.")
         self.qrs_label.setToolTip(
@@ -7027,8 +7032,9 @@ class View(QMainWindow):
         self.content_row.addLayout(plots_column, stretch=1)
 
         metrics_column = QVBoxLayout()
-        metrics_column.setContentsMargins(0, 4, 0, 0)
+        metrics_column.setContentsMargins(0, 0, 0, 0)
         metrics_column.setSpacing(12)
+        metrics_column.addStretch(1)
 
         _stat_style = (
             "font-size: 11px; color: #2c3e50; "
@@ -7040,6 +7046,7 @@ class View(QMainWindow):
             self.baseline_rmssd_label,
             self.current_hr_label,
             self.rmssd_label,
+            self.bridge_rmssd_label,
             self.sdnn_label,
             self.stress_ratio_label,
             self.qrs_label,
@@ -7048,12 +7055,12 @@ class View(QMainWindow):
             lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
             lbl.setStyleSheet(_stat_style)
             metrics_column.addWidget(lbl, alignment=Qt.AlignHCenter)
-        metrics_column.addStretch()
+        metrics_column.addStretch(1)
 
         metrics_container = QWidget()
         metrics_container.setFixedWidth(SIDE_METRICS_COLUMN_WIDTH)
         metrics_container.setLayout(metrics_column)
-        self.content_row.addWidget(metrics_container, stretch=0, alignment=Qt.AlignTop)
+        self.content_row.addWidget(metrics_container, stretch=0)
         self.vlayout0.addLayout(self.content_row, stretch=90)
 
         # Tier 1: Morning baseline protocol banner (shown only while recording when enabled)
@@ -7122,14 +7129,12 @@ class View(QMainWindow):
         self.address_menu.setMinimumWidth(240)
         self.address_menu.setMaximumWidth(240)
         self.address_menu.setStyleSheet("font-size: 11px;")
-        self.connection_mode_combo.setMaximumWidth(130)
-        self.connection_mode_combo.setStyleSheet("font-size: 11px;")
+        self.connection_mode_combo.setVisible(False)
         self.bridge_host_combo.setStyleSheet("font-size: 11px;")
         self.bridge_scan_phones_btn.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.bridge_port_spin.setMaximumWidth(82)
         self.bridge_port_spin.setStyleSheet("font-size: 11px;")
 
-        toolbar_top.addWidget(self.connection_mode_combo)
         toolbar_top.addWidget(self.scan_button)
         toolbar_top.addWidget(self.address_menu)
         self.address_menu.currentIndexChanged.connect(self._refresh_connect_hints_if_active)
@@ -7374,13 +7379,14 @@ class View(QMainWindow):
         anim.start()
 
     def _load_connection_prefs(self, profile_id: str) -> tuple[str, str, int]:
-        default_mode = (
-            "phone" if str(CONNECTION_MODE_DEFAULT).strip().lower() == "phone" else "ble"
-        )
+        # PC BLE is dormant. Ignore a stored "ble" pref so a relaunch cannot
+        # quietly reconnect over the PC Bluetooth stack.
         raw_mode = self._profile_store.get_profile_pref(
-            profile_id, CONNECTION_PREF_MODE, default_mode
+            profile_id, CONNECTION_PREF_MODE, "phone"
         )
-        mode = "phone" if str(raw_mode).strip().lower() == "phone" else "ble"
+        if str(raw_mode).strip().lower() != "phone":
+            self._profile_store.set_profile_pref(profile_id, CONNECTION_PREF_MODE, "phone")
+        mode = "phone"
         host = self._profile_store.get_profile_pref(
             profile_id, CONNECTION_PREF_PHONE_HOST, PHONE_BRIDGE_HOST_DEFAULT
         ).strip()
@@ -7402,7 +7408,7 @@ class View(QMainWindow):
         self._profile_store.set_profile_pref(
             profile_id,
             CONNECTION_PREF_MODE,
-            "phone" if self._connection_mode == "phone" else "ble",
+            "phone",
         )
         self._profile_store.set_profile_pref(
             profile_id,
@@ -7748,6 +7754,9 @@ class View(QMainWindow):
         sensor_client.status_update.connect(self.show_status)
         sensor_client.battery_update.connect(self._update_battery_display)
         sensor_client.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
+        bridge_rmssd = getattr(sensor_client, "bridge_rmssd_update", None)
+        if bridge_rmssd is not None:
+            bridge_rmssd.connect(self._on_bridge_rmssd_snapshot)
 
     def _unbind_sensor_signals(self, sensor_client) -> None:
         try:
@@ -7774,6 +7783,12 @@ class View(QMainWindow):
             sensor_client.diagnostic_logged.disconnect(self._on_ble_diagnostic_logged)
         except Exception:
             pass
+        bridge_rmssd = getattr(sensor_client, "bridge_rmssd_update", None)
+        if bridge_rmssd is not None:
+            try:
+                bridge_rmssd.disconnect(self._on_bridge_rmssd_snapshot)
+            except Exception:
+                pass
 
     def _bind_sensor_window_signals(self, sensor_client) -> None:
         sensor_client.ecg_update.connect(self.ecg_window.append_samples)
@@ -7790,7 +7805,9 @@ class View(QMainWindow):
             pass
 
     def _set_connection_mode(self, mode: str) -> None:
-        requested = "phone" if str(mode).strip().lower() == "phone" else "ble"
+        # PC BLE code stays in this module but is not selectable.
+        requested = "phone"
+        _ = mode
         if requested == self._connection_mode:
             return
         if self._is_sensor_connected() or self._connect_attempt_timer.isActive():
@@ -7860,10 +7877,12 @@ class View(QMainWindow):
         self.bridge_scan_phones_btn.setEnabled(False)
         self.bridge_port_spin.setEnabled(phone_mode)
         self.scan_button.setToolTip(
-            "Scan for nearby Bluetooth heart sensors."
-            if not phone_mode else
             "Discover phone bridge apps on your local Wi-Fi network."
         )
+        if hasattr(self, "bridge_rmssd_label"):
+            self.bridge_rmssd_label.setVisible(phone_mode)
+            if not phone_mode:
+                self._on_bridge_rmssd_snapshot(None)
 
     def _phone_bridge_host_value(self) -> str:
         idx = self.bridge_host_combo.currentIndex()
@@ -10923,6 +10942,32 @@ class View(QMainWindow):
         if self.sensor.client is None:
             self.scan_button.setEnabled(True)
 
+    def _on_bridge_rmssd_snapshot(self, payload: object) -> None:
+        lbl = getattr(self, "bridge_rmssd_label", None)
+        if lbl is None:
+            return
+        if not isinstance(payload, dict):
+            lbl.setText("Bridge RMSSD: --")
+            lbl.setToolTip(
+                "Official RMSSD snapshot from the phone. Does not replace the live PC RMSSD above."
+            )
+            return
+        try:
+            rmssd_ms = float(payload.get("rmssd_ms"))
+        except (TypeError, ValueError):
+            return
+        flags = payload.get("flags")
+        flag_list = [str(flag) for flag in flags] if isinstance(flags, list) else []
+        lbl.setText(f"Bridge RMSSD: {rmssd_ms:.1f} ms")
+        tip = (
+            "Official RMSSD snapshot from the phone (source: "
+            f"{payload.get('rmssd_source') or 'bridge'}). "
+            "Does not replace the live PC RMSSD above."
+        )
+        if flag_list:
+            tip += " Quality flags: " + ", ".join(flag_list) + "."
+        lbl.setToolTip(tip)
+
     def _refresh_baseline_monitors(self) -> None:
         hr_lbl = getattr(self, "baseline_hr_label", None)
         rmssd_lbl = getattr(self, "baseline_rmssd_label", None)
@@ -11219,6 +11264,9 @@ class View(QMainWindow):
     def _show_signal_degraded_popup(self, reason: str):
         if self._suppress_comm_error_popups:
             return
+        # Phone bridge link drops are connection events, not strap wetness.
+        if isinstance(self.sensor, PhoneBridgeClient) and not self.sensor.is_connected():
+            return
         if self._signal_popup_shown:
             return
         self._signal_popup_shown = True
@@ -11349,6 +11397,19 @@ class View(QMainWindow):
             return
         silence = time.time() - self._last_data_time
         if silence >= self.settings.DATA_TIMEOUT_SECONDS and not self._fault_active:
+            # Prefer classifying a dead phone TCP link as disconnect, not "strap wetness".
+            if isinstance(self.sensor, PhoneBridgeClient):
+                sock = getattr(self.sensor, "client", None)
+                dead = sock is None
+                if sock is not None:
+                    try:
+                        dead = sock.state() != QAbstractSocket.ConnectedState
+                    except Exception:
+                        dead = True
+                if dead:
+                    self.sensor.disconnect_client()
+                    self.show_status("Phone Bridge disconnected (remote closed connection).")
+                    return
             self._fault_active = True
             self._consecutive_good = 0
             self._record_disconnect_start("No data (timeout)")

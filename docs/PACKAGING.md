@@ -1,6 +1,6 @@
 # Packaging Guide (Windows, macOS, Linux)
 
-Current beta target: **1.0.0-beta.2** (Python package version: `1.0.0b2`).
+Current beta target: **1.0.0-beta.3** (Python package version: `1.0.0b3`).
 
 CI still produces Windows, macOS, and Linux artifacts. **Windows** is the platform we develop and smoke-test. **macOS** and **Linux** packages are **best-effort** (not actively tested; platform-specific issues may not be fixed).
 
@@ -26,7 +26,7 @@ pwsh packaging/windows/build_windows_package.ps1
 Optional installer:
 
 - Install Inno Setup
-- Run: `iscc /DMyAppVersion=1.0.0-beta.2 installer.iss`
+- Run: `iscc /DMyAppVersion=1.0.0-beta.3 installer.iss`
 
 ## macOS
 

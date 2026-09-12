@@ -4,38 +4,20 @@ This is the short practical guide for day-to-day use.
 
 ## 1) Connect a Sensor
 
-Hertz & Hearts now supports two connection modes:
+The desktop app always uses **Phone Bridge**: your Android phone connects to the strap over BLE and forwards live data to the PC over Wi-Fi. Direct `PC BLE` is not in the toolbar (the code is still in the repo, unused).
 
-- `PC BLE`: the desktop app connects directly to Polar H10 over Bluetooth.
-- `Phone Bridge`: your Android phone connects to H10 over BLE and forwards live data to your PC over Wi-Fi.
-
-### PC BLE mode
-
-1. Pair your chest strap in your operating system Bluetooth settings.
-2. Open Hertz & Hearts.
-3. In `Connection Mode`, choose `PC BLE`.
-4. Click `Scan`.
-5. Select your sensor from the dropdown.
-6. Click `Connect`.
-
-### Phone Bridge mode
-
-1. In `Connection Mode`, choose `Phone Bridge`.
-2. Enter the phone bridge host/IP and port.
+1. Open Hertz & Hearts.
+2. Click `Scan` to find the phone on Wi-Fi, or enter the phone's IP and port (default `8765`).
 3. Click `Connect`.
-4. Optional on phone app: open `Connection settings` and enable `Keep bridge active in background` to reduce dropouts when switching apps.
+4. Optional on the phone app: open `Connection settings` and enable `Keep bridge active in background` to reduce dropouts when switching apps.
+
+The patient breathing pacer is on the phone. HnH shows live PC RMSSD plus an official **Bridge RMSSD** snapshot when the phone sends one.
 
 Current bridge protocol expected by HnH is newline-delimited JSON with `status`, `rr`, and `ecg` messages. Unknown future message types are ignored safely.
 
 If connection fails, try `Disconnect` then reconnect.
 
 For Android background reliability, disable battery optimization for the bridge app (OEM battery savers can still suspend networking/BLE despite foreground notifications).
-
-When to use this mode:
-
-- `Phone Bridge` is optional.
-- It is often useful when your PC has unreliable BLE behavior with Polar H10 (scan failures, frequent disconnects, or unstable throughput).
-- In that setup, the phone handles BLE and forwards the stream over Wi-Fi to the desktop app.
 
 ### Android bridge app options
 

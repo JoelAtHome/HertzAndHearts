@@ -6,6 +6,7 @@ from hnh.sensor import (
     PHONE_BRIDGE_CLIENT_APP,
     build_phone_bridge_client_info,
     parse_phone_bridge_discover_reply,
+    parse_phone_bridge_rmssd,
 )
 
 
@@ -85,6 +86,30 @@ class PhoneBridgeDiscoverParseTests(unittest.TestCase):
         self.assertIsNotNone(row)
         assert row is not None
         self.assertEqual(row["port"], 8765)
+
+
+class PhoneBridgeRmssdParseTests(unittest.TestCase):
+    def test_accepts_official_bridge_snapshot(self):
+        row = parse_phone_bridge_rmssd(
+            {
+                "type": "rmssd",
+                "rmssd_ms": 12.4,
+                "rmssd_source": "bridge",
+                "session_id": "abc",
+                "quality": {"flags": ["short_session", ""]},
+                "feather_rmssd_ms": 99.0,
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["rmssd_ms"], 12.4)
+        self.assertEqual(row["rmssd_source"], "bridge")
+        self.assertEqual(row["flags"], ["short_session"])
+        self.assertNotIn("feather_rmssd_ms", row)
+
+    def test_rejects_missing_value(self):
+        self.assertIsNone(parse_phone_bridge_rmssd({"type": "rmssd"}))
+        self.assertIsNone(parse_phone_bridge_rmssd({"type": "session_state", "rmssd_ms": 40}))
 
 
 if __name__ == "__main__":

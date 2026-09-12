@@ -3,7 +3,7 @@
 # Hertz & Hearts
 
 Desktop HRV biofeedback app for ECG chest straps.
-Current beta: **1.0.0-beta.2**.
+Current beta: **1.0.0-beta.3**.
 
 **Research use only. Not for clinical diagnosis or treatment.**
 
@@ -43,9 +43,9 @@ Cardiac theory notes (QRS + HRV compendium, Markdown):
 - Prebuilt artifacts are published in GitHub Releases:
   - https://github.com/JoelAtHome/HertzAndHearts/releases
 
-## Phone Bridge (Android, optional)
+## Phone Bridge (Android)
 
-Most users can connect the strap directly with **PC BLE**. **Phone Bridge** is optional, but it can be much more stable when your computer’s Bluetooth stack struggles (scan failures, frequent disconnects, choppy streaming). In that setup your **phone** keeps the BLE link to the strap and forwards live data to Hertz & Hearts on the PC over **Wi‑Fi** (same LAN as the PC).
+The desktop app connects through the phone, not the PC Bluetooth stack. Your **phone** keeps the BLE link to the strap and forwards live data to Hertz & Hearts over **Wi‑Fi** (same LAN as the PC). Direct `PC BLE` is not selectable in the toolbar.
 
 The Android bridge app lives in a separate repo: **[ECG-Phone-Bridge](https://github.com/JoelAtHome/ECG-Phone-Bridge)**.
 

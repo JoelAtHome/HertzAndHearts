@@ -113,8 +113,8 @@ SESSION_SAVE_PATH: Final[str] = ""
 # Open session folder in file manager after Stop & Save.
 OPEN_SESSION_FOLDER_ON_SAVE: Final[bool] = True
 
-# Live connection source for the toolbar selector: "ble" or "phone".
-CONNECTION_MODE_DEFAULT: Final[str] = "ble"
+# Live connection source. UI is Phone Bridge only; "ble" remains in code but dormant.
+CONNECTION_MODE_DEFAULT: Final[str] = "phone"
 # Empty until the user scans, connects, or types a host (then persisted per profile).
 PHONE_BRIDGE_HOST_DEFAULT: Final[str] = ""
 PHONE_BRIDGE_PORT_DEFAULT: Final[int] = 8765

@@ -235,8 +235,9 @@ class PhoneBridgeClient(QObject):
       {"type":"rr","rr_ms":812}
       {"type":"ecg","samples_mv":[0.12,0.18,...]}
 
-    Unknown `type` values are ignored for forward compatibility (e.g. future
-    `rmssd` / `session_state` messages from ECG-Phone-Bridge).
+    Unknown `type` values are ignored for forward compatibility (e.g.
+    `session_state`). Official `rmssd` snapshots are parsed and emitted
+    separately — they do not replace the PC live RMSSD chart.
     """
 
     ibi_update = Signal(object)
@@ -244,6 +245,7 @@ class PhoneBridgeClient(QObject):
     ecg_ready = Signal()
     status_update = Signal(str)
     battery_update = Signal(int)
+    bridge_rmssd_update = Signal(object)
     verity_limited_support = Signal()
     diagnostic_logged = Signal(object)
 
@@ -257,10 +259,22 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._link_watch = QTimer(self)
+        self._link_watch.setInterval(2000)
+        self._link_watch.timeout.connect(self._poll_link_alive)
 
     def set_client_profile_name(self, profile_name: str) -> None:
         name = str(profile_name or "").strip()
         self._client_profile_name = name or "Admin"
+
+    def is_connected(self) -> bool:
+        sock = self.client
+        if sock is None:
+            return False
+        try:
+            return sock.state() == QAbstractSocket.ConnectedState
+        except Exception:
+            return False
 
     def connect_host(self, host: str, port: int) -> None:
         if self.client is not None:
@@ -297,24 +311,120 @@ class PhoneBridgeClient(QObject):
     def disconnect_client(self) -> None:
         if self.client is None:
             return
+        self._drop_socket(emit_status=True)
+
+    def _start_link_watch(self) -> None:
+        if not self._link_watch.isActive():
+            self._link_watch.start()
+
+    def _stop_link_watch(self) -> None:
+        if self._link_watch.isActive():
+            self._link_watch.stop()
+
+    def _poll_link_alive(self) -> None:
+        sock = self.client
+        if sock is None:
+            self._stop_link_watch()
+            return
+        try:
+            state = sock.state()
+        except Exception:
+            self._drop_socket(emit_status=True)
+            return
+        if state != QAbstractSocket.ConnectedState:
+            self._drop_socket(emit_status=True)
+            return
+        try:
+            if sock.bytesToWrite() == 0:
+                sock.flush()
+        except Exception:
+            self._drop_socket(emit_status=True)
+
+    def _configure_tcp_keepalive(self, sock: QTcpSocket) -> None:
+        try:
+            sock.setSocketOption(QAbstractSocket.SocketOption.KeepAliveOption, 1)
+        except Exception:
+            pass
+        try:
+            fd = int(sock.socketDescriptor())
+        except Exception:
+            return
+        if fd <= 0:
+            return
+        idle_s, interval_s = 5, 2
+        try:
+            if platform.system() == "Windows":
+                import ctypes
+                from ctypes import wintypes
+
+                SIO_KEEPALIVE_VALS = 0x98000004
+                values = struct.pack(
+                    "III",
+                    1,
+                    int(idle_s * 1000),
+                    int(interval_s * 1000),
+                )
+                buf = ctypes.create_string_buffer(values)
+                bytes_returned = wintypes.DWORD(0)
+                sock_t = ctypes.c_size_t(fd)
+                windll = ctypes.windll.ws2_32
+                windll.WSAIoctl.argtypes = [
+                    ctypes.c_size_t,
+                    wintypes.DWORD,
+                    ctypes.c_void_p,
+                    wintypes.DWORD,
+                    ctypes.c_void_p,
+                    wintypes.DWORD,
+                    ctypes.POINTER(wintypes.DWORD),
+                    ctypes.c_void_p,
+                    ctypes.c_void_p,
+                ]
+                windll.WSAIoctl.restype = ctypes.c_int
+                windll.WSAIoctl(
+                    sock_t,
+                    SIO_KEEPALIVE_VALS,
+                    buf,
+                    len(values),
+                    None,
+                    0,
+                    ctypes.byref(bytes_returned),
+                    None,
+                    None,
+                )
+            else:
+                tmp = socket.socket(fileno=fd)
+                try:
+                    tmp.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    if hasattr(socket, "TCP_KEEPIDLE"):
+                        tmp.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, idle_s)
+                    if hasattr(socket, "TCP_KEEPINTVL"):
+                        tmp.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, interval_s)
+                    if hasattr(socket, "TCP_KEEPCNT"):
+                        tmp.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 4)
+                finally:
+                    try:
+                        tmp.detach()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _drop_socket(self, *, emit_status: bool) -> None:
+        self._stop_link_watch()
         sock = self.client
         self.client = None
-        try:
-            sock.readyRead.disconnect(self._on_ready_read)
-        except Exception:
-            pass
-        try:
-            sock.disconnected.disconnect(self._on_disconnected)
-        except Exception:
-            pass
-        try:
-            sock.connected.disconnect(self._on_connected)
-        except Exception:
-            pass
-        try:
-            sock.errorOccurred.disconnect(self._on_error)
-        except Exception:
-            pass
+        if sock is None:
+            return
+        for signal, slot in (
+            (sock.readyRead, self._on_ready_read),
+            (sock.disconnected, self._on_disconnected),
+            (sock.connected, self._on_connected),
+            (sock.errorOccurred, self._on_error),
+        ):
+            try:
+                signal.disconnect(slot)
+            except Exception:
+                pass
         if sock.state() != QAbstractSocket.UnconnectedState:
             sock.disconnectFromHost()
             if sock.state() != QAbstractSocket.UnconnectedState:
@@ -324,10 +434,16 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
-        self.status_update.emit("Disconnected from Phone Bridge.")
+        self.bridge_rmssd_update.emit(None)
         self.battery_update.emit(-1)
+        if emit_status:
+            self.status_update.emit("Disconnected from Phone Bridge.")
 
     def _on_connected(self) -> None:
+        sock = self.client
+        if sock is not None:
+            self._configure_tcp_keepalive(sock)
+        self._start_link_watch()
         self.status_update.emit(f"Connected to Phone Bridge ({self._host}:{self._port}).")
         self.battery_update.emit(-1)
         self._send_client_info()
@@ -351,6 +467,7 @@ class PhoneBridgeClient(QObject):
 
     def _on_disconnected(self) -> None:
         had_client = self.client is not None
+        self._stop_link_watch()
         if self.client is not None:
             self.client.deleteLater()
             self.client = None
@@ -359,20 +476,23 @@ class PhoneBridgeClient(QObject):
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
         self.battery_update.emit(-1)
+        self.bridge_rmssd_update.emit(None)
         if had_client:
             self.status_update.emit(
                 "Phone Bridge disconnected (remote closed connection)."
             )
 
     def _on_error(self, _error) -> None:
-        if self.client is None:
+        sock = self.client
+        if sock is None:
             return
-        msg = self.client.errorString()
+        msg = sock.errorString()
         try:
-            err_code = int(self.client.error())
+            err_code = int(sock.error())
             self.status_update.emit(f"Phone Bridge error [{err_code}]: {msg}")
         except Exception:
             self.status_update.emit(f"Phone Bridge error: {msg}")
+        self._drop_socket(emit_status=False)
 
     def _on_ready_read(self) -> None:
         if self.client is None:
@@ -444,13 +564,49 @@ class PhoneBridgeClient(QObject):
                 self.status_update.emit("Phone Bridge ECG stream started.")
             self.ecg_update.emit(out)
             return
-        # Forward-compatible: ignore unknown types (rmssd, session_state, …).
+        if msg_type == "rmssd":
+            snapshot = parse_phone_bridge_rmssd(payload)
+            if snapshot is not None:
+                self.bridge_rmssd_update.emit(snapshot)
+            return
+        # Forward-compatible: ignore unknown types (session_state, …).
 
 
 # UDP: Hertz & Hearts broadcasts on PHONE_BRIDGE_APP_DISCOVERY_PORT; the Android
 # Polar H10 bridge app responds (see discover_phone_bridge_hosts).
 PHONE_BRIDGE_APP_DISCOVERY_PORT: int = 45124
 PHONE_BRIDGE_APP_DISCOVER: bytes = b"HnH_PHONE_BRIDGE_DISCOVER_V1\n"
+
+
+def parse_phone_bridge_rmssd(payload: object) -> dict[str, object] | None:
+    """Normalize a phone→PC official RMSSD snapshot, or None if malformed.
+
+    Official value is `rmssd_ms` with `rmssd_source: "bridge"`. `feather_rmssd_ms`
+    is ignored (debug twin only). Low magnitudes are accepted.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("type", "")).strip().lower() != "rmssd":
+        return None
+    try:
+        rmssd_ms = float(payload.get("rmssd_ms"))
+    except (TypeError, ValueError):
+        return None
+    if rmssd_ms != rmssd_ms or rmssd_ms < 0:  # NaN or negative
+        return None
+    source = str(payload.get("rmssd_source", "")).strip() or "bridge"
+    flags: list[str] = []
+    quality = payload.get("quality")
+    if isinstance(quality, dict):
+        raw_flags = quality.get("flags")
+        if isinstance(raw_flags, list):
+            flags = [str(flag).strip() for flag in raw_flags if str(flag).strip()]
+    return {
+        "rmssd_ms": rmssd_ms,
+        "rmssd_source": source,
+        "flags": flags,
+        "session_id": str(payload.get("session_id", "")).strip(),
+    }
 
 
 def parse_phone_bridge_discover_reply(

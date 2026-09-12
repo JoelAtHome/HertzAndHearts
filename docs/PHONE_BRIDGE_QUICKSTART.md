@@ -7,11 +7,12 @@ This guide gets `Phone Bridge` mode running with the least friction.
 - Phone connects to Polar H10 (or Feather) over BLE.
 - Phone forwards live data to your PC over Wi-Fi.
 - HnH on PC receives that stream in `Phone Bridge` mode.
-- `Phone Bridge` is optional, but can be more reliable when your PC's BLE stack is unstable.
+- `Phone Bridge` is the only path in the HnH toolbar. Direct `PC BLE` code remains in the repo but is not selectable.
 
 ## Before you start
 
-- Use `Phone Bridge` if direct `PC BLE` mode is unreliable on your machine.
+- The desktop app always starts in `Phone Bridge`. A saved `PC BLE` preference is rewritten so it cannot reconnect on its own.
+- The patient breathing pacer lives on the phone. HnH does not show a PC pacer.
 - Keep phone and PC on the same Wi-Fi network.
 - Android 8.0+ is required by the reference app (`minSdk = 26`).
 
@@ -45,11 +46,10 @@ Choose one route:
 
 ## 1) PC setup (HnH)
 
-1. Open HnH.
-2. In the toolbar `Connection Mode`, select `Phone Bridge`.
-3. Click `Scan` (or `Find phones`) to discover bridges on the LAN, **or** set `Host` to your phone's Wi-Fi IP (example: `192.168.1.42`).
-4. Set `Port` to your bridge app port (default in HnH is `8765`; discovery can fill this in).
-5. Click `Connect`.
+1. Open HnH. It starts in `Phone Bridge` (there is no connection-mode dropdown).
+2. Click `Scan` to discover bridges on the LAN, **or** set `Host` to your phone's Wi-Fi IP (example: `192.168.1.42`).
+3. Set `Port` to your bridge app port (default in HnH is `8765`; discovery can fill this in).
+4. Click `Connect`.
 
 ## 2) Phone setup
 
@@ -96,8 +96,10 @@ Notes:
 - `type=ecg`: `samples_mv` (or `samples`) list is consumed by HnH.
 - On connect, HnH sends `client_info` with `pc_user`, `client_app: "hertz_and_hearts"`, and `client_version`.
 - Discovery uses UDP probe prefix `HnH_PHONE_BRIDGE_DISCOVER_V1` on port **45124**.
+- Official `type: rmssd` snapshots (phone-computed) appear in the side column as **Bridge RMSSD**. That is a cross-check only — the live **RMSSD** chip and charts stay PC-computed.
+- Soft preference: Stream or Record are both fine. The phone stays mode authority. HnH does not send `session_control`.
 
-**Coming next** (ignored safely until the phone emits them): `rmssd` snapshots, `session_control` / `session_state`, and discover fields `protocol` / `features` / `bridge_version`. See [ECG-Phone-Bridge PROTOCOL.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [HOST_HANDOFF.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/HOST_HANDOFF.md).
+**Ignored safely** until HnH adopts them: `session_state`, `session_control`, and other unknown `type` values. Discover fields `protocol` / `features` / `bridge_version` are accepted. See [ECG-Phone-Bridge PROTOCOL.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [HOST_HANDOFF.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/HOST_HANDOFF.md).
 
 ## 5) Smoke test sequence
 
@@ -108,18 +110,11 @@ Notes:
 5. Confirm HR/RMSSD move within ~5-15 seconds.
 6. Open ECG window; verify waveform if ECG packets are forwarded.
 
-## 6) A/B reliability test
+## 6) Reliability notes
 
-Run two 10-minute sessions:
-
-- Session A: `PC BLE`
-- Session B: `Phone Bridge`
-
-Compare:
+`PC BLE` is not in the toolbar. Compare a Phone Bridge session against an older build only if you still need that history:
 
 - disconnect count
 - time-to-first-beat
 - visible dropouts
 - average RMSSD continuity
-
-If `Phone Bridge` is clearly better, keep it as your routine mode.

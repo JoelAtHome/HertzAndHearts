@@ -1,6 +1,13 @@
 # Changelog
 
 ### Unreleased
+
+### Version 1.0.0-beta.3 (September 11 2026)
++ release: Bumped pre-release version to `1.0.0b3` (public label: `1.0.0-beta.3`).
++ enhancement: Phone Bridge is the only toolbar connection path. A saved `PC BLE` preference is rewritten so it cannot reconnect on its own. Direct PC BLE code remains in the repo, unused.
++ enhancement: Removed the PC breathing pacer. The patient pacer stays on the phone.
++ enhancement: Side column now shows baseline HR and baseline RMSSD with the live indicators, vertically centered.
++ enhancement: Official phone `rmssd` snapshots appear as **Bridge RMSSD** (cross-check only; live PC RMSSD is unchanged). Unknown bridge message types are still ignored.
 + docs: Documented Windows as the development and test platform; Linux and macOS remain available as best-effort builds.
 + bugfix: Update check now compares GitHub releases against the same version shown in the window title, so the app no longer offers an "upgrade" to the release it is already running.
 + bugfix: Frozen desktop builds now ship their version metadata; previously they reported a dev placeholder version to the update check and the About dialog.
