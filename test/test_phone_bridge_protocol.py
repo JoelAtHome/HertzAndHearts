@@ -331,7 +331,7 @@ class PhoneBridgeSavedHrvClientTests(unittest.TestCase):
         self.assertEqual(packages[0]["ibi_ms"], [790, 800])
         self.assertEqual(packages[0]["rmssd_ms"], 48.2)
         self.assertEqual(sent, [{"type": "ritual_ack", "session_id": "sid-1"}])
-        self.assertTrue(any("Saved HRV received" in s for s in statuses))
+        self.assertTrue(any("Receiving saved HRV" in s for s in statuses))
 
         # Duplicate delayed_push: re-ack, no second package emit.
         client._handle_bridge_message(

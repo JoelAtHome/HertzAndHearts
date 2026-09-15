@@ -281,3 +281,201 @@ def import_file_as_session(
     )
 
     return bundle
+
+
+def replay_data_from_ibi_ms(
+    ibi_ms: list[int] | list[float],
+    *,
+    bridge_rmssd_ms: float | None = None,
+    annotation: str | None = None,
+) -> dict[str, Any] | None:
+    """Build normalized replay data from phone-bridge IBI list (ms)."""
+    cleaned: list[float] = []
+    for raw in ibi_ms:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if 200 < value < 3000:
+            cleaned.append(value)
+    if not cleaned:
+        return None
+
+    elapsed_ms = 0.0
+    hr_times: list[float] = []
+    hr_values: list[float] = []
+    for ibi in cleaned:
+        hr_times.append(elapsed_ms / 1000.0)
+        hr_values.append(60000.0 / ibi)
+        elapsed_ms += ibi
+
+    if bridge_rmssd_ms is not None and bridge_rmssd_ms == bridge_rmssd_ms and bridge_rmssd_ms >= 0:
+        rmssd_values = [float(bridge_rmssd_ms)]
+    else:
+        rmssd_values = _compute_rmssd_from_ibis(cleaned)
+    rmssd_times = [hr_times[-1]] * len(rmssd_values) if rmssd_values else []
+
+    annotations: list[tuple[float, str]] = []
+    if annotation:
+        annotations.append((0.0, str(annotation)))
+
+    return {
+        "hr_times": hr_times,
+        "hr_values": hr_values,
+        "rmssd_times": rmssd_times,
+        "rmssd_values": rmssd_values,
+        "hrv_times": [],
+        "hrv_values": [],
+        "annotations": annotations,
+        "ecg_samples": [],
+        "ecg_sample_rate_hz": 130,
+        "duration_seconds": max(hr_times) if hr_times else 0.0,
+    }
+
+
+def import_saved_hrv_package(
+    package: dict[str, Any],
+    session_root: Path,
+    profile_id: str,
+    profile_store: ProfileStore,
+) -> SessionBundle | None:
+    """
+    Persist a PROTOCOL §7 saved-HRV package into Session History.
+
+    Prefer IBI series; use official bridge `rmssd_ms` when present. Returns None
+    when IBIs are missing/unusable, or the existing bundle is already imported
+    (caller should treat that as a quiet no-op success via return of None and
+    check profile_store mapping — actually return a sentinel).
+
+    Returns the new SessionBundle, or None if skipped/failed.
+    On durable dedupe hit, returns None and leaves mapping unchanged.
+    """
+    if not isinstance(package, dict):
+        return None
+    phone_sid = str(package.get("session_id") or "").strip()
+    if not phone_sid:
+        return None
+    if profile_store.get_phone_bridge_imported_session_id(profile_id, phone_sid):
+        return None
+
+    ibi_raw = package.get("ibi_ms")
+    if not isinstance(ibi_raw, list):
+        return None
+    bridge_rmssd = package.get("rmssd_ms")
+    try:
+        bridge_rmssd_f = float(bridge_rmssd) if bridge_rmssd is not None else None
+    except (TypeError, ValueError):
+        bridge_rmssd_f = None
+
+    reason = str(package.get("transfer_reason") or "").strip() or "saved"
+    source = str(package.get("source_device") or "").strip() or "phone_bridge"
+    note = f"[Phone Bridge] Saved HRV ({reason})"
+    data = replay_data_from_ibi_ms(
+        ibi_raw,
+        bridge_rmssd_ms=bridge_rmssd_f,
+        annotation=note,
+    )
+    if not data or not data.get("hr_times"):
+        return None
+
+    bundle = create_session_bundle(session_root, profile_id)
+    write_session_csv(bundle.csv_path, data)
+
+    emitted_at = str(package.get("emitted_at") or "").strip() or None
+    ended_at = emitted_at or datetime.now().isoformat()
+    started_at = bundle.started_at.isoformat()
+    # Prefer phone emit time for history when parseable.
+    if emitted_at:
+        try:
+            # Accept trailing Z
+            started_at = datetime.fromisoformat(emitted_at.replace("Z", "+00:00")).isoformat()
+            ended_at = started_at
+        except Exception:
+            pass
+
+    last_hr = data.get("hr_values", [])[-1] if data.get("hr_values") else None
+    last_rmssd = data.get("rmssd_values", [])[-1] if data.get("rmssd_values") else None
+
+    payload = {
+        "schema_version": 1,
+        "updated_at": datetime.now().isoformat(),
+        "session_id": bundle.session_id,
+        "profile_id": bundle.profile_id,
+        "state": "imported",
+        "report_stage": "final",
+        "sensor": {
+            "selected_device": "phone_bridge",
+            "source_device": source,
+            "phone_bridge_session_id": phone_sid,
+            "transfer_reason": reason,
+        },
+        "timing": {
+            "started_at": started_at,
+            "first_data_at": started_at,
+            "ended_at": ended_at,
+            "emitted_at": emitted_at,
+            "duration_s": package.get("duration_s"),
+        },
+        "metrics": {
+            "baseline_hr": None,
+            "baseline_rmssd": None,
+            "last_hr": last_hr,
+            "last_rmssd": last_rmssd,
+            "bridge_rmssd_ms": bridge_rmssd_f,
+            "qtc": {"status": "unavailable"},
+            "annotation_count": len(data.get("annotations") or []),
+        },
+        "disconnect_intervals": [],
+        "disconnect_total_seconds": 0,
+        "disclaimer": {},
+        "artifacts": {
+            "csv": {"path": str(bundle.csv_path.name), "exists": True},
+            "phone_bridge_package": {
+                "session_id": phone_sid,
+                "kind": package.get("kind"),
+                "mode": package.get("mode"),
+                "ibi_count": len(ibi_raw),
+                "has_ecg_chunks": bool(package.get("ecg_chunks")),
+            },
+        },
+    }
+    write_manifest(bundle.manifest_path, payload)
+
+    profile_store.ensure_profile(profile_id)
+    with profile_store._db() as conn:
+        conn.execute(
+            """
+            INSERT OR REPLACE INTO session_history (
+                session_id, profile_name, started_at, ended_at, state, session_dir, csv_path
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                bundle.session_id,
+                profile_id,
+                started_at,
+                ended_at,
+                "imported",
+                str(bundle.session_dir),
+                str(bundle.csv_path),
+            ),
+        )
+
+    try:
+        ended_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
+        if ended_dt.tzinfo is not None:
+            ended_dt = ended_dt.replace(tzinfo=None)
+    except Exception:
+        ended_dt = datetime.now()
+
+    profile_store.record_session_trend(
+        profile_name=profile_id,
+        session_id=bundle.session_id,
+        ended_at=ended_dt,
+        avg_hr=last_hr,
+        avg_rmssd=last_rmssd,
+    )
+    profile_store.remember_phone_bridge_import(
+        profile_id, phone_sid, bundle.session_id
+    )
+    return bundle

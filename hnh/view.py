@@ -7757,6 +7757,9 @@ class View(QMainWindow):
         bridge_rmssd = getattr(sensor_client, "bridge_rmssd_update", None)
         if bridge_rmssd is not None:
             bridge_rmssd.connect(self._on_bridge_rmssd_snapshot)
+        saved_hrv = getattr(sensor_client, "saved_hrv_package_ready", None)
+        if saved_hrv is not None:
+            saved_hrv.connect(self._on_saved_hrv_package)
 
     def _unbind_sensor_signals(self, sensor_client) -> None:
         try:
@@ -7787,6 +7790,12 @@ class View(QMainWindow):
         if bridge_rmssd is not None:
             try:
                 bridge_rmssd.disconnect(self._on_bridge_rmssd_snapshot)
+            except Exception:
+                pass
+        saved_hrv = getattr(sensor_client, "saved_hrv_package_ready", None)
+        if saved_hrv is not None:
+            try:
+                saved_hrv.disconnect(self._on_saved_hrv_package)
             except Exception:
                 pass
 
@@ -10967,6 +10976,51 @@ class View(QMainWindow):
         if flag_list:
             tip += " Quality flags: " + ", ".join(flag_list) + "."
         lbl.setToolTip(tip)
+
+    def _on_saved_hrv_package(self, package: object) -> None:
+        """Quiet-save a phone Record package into Session History (PROTOCOL §7)."""
+        if not isinstance(package, dict):
+            return
+        phone_sid = str(package.get("session_id") or "").strip()
+        if phone_sid and self._profile_store.get_phone_bridge_imported_session_id(
+            self._session_profile_id, phone_sid
+        ):
+            return
+        from hnh.import_session import import_saved_hrv_package
+
+        try:
+            bundle = import_saved_hrv_package(
+                package,
+                self._session_root,
+                self._session_profile_id,
+                self._profile_store,
+            )
+        except Exception as exc:
+            self.show_status(f"Saved HRV import failed: {exc}")
+            return
+        if bundle is None:
+            # Dedupe hit or unusable IBIs — keep prior status; no modal.
+            return
+        rmssd = package.get("rmssd_ms")
+        try:
+            rmssd_f = float(rmssd) if rmssd is not None else None
+        except (TypeError, ValueError):
+            rmssd_f = None
+        if rmssd_f is not None:
+            self.show_status(
+                f"Saved HRV added to Session History ({rmssd_f:.1f} ms)."
+            )
+        else:
+            self.show_status("Saved HRV added to Session History.")
+        if getattr(self, "_history_window", None) is not None:
+            sessions = self._profile_store.list_sessions(
+                profile_name=self._session_profile_id,
+                include_hidden=True,
+                limit=200,
+            )
+            self._history_window.set_context(self._session_profile_id, sessions)
+        if getattr(self, "_trends_window", None) is not None:
+            self._trends_window.set_active_profile(self._session_profile_id)
 
     def _refresh_baseline_monitors(self) -> None:
         hr_lbl = getattr(self, "baseline_hr_label", None)

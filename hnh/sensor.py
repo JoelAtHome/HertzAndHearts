@@ -726,16 +726,7 @@ class PhoneBridgeClient(QObject):
         if already:
             return
         self.saved_hrv_package_ready.emit(package)
-        rmssd_ms = package.get("rmssd_ms")
-        try:
-            rmssd_f = float(rmssd_ms) if rmssd_ms is not None else None
-        except (TypeError, ValueError):
-            rmssd_f = None
-        if rmssd_f is not None:
-            self.status_update.emit(f"Saved HRV received ({rmssd_f:.1f} ms).")
-        else:
-            self.status_update.emit("Saved HRV received.")
-
+        # Status copy is owned by the view once Session History import runs.
     def _on_session_summary(self, payload: dict) -> None:
         summary = parse_phone_bridge_session_summary(payload)
         if summary is None:

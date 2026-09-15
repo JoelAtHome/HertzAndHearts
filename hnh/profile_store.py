@@ -197,6 +197,52 @@ class ProfileStore:
                     (self.LINUX_PHONE_BRIDGE_ECG_PROMPT_KEY,),
                 )
 
+    def _phone_bridge_import_key(self, profile_name: str) -> str:
+        return f"phone_bridge_hrv_imports:{self._normalize_profile(profile_name)}"
+
+    def get_phone_bridge_imported_session_id(
+        self, profile_name: str, phone_session_id: str
+    ) -> str | None:
+        """Return HnH session_id if this phone package was already imported, else None."""
+        phone_sid = str(phone_session_id or "").strip()
+        if not phone_sid:
+            return None
+        raw = self._get_app_state(self._phone_bridge_import_key(profile_name))
+        if not raw:
+            return None
+        try:
+            mapping = json.loads(raw)
+        except Exception:
+            return None
+        if not isinstance(mapping, dict):
+            return None
+        existing = mapping.get(phone_sid)
+        return str(existing).strip() or None if existing is not None else None
+
+    def remember_phone_bridge_import(
+        self, profile_name: str, phone_session_id: str, hnh_session_id: str
+    ) -> None:
+        """Persist phone→HnH session_id mapping for durable import dedupe."""
+        phone_sid = str(phone_session_id or "").strip()
+        hnh_sid = str(hnh_session_id or "").strip()
+        if not phone_sid or not hnh_sid:
+            return
+        key = self._phone_bridge_import_key(profile_name)
+        raw = self._get_app_state(key)
+        mapping: dict = {}
+        if raw:
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, dict):
+                    mapping = parsed
+            except Exception:
+                mapping = {}
+        mapping[phone_sid] = hnh_sid
+        # Cap growth: keep newest ~100 entries by re-insert order (dict preserves).
+        while len(mapping) > 100:
+            mapping.pop(next(iter(mapping)))
+        self._set_app_state(key, json.dumps(mapping, ensure_ascii=False))
+
     @staticmethod
     def _safe_started_at(session_id: str, fallback: datetime) -> str:
         try:
