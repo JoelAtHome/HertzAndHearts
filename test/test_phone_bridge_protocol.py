@@ -4,9 +4,16 @@ import unittest
 
 from hnh.sensor import (
     PHONE_BRIDGE_CLIENT_APP,
+    PhoneBridgeClient,
+    SavedHrvAssembly,
+    apply_ritual_chunk,
     build_phone_bridge_client_info,
+    build_ritual_ack,
+    finalize_saved_hrv_package,
     parse_phone_bridge_discover_reply,
     parse_phone_bridge_rmssd,
+    parse_phone_bridge_session_summary,
+    saved_hrv_assembly_complete,
 )
 
 
@@ -110,6 +117,266 @@ class PhoneBridgeRmssdParseTests(unittest.TestCase):
     def test_rejects_missing_value(self):
         self.assertIsNone(parse_phone_bridge_rmssd({"type": "rmssd"}))
         self.assertIsNone(parse_phone_bridge_rmssd({"type": "session_state", "rmssd_ms": 40}))
+
+
+class PhoneBridgeSavedHrvParseTests(unittest.TestCase):
+    def test_parse_session_summary_record(self):
+        row = parse_phone_bridge_session_summary(
+            {
+                "type": "session_summary",
+                "session_id": "20260915T120000Z-a1b2",
+                "mode": "record",
+                "kind": "ritual",
+                "duration_s": 180.5,
+                "ibi_count": 220,
+                "has_ecg": False,
+                "source_device": "FEATHER",
+                "emitted_at": "2026-09-15T12:03:00Z",
+                "transfer_reason": "delayed_push",
+                "rmssd_ms": 52.0,
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["session_id"], "20260915T120000Z-a1b2")
+        self.assertEqual(row["transfer_reason"], "delayed_push")
+        self.assertEqual(row["has_ecg"], False)
+        self.assertEqual(row["rmssd_ms"], 52.0)
+
+    def test_rejects_stream_summary(self):
+        self.assertIsNone(
+            parse_phone_bridge_session_summary(
+                {
+                    "type": "session_summary",
+                    "session_id": "s1",
+                    "mode": "stream",
+                    "transfer_reason": "delayed_push",
+                }
+            )
+        )
+
+    def test_build_ritual_ack(self):
+        self.assertEqual(
+            build_ritual_ack("abc"),
+            {"type": "ritual_ack", "session_id": "abc"},
+        )
+        self.assertIsNone(build_ritual_ack("  "))
+
+    def test_build_ritual_request(self):
+        from hnh.sensor import build_ritual_request
+
+        self.assertEqual(
+            build_ritual_request(None),
+            {"type": "ritual_request", "session_id": None},
+        )
+        self.assertEqual(
+            build_ritual_request("sid-9"),
+            {"type": "ritual_request", "session_id": "sid-9"},
+        )
+
+
+class PhoneBridgeSavedHrvAssembleTests(unittest.TestCase):
+    def _summary(self, **overrides):
+        base = {
+            "session_id": "sid-1",
+            "mode": "record",
+            "kind": "ritual",
+            "transfer_reason": "delayed_push",
+            "source_device": "POLAR_H10",
+            "emitted_at": "2026-09-15T12:03:00Z",
+            "has_ecg": False,
+            "duration_s": 120.0,
+            "ibi_count": 2,
+            "ecg_sample_hz": None,
+            "rmssd_ms": 40.0,
+            "ecg_truncated": None,
+        }
+        base.update(overrides)
+        return base
+
+    def test_ibi_only_package_completes(self):
+        assembly = SavedHrvAssembly(session_id="sid-1", summary=self._summary())
+        self.assertFalse(saved_hrv_assembly_complete(assembly))
+        done = apply_ritual_chunk(
+            assembly,
+            {
+                "type": "ritual_chunk",
+                "session_id": "sid-1",
+                "seq": 1,
+                "of": 1,
+                "content": "ibi",
+                "encoding": "int_ms_json",
+                "samples": [800, 812],
+            },
+        )
+        self.assertTrue(done)
+        package = finalize_saved_hrv_package(assembly)
+        self.assertEqual(package["ibi_ms"], [800, 812])
+        self.assertEqual(package["session_id"], "sid-1")
+        self.assertEqual(package["ecg_chunks"], [])
+
+    def test_completes_on_ibi_even_when_has_ecg(self):
+        """ECG must not block Phase 1 ack/status (large wire lines)."""
+        assembly = SavedHrvAssembly(
+            session_id="sid-1",
+            summary=self._summary(has_ecg=True),
+        )
+        self.assertTrue(
+            apply_ritual_chunk(
+                assembly,
+                {
+                    "type": "ritual_chunk",
+                    "session_id": "sid-1",
+                    "seq": 1,
+                    "of": 1,
+                    "content": "ibi",
+                    "samples": [800],
+                },
+            )
+        )
+        # ECG after IBI complete is still storable if applied before finalize.
+        assembly2 = SavedHrvAssembly(
+            session_id="sid-1",
+            summary=self._summary(has_ecg=True),
+        )
+        apply_ritual_chunk(
+            assembly2,
+            {
+                "type": "ritual_chunk",
+                "session_id": "sid-1",
+                "seq": 1,
+                "of": 1,
+                "content": "ecg",
+                "encoding": "int16_uv_b64",
+                "sample_rate_hz": 250,
+                "data": "AAEC",
+            },
+        )
+        self.assertFalse(saved_hrv_assembly_complete(assembly2))
+        self.assertTrue(
+            apply_ritual_chunk(
+                assembly2,
+                {
+                    "type": "ritual_chunk",
+                    "session_id": "sid-1",
+                    "seq": 1,
+                    "of": 1,
+                    "content": "ibi",
+                    "samples": [800],
+                },
+            )
+        )
+        package = finalize_saved_hrv_package(assembly2)
+        self.assertEqual(len(package["ecg_chunks"]), 1)
+
+    def test_ignores_chunk_for_other_session(self):
+        assembly = SavedHrvAssembly(session_id="sid-1", summary=self._summary())
+        self.assertFalse(
+            apply_ritual_chunk(
+                assembly,
+                {
+                    "type": "ritual_chunk",
+                    "session_id": "other",
+                    "seq": 1,
+                    "of": 1,
+                    "content": "ibi",
+                    "samples": [800],
+                },
+            )
+        )
+        self.assertIsNone(assembly.ibi_of)
+
+
+class PhoneBridgeSavedHrvClientTests(unittest.TestCase):
+    def test_assembles_acks_and_dedupes(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        packages: list[dict] = []
+        statuses: list[str] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        client.saved_hrv_package_ready.connect(lambda p: packages.append(dict(p)))
+        client.status_update.connect(lambda s: statuses.append(s))
+
+        client._handle_bridge_message(
+            {
+                "type": "session_summary",
+                "session_id": "sid-1",
+                "mode": "record",
+                "kind": "ritual",
+                "has_ecg": False,
+                "transfer_reason": "delayed_push",
+                "rmssd_ms": 48.0,
+            }
+        )
+        client._handle_bridge_message(
+            {
+                "type": "rmssd",
+                "session_id": "sid-1",
+                "rmssd_ms": 48.2,
+                "rmssd_source": "bridge",
+            }
+        )
+        client._handle_bridge_message(
+            {
+                "type": "ritual_chunk",
+                "session_id": "sid-1",
+                "seq": 1,
+                "of": 1,
+                "content": "ibi",
+                "samples": [790, 800],
+            }
+        )
+
+        self.assertEqual(len(packages), 1)
+        self.assertEqual(packages[0]["ibi_ms"], [790, 800])
+        self.assertEqual(packages[0]["rmssd_ms"], 48.2)
+        self.assertEqual(sent, [{"type": "ritual_ack", "session_id": "sid-1"}])
+        self.assertTrue(any("Saved HRV received" in s for s in statuses))
+
+        # Duplicate delayed_push: re-ack, no second package emit.
+        client._handle_bridge_message(
+            {
+                "type": "session_summary",
+                "session_id": "sid-1",
+                "mode": "record",
+                "has_ecg": False,
+                "transfer_reason": "delayed_push",
+            }
+        )
+        self.assertEqual(len(packages), 1)
+        self.assertEqual(
+            sent,
+            [
+                {"type": "ritual_ack", "session_id": "sid-1"},
+                {"type": "ritual_ack", "session_id": "sid-1"},
+            ],
+        )
+
+    def test_live_rr_continues_during_assembly(self):
+        client = PhoneBridgeClient()
+        ibis: list[int] = []
+        client.ibi_update.connect(lambda v: ibis.append(int(v)))
+        client._handle_bridge_message(
+            {
+                "type": "session_summary",
+                "session_id": "sid-2",
+                "mode": "record",
+                "has_ecg": False,
+                "transfer_reason": "manual_send",
+            }
+        )
+        client._handle_bridge_message({"type": "rr", "rr_ms": 812})
+        client._handle_bridge_message(
+            {
+                "type": "ritual_chunk",
+                "session_id": "sid-2",
+                "seq": 1,
+                "of": 1,
+                "content": "ibi",
+                "samples": [700],
+            }
+        )
+        self.assertEqual(ibis, [812])
 
 
 if __name__ == "__main__":

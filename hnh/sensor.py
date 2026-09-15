@@ -5,7 +5,9 @@ import os
 import platform
 import time
 import ipaddress
+from collections import OrderedDict
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 import numpy as np
 from time import perf_counter_ns
 from PySide6.QtCore import QObject, Signal, QByteArray, QUuid, QTimer, qVersion
@@ -62,6 +64,221 @@ def build_phone_bridge_client_info(
     if client_version:
         payload["client_version"] = client_version
     return payload
+
+
+PHONE_BRIDGE_ACKED_HRV_LIMIT: Final[int] = 64
+
+
+def build_ritual_ack(session_id: str) -> dict[str, object] | None:
+    """PC → phone ack after accepting (or deduping) a saved-HRV package."""
+    sid = str(session_id or "").strip()
+    if not sid:
+        return None
+    return {"type": "ritual_ack", "session_id": sid}
+
+
+def build_ritual_request(session_id: str | None = None) -> dict[str, object]:
+    """PC → phone pull of a persisted saved-HRV package (PROTOCOL §7).
+
+    `session_id` None/omit = latest unacked, else latest package. A specific id
+    re-sends even if already acked.
+    """
+    if session_id is None:
+        return {"type": "ritual_request", "session_id": None}
+    sid = str(session_id).strip()
+    return {"type": "ritual_request", "session_id": sid or None}
+
+
+def parse_phone_bridge_session_summary(payload: object) -> dict[str, object] | None:
+    """Normalize phone→PC `session_summary` (PROTOCOL §7), or None if malformed."""
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("type", "")).strip().lower() != "session_summary":
+        return None
+    session_id = str(payload.get("session_id", "")).strip()
+    if not session_id:
+        return None
+    mode = str(payload.get("mode", "")).strip().lower() or None
+    kind = str(payload.get("kind", "")).strip().lower() or None
+    transfer_reason = str(payload.get("transfer_reason", "")).strip().lower() or None
+    # Stream summaries are not saved-HRV packages.
+    if mode == "stream":
+        return None
+    if mode != "record":
+        if transfer_reason not in {
+            "live_stop",
+            "reconnect_replay",
+            "delayed_push",
+            "manual_send",
+        }:
+            return None
+    row: dict[str, object] = {
+        "session_id": session_id,
+        "mode": mode or "record",
+        "kind": kind or "ritual",
+        "transfer_reason": transfer_reason,
+        "source_device": str(payload.get("source_device", "")).strip() or None,
+        "emitted_at": str(payload.get("emitted_at", "")).strip() or None,
+        "has_ecg": bool(payload.get("has_ecg")) if isinstance(payload.get("has_ecg"), bool) else None,
+    }
+    for key, raw in (
+        ("duration_s", payload.get("duration_s")),
+        ("ibi_count", payload.get("ibi_count")),
+        ("ecg_sample_hz", payload.get("ecg_sample_hz")),
+        ("rmssd_ms", payload.get("rmssd_ms")),
+    ):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            row[key] = None
+            continue
+        if value != value:  # NaN
+            row[key] = None
+            continue
+        row[key] = int(value) if key in {"ibi_count", "ecg_sample_hz"} else value
+    if isinstance(payload.get("ecg_truncated"), bool):
+        row["ecg_truncated"] = bool(payload.get("ecg_truncated"))
+    else:
+        row["ecg_truncated"] = None
+    return row
+
+
+@dataclass
+class SavedHrvAssembly:
+    """In-flight PROTOCOL §7 package (wire `ritual_*`; UI: saved HRV)."""
+
+    session_id: str
+    summary: dict[str, object]
+    rmssd: dict[str, object] | None = None
+    session_state: dict[str, object] | None = None
+    ibi_chunks: dict[int, list[int]] = field(default_factory=dict)
+    ibi_of: int | None = None
+    ecg_chunks: dict[int, dict[str, object]] = field(default_factory=dict)
+    ecg_of: int | None = None
+
+
+def _positive_int(raw: object) -> int | None:
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def saved_hrv_assembly_complete(assembly: SavedHrvAssembly) -> bool:
+    """True when the IBI chunk set is complete.
+
+    ECG chunks are preferred when present but must not block ack/status: phone
+    ECG lines are large (~64–128 KiB) and live `rr`/`ecg` may interleave. Phase 2
+    can deepen ECG ingest; Phase 1 matches FT’s “ack without requiring ECG”.
+    """
+    if assembly.ibi_of is None or assembly.ibi_of < 1:
+        return False
+    return all(seq in assembly.ibi_chunks for seq in range(1, assembly.ibi_of + 1))
+
+
+def apply_ritual_chunk(
+    assembly: SavedHrvAssembly,
+    payload: object,
+) -> bool:
+    """
+    Apply one `ritual_chunk` to the open assembly.
+
+    Returns True when the package is complete after this chunk (IBI set done).
+    Chunks for a different session_id are ignored.
+    """
+    if not isinstance(payload, dict):
+        return False
+    if str(payload.get("type", "")).strip().lower() != "ritual_chunk":
+        return False
+    session_id = str(payload.get("session_id", "")).strip()
+    if session_id != assembly.session_id:
+        return False
+    seq = _positive_int(payload.get("seq"))
+    of = _positive_int(payload.get("of"))
+    if seq is None or of is None or seq > of:
+        return False
+    content = str(payload.get("content", "")).strip().lower()
+    if content == "ibi":
+        samples_raw = payload.get("samples")
+        samples: list[int] = []
+        if isinstance(samples_raw, list):
+            for item in samples_raw:
+                try:
+                    ibi = int(round(float(item)))
+                except (TypeError, ValueError):
+                    continue
+                if ibi > 0:
+                    samples.append(ibi)
+        if assembly.ibi_of is None:
+            assembly.ibi_of = of
+        elif assembly.ibi_of != of:
+            return False
+        assembly.ibi_chunks[seq] = samples
+        return saved_hrv_assembly_complete(assembly)
+    if content == "ecg":
+        if assembly.ecg_of is None:
+            assembly.ecg_of = of
+        elif assembly.ecg_of != of:
+            return False
+        encoding = str(payload.get("encoding", "")).strip() or "int16_uv_b64"
+        data = str(payload.get("data", "")).strip()
+        try:
+            sample_rate_hz = float(payload.get("sample_rate_hz"))
+        except (TypeError, ValueError):
+            sample_rate_hz = None
+        try:
+            scale = float(payload.get("scale_uv_per_lsb", 1.0))
+        except (TypeError, ValueError):
+            scale = 1.0
+        assembly.ecg_chunks[seq] = {
+            "seq": seq,
+            "of": of,
+            "encoding": encoding,
+            "data": data,
+            "sample_rate_hz": sample_rate_hz,
+            "scale_uv_per_lsb": scale,
+        }
+        # ECG alone never completes the package; IBI must finish first.
+        return False
+    return False
+
+
+def finalize_saved_hrv_package(assembly: SavedHrvAssembly) -> dict[str, object]:
+    """Build a normalized package dict for Phase 2 persist / UI status."""
+    ibi: list[int] = []
+    if assembly.ibi_of is not None:
+        for seq in range(1, assembly.ibi_of + 1):
+            ibi.extend(assembly.ibi_chunks.get(seq) or [])
+    ecg_chunks: list[dict[str, object]] = []
+    if assembly.ecg_of is not None:
+        for seq in range(1, assembly.ecg_of + 1):
+            chunk = assembly.ecg_chunks.get(seq)
+            if chunk is not None:
+                ecg_chunks.append(chunk)
+    summary = assembly.summary
+    rmssd = assembly.rmssd
+    rmssd_ms = None
+    if isinstance(rmssd, dict) and "rmssd_ms" in rmssd:
+        rmssd_ms = rmssd.get("rmssd_ms")
+    elif summary.get("rmssd_ms") is not None:
+        rmssd_ms = summary.get("rmssd_ms")
+    return {
+        "session_id": assembly.session_id,
+        "mode": summary.get("mode") or "record",
+        "kind": summary.get("kind") or "ritual",
+        "transfer_reason": summary.get("transfer_reason"),
+        "source_device": summary.get("source_device"),
+        "emitted_at": summary.get("emitted_at"),
+        "duration_s": summary.get("duration_s"),
+        "has_ecg": summary.get("has_ecg"),
+        "ecg_truncated": summary.get("ecg_truncated"),
+        "rmssd_ms": rmssd_ms,
+        "rmssd": rmssd,
+        "session_state": assembly.session_state,
+        "ibi_ms": ibi,
+        "ecg_chunks": ecg_chunks,
+    }
 
 
 def ble_adapter_blocked_message() -> str | None:
@@ -235,9 +452,14 @@ class PhoneBridgeClient(QObject):
       {"type":"rr","rr_ms":812}
       {"type":"ecg","samples_mv":[0.12,0.18,...]}
 
-    Unknown `type` values are ignored for forward compatibility (e.g.
-    `session_state`). Official `rmssd` snapshots are parsed and emitted
-    separately — they do not replace the PC live RMSSD chart.
+    Unknown `type` values are ignored for forward compatibility.
+    Official `rmssd` snapshots are parsed and emitted separately — they do
+    not replace the PC live RMSSD chart.
+
+    PROTOCOL §7 saved-HRV packages (`session_summary` / `ritual_chunk` on the
+    wire) are assembled, deduped by `session_id`, acknowledged with
+    `ritual_ack`, and emitted on `saved_hrv_package_ready`. Live `rr`/`ecg`
+    continue uninterrupted (quiet status only).
     """
 
     ibi_update = Signal(object)
@@ -246,6 +468,7 @@ class PhoneBridgeClient(QObject):
     status_update = Signal(str)
     battery_update = Signal(int)
     bridge_rmssd_update = Signal(object)
+    saved_hrv_package_ready = Signal(object)
     verity_limited_support = Signal()
     diagnostic_logged = Signal(object)
 
@@ -259,6 +482,8 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._saved_hrv_assembly: SavedHrvAssembly | None = None
+        self._acked_hrv_session_ids: OrderedDict[str, None] = OrderedDict()
         self._link_watch = QTimer(self)
         self._link_watch.setInterval(2000)
         self._link_watch.timeout.connect(self._poll_link_alive)
@@ -434,6 +659,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._saved_hrv_assembly = None
         self.bridge_rmssd_update.emit(None)
         self.battery_update.emit(-1)
         if emit_status:
@@ -447,6 +673,19 @@ class PhoneBridgeClient(QObject):
         self.status_update.emit(f"Connected to Phone Bridge ({self._host}:{self._port}).")
         self.battery_update.emit(-1)
         self._send_client_info()
+        # Phone may have already optimistically marked the package acked after a
+        # prior TCP push; pull latest so delayed packages still reach HnH.
+        self._send_ndjson(build_ritual_request(None))
+
+    def _send_ndjson(self, payload: dict[str, object]) -> None:
+        sock = self.client
+        if sock is None:
+            return
+        try:
+            sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
+            sock.flush()
+        except Exception:
+            pass
 
     def _send_client_info(self) -> None:
         sock = self.client
@@ -458,12 +697,69 @@ class PhoneBridgeClient(QObject):
         except Exception:
             host = ""
         payload = build_phone_bridge_client_info(pc_user=username, pc_host=host)
+        self._send_ndjson(payload)
+
+    def _remember_acked_hrv_session(self, session_id: str) -> None:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return
+        self._acked_hrv_session_ids[sid] = None
+        self._acked_hrv_session_ids.move_to_end(sid)
+        while len(self._acked_hrv_session_ids) > PHONE_BRIDGE_ACKED_HRV_LIMIT:
+            self._acked_hrv_session_ids.popitem(last=False)
+
+    def _send_ritual_ack(self, session_id: str) -> None:
+        ack = build_ritual_ack(session_id)
+        if ack is not None:
+            self._send_ndjson(ack)
+
+    def _finalize_saved_hrv_assembly(self) -> None:
+        assembly = self._saved_hrv_assembly
+        if assembly is None or not saved_hrv_assembly_complete(assembly):
+            return
+        package = finalize_saved_hrv_package(assembly)
+        session_id = str(package.get("session_id") or "").strip()
+        self._saved_hrv_assembly = None
+        already = session_id in self._acked_hrv_session_ids
+        self._remember_acked_hrv_session(session_id)
+        self._send_ritual_ack(session_id)
+        if already:
+            return
+        self.saved_hrv_package_ready.emit(package)
+        rmssd_ms = package.get("rmssd_ms")
         try:
-            sock.write((json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8"))
-            sock.flush()
-        except Exception:
-            # Non-fatal: bridge should continue streaming even if metadata send fails.
-            pass
+            rmssd_f = float(rmssd_ms) if rmssd_ms is not None else None
+        except (TypeError, ValueError):
+            rmssd_f = None
+        if rmssd_f is not None:
+            self.status_update.emit(f"Saved HRV received ({rmssd_f:.1f} ms).")
+        else:
+            self.status_update.emit("Saved HRV received.")
+
+    def _on_session_summary(self, payload: dict) -> None:
+        summary = parse_phone_bridge_session_summary(payload)
+        if summary is None:
+            return
+        session_id = str(summary["session_id"])
+        if session_id in self._acked_hrv_session_ids:
+            # Re-ack duplicates (phone may retry delayed_push); do not re-emit.
+            self._send_ritual_ack(session_id)
+            self._saved_hrv_assembly = None
+            return
+        self._saved_hrv_assembly = SavedHrvAssembly(
+            session_id=session_id,
+            summary=summary,
+        )
+        # Quiet progress — large ECG chunks may still follow; do not block UI.
+        self.status_update.emit("Receiving saved HRV…")
+
+    def _on_ritual_chunk(self, payload: dict) -> None:
+        assembly = self._saved_hrv_assembly
+        if assembly is None:
+            # Late ECG (or stray) chunks after IBI finalize — ignore for Phase 1.
+            return
+        if apply_ritual_chunk(assembly, payload):
+            self._finalize_saved_hrv_assembly()
 
     def _on_disconnected(self) -> None:
         had_client = self.client is not None
@@ -475,6 +771,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._saved_hrv_assembly = None
         self.battery_update.emit(-1)
         self.bridge_rmssd_update.emit(None)
         if had_client:
@@ -508,7 +805,12 @@ class PhoneBridgeClient(QObject):
                 continue
             try:
                 payload = json.loads(raw.decode("utf-8"))
-            except Exception:
+            except Exception as exc:
+                if DEBUG:
+                    print(
+                        f"[PhoneBridge] NDJSON parse skip ({len(raw)} bytes): "
+                        f"{exc!r} preview={raw[:80]!r}"
+                    )
                 continue
             self._handle_bridge_message(payload)
 
@@ -568,8 +870,33 @@ class PhoneBridgeClient(QObject):
             snapshot = parse_phone_bridge_rmssd(payload)
             if snapshot is not None:
                 self.bridge_rmssd_update.emit(snapshot)
+                assembly = self._saved_hrv_assembly
+                sid = str(snapshot.get("session_id") or "").strip()
+                if assembly is not None and sid and sid == assembly.session_id:
+                    assembly.rmssd = snapshot
             return
-        # Forward-compatible: ignore unknown types (session_state, …).
+        if msg_type == "session_summary":
+            self._on_session_summary(payload)
+            return
+        if msg_type == "ritual_chunk":
+            self._on_ritual_chunk(payload)
+            return
+        if msg_type == "session_state":
+            assembly = self._saved_hrv_assembly
+            if assembly is None:
+                return
+            sid = str(payload.get("session_id", "")).strip()
+            if sid and sid == assembly.session_id:
+                assembly.session_state = {
+                    "session_id": sid,
+                    "mode": str(payload.get("mode", "")).strip() or None,
+                    "kind": str(payload.get("kind", "")).strip() or None,
+                    "state": str(payload.get("state", "")).strip() or None,
+                    "source_device": str(payload.get("source_device", "")).strip() or None,
+                    "emitted_at": str(payload.get("emitted_at", "")).strip() or None,
+                }
+            return
+        # Forward-compatible: ignore unknown types.
 
 
 # UDP: Hertz & Hearts broadcasts on PHONE_BRIDGE_APP_DISCOVERY_PORT; the Android
