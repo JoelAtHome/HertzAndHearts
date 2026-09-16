@@ -67,6 +67,8 @@ def build_phone_bridge_client_info(
 
 
 PHONE_BRIDGE_ACKED_HRV_LIMIT: Final[int] = 64
+# After IBI chunks finish, wait briefly for ECG chunks (phone sends IBI then ECG).
+PHONE_BRIDGE_ECG_GRACE_MS: Final[int] = 5000
 
 
 def build_ritual_ack(session_id: str) -> dict[str, object] | None:
@@ -166,15 +168,30 @@ def _positive_int(raw: object) -> int | None:
 
 
 def saved_hrv_assembly_complete(assembly: SavedHrvAssembly) -> bool:
-    """True when the IBI chunk set is complete.
-
-    ECG chunks are preferred when present but must not block ack/status: phone
-    ECG lines are large (~64–128 KiB) and live `rr`/`ecg` may interleave. Phase 2
-    can deepen ECG ingest; Phase 1 matches FT’s “ack without requiring ECG”.
-    """
+    """True when the IBI chunk set is complete."""
     if assembly.ibi_of is None or assembly.ibi_of < 1:
         return False
     return all(seq in assembly.ibi_chunks for seq in range(1, assembly.ibi_of + 1))
+
+
+def saved_hrv_ecg_complete(assembly: SavedHrvAssembly) -> bool:
+    """True when all expected ECG chunks have arrived."""
+    if assembly.ecg_of is None or assembly.ecg_of < 1:
+        return False
+    return all(seq in assembly.ecg_chunks for seq in range(1, assembly.ecg_of + 1))
+
+
+def saved_hrv_ready_to_finalize(
+    assembly: SavedHrvAssembly, *, force: bool = False
+) -> bool:
+    """IBI required; ECG required when has_ecg unless force (grace timeout)."""
+    if not saved_hrv_assembly_complete(assembly):
+        return False
+    if force:
+        return True
+    if assembly.summary.get("has_ecg") is True:
+        return saved_hrv_ecg_complete(assembly)
+    return True
 
 
 def apply_ritual_chunk(
@@ -239,8 +256,8 @@ def apply_ritual_chunk(
             "sample_rate_hz": sample_rate_hz,
             "scale_uv_per_lsb": scale,
         }
-        # ECG alone never completes the package; IBI must finish first.
-        return False
+        # ECG progress is checked by saved_hrv_ready_to_finalize.
+        return saved_hrv_assembly_complete(assembly)
     return False
 
 
@@ -484,6 +501,11 @@ class PhoneBridgeClient(QObject):
         self._ecg_frames_seen = 0
         self._saved_hrv_assembly: SavedHrvAssembly | None = None
         self._acked_hrv_session_ids: OrderedDict[str, None] = OrderedDict()
+        self._saved_hrv_ecg_grace = QTimer(self)
+        self._saved_hrv_ecg_grace.setSingleShot(True)
+        self._saved_hrv_ecg_grace.timeout.connect(
+            lambda: self._finalize_saved_hrv_assembly(force=True)
+        )
         self._link_watch = QTimer(self)
         self._link_watch.setInterval(2000)
         self._link_watch.timeout.connect(self._poll_link_alive)
@@ -660,6 +682,8 @@ class PhoneBridgeClient(QObject):
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
         self._saved_hrv_assembly = None
+        if self._saved_hrv_ecg_grace.isActive():
+            self._saved_hrv_ecg_grace.stop()
         self.bridge_rmssd_update.emit(None)
         self.battery_update.emit(-1)
         if emit_status:
@@ -713,10 +737,12 @@ class PhoneBridgeClient(QObject):
         if ack is not None:
             self._send_ndjson(ack)
 
-    def _finalize_saved_hrv_assembly(self) -> None:
+    def _finalize_saved_hrv_assembly(self, *, force: bool = False) -> None:
         assembly = self._saved_hrv_assembly
-        if assembly is None or not saved_hrv_assembly_complete(assembly):
+        if assembly is None or not saved_hrv_ready_to_finalize(assembly, force=force):
             return
+        if self._saved_hrv_ecg_grace.isActive():
+            self._saved_hrv_ecg_grace.stop()
         package = finalize_saved_hrv_package(assembly)
         session_id = str(package.get("session_id") or "").strip()
         self._saved_hrv_assembly = None
@@ -727,6 +753,18 @@ class PhoneBridgeClient(QObject):
             return
         self.saved_hrv_package_ready.emit(package)
         # Status copy is owned by the view once Session History import runs.
+
+    def _maybe_finalize_saved_hrv(self) -> None:
+        assembly = self._saved_hrv_assembly
+        if assembly is None or not saved_hrv_assembly_complete(assembly):
+            return
+        if saved_hrv_ready_to_finalize(assembly):
+            self._finalize_saved_hrv_assembly()
+            return
+        # IBI done, still waiting on ECG — grace timer so a lost chunk cannot hang forever.
+        if not self._saved_hrv_ecg_grace.isActive():
+            self._saved_hrv_ecg_grace.start(PHONE_BRIDGE_ECG_GRACE_MS)
+
     def _on_session_summary(self, payload: dict) -> None:
         summary = parse_phone_bridge_session_summary(payload)
         if summary is None:
@@ -736,21 +774,24 @@ class PhoneBridgeClient(QObject):
             # Re-ack duplicates (phone may retry delayed_push); do not re-emit.
             self._send_ritual_ack(session_id)
             self._saved_hrv_assembly = None
+            if self._saved_hrv_ecg_grace.isActive():
+                self._saved_hrv_ecg_grace.stop()
             return
         self._saved_hrv_assembly = SavedHrvAssembly(
             session_id=session_id,
             summary=summary,
         )
+        if self._saved_hrv_ecg_grace.isActive():
+            self._saved_hrv_ecg_grace.stop()
         # Quiet progress — large ECG chunks may still follow; do not block UI.
         self.status_update.emit("Receiving saved HRV…")
 
     def _on_ritual_chunk(self, payload: dict) -> None:
         assembly = self._saved_hrv_assembly
         if assembly is None:
-            # Late ECG (or stray) chunks after IBI finalize — ignore for Phase 1.
             return
-        if apply_ritual_chunk(assembly, payload):
-            self._finalize_saved_hrv_assembly()
+        apply_ritual_chunk(assembly, payload)
+        self._maybe_finalize_saved_hrv()
 
     def _on_disconnected(self) -> None:
         had_client = self.client is not None
@@ -763,6 +804,8 @@ class PhoneBridgeClient(QObject):
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
         self._saved_hrv_assembly = None
+        if self._saved_hrv_ecg_grace.isActive():
+            self._saved_hrv_ecg_grace.stop()
         self.battery_update.emit(-1)
         self.bridge_rmssd_update.emit(None)
         if had_client:

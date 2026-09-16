@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import csv
 import math
 import shutil
-from datetime import datetime
+import struct
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -333,6 +335,49 @@ def replay_data_from_ibi_ms(
     }
 
 
+def decode_ritual_ecg_chunks(
+    chunks: list[dict[str, Any]] | list[Any],
+) -> tuple[list[float], int]:
+    """
+    Decode PROTOCOL §7 `ritual_chunk` ECG payloads to mV samples.
+
+    Wire encoding: little-endian int16 microvolts (+ optional scale_uv_per_lsb),
+    base64 in `data`. Returns (samples_mv, sample_rate_hz).
+    """
+    samples_uv: list[float] = []
+    rate_hz = 130
+    for chunk in chunks:
+        if not isinstance(chunk, dict):
+            continue
+        encoding = str(chunk.get("encoding") or "").strip().lower()
+        if encoding and encoding not in {"int16_uv_b64", "int16_uv"}:
+            continue
+        raw_b64 = str(chunk.get("data") or "").strip()
+        if not raw_b64:
+            continue
+        try:
+            raw = base64.b64decode(raw_b64, validate=False)
+        except Exception:
+            continue
+        try:
+            scale = float(chunk.get("scale_uv_per_lsb", 1.0))
+        except (TypeError, ValueError):
+            scale = 1.0
+        if scale != scale or scale == 0:
+            scale = 1.0
+        try:
+            rate_hz = int(round(float(chunk.get("sample_rate_hz") or rate_hz)))
+        except (TypeError, ValueError):
+            pass
+        n = len(raw) // 2
+        for i in range(n):
+            (val,) = struct.unpack_from("<h", raw, i * 2)
+            samples_uv.append(float(val) * scale)
+    rate_hz = max(25, min(1000, int(rate_hz or 130)))
+    samples_mv = [v / 1000.0 for v in samples_uv]
+    return samples_mv, rate_hz
+
+
 def import_saved_hrv_package(
     package: dict[str, Any],
     session_root: Path,
@@ -378,23 +423,94 @@ def import_saved_hrv_package(
     if not data or not data.get("hr_times"):
         return None
 
+    ecg_chunks = package.get("ecg_chunks")
+    ecg_samples: list[float] = []
+    ecg_rate = 130
+    if isinstance(ecg_chunks, list) and ecg_chunks:
+        ecg_samples, ecg_rate = decode_ritual_ecg_chunks(ecg_chunks)
+        if ecg_samples:
+            data["ecg_samples"] = ecg_samples
+            data["ecg_sample_rate_hz"] = ecg_rate
+            # Prefer ECG length when it extends past IBI-derived duration.
+            ecg_dur = len(ecg_samples) / float(ecg_rate)
+            if ecg_dur > float(data.get("duration_seconds") or 0):
+                data["duration_seconds"] = ecg_dur
+
     bundle = create_session_bundle(session_root, profile_id)
     write_session_csv(bundle.csv_path, data)
 
     emitted_at = str(package.get("emitted_at") or "").strip() or None
+    duration_s = package.get("duration_s")
+    try:
+        duration_f = float(duration_s) if duration_s is not None else float(
+            data.get("duration_seconds") or 0
+        )
+    except (TypeError, ValueError):
+        duration_f = float(data.get("duration_seconds") or 0)
+    if duration_f != duration_f or duration_f < 0:
+        duration_f = 0.0
+
     ended_at = emitted_at or datetime.now().isoformat()
     started_at = bundle.started_at.isoformat()
+    start_dt = bundle.started_at
     # Prefer phone emit time for history when parseable.
     if emitted_at:
         try:
-            # Accept trailing Z
-            started_at = datetime.fromisoformat(emitted_at.replace("Z", "+00:00")).isoformat()
-            ended_at = started_at
+            start_dt = datetime.fromisoformat(emitted_at.replace("Z", "+00:00"))
+            if start_dt.tzinfo is not None:
+                start_dt = start_dt.replace(tzinfo=None)
+            started_at = start_dt.isoformat()
+            end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
+            ended_at = end_dt.isoformat()
         except Exception:
-            pass
+            end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
+            ended_at = end_dt.isoformat()
+    else:
+        end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
+        ended_at = end_dt.isoformat()
+
+    edf_ok = False
+    if ecg_samples:
+        try:
+            from hnh.edf_export import export_session_edf_plus
+
+            edf_ok, _reason = export_session_edf_plus(
+                str(bundle.edf_path),
+                {
+                    "session_id": bundle.session_id,
+                    "profile_id": profile_id,
+                    "session_start": start_dt,
+                    "session_end": end_dt,
+                    "hr_values": data.get("hr_values") or [],
+                    "rmssd_values": data.get("rmssd_values") or [],
+                    "ecg_samples": ecg_samples,
+                    "ecg_sample_rate_hz": ecg_rate,
+                    "ecg_is_simulated": False,
+                    "annotations": data.get("annotations") or [],
+                },
+                sample_rate_hz=1,
+            )
+            edf_ok = bool(edf_ok and bundle.edf_path.is_file())
+        except Exception:
+            edf_ok = False
 
     last_hr = data.get("hr_values", [])[-1] if data.get("hr_values") else None
     last_rmssd = data.get("rmssd_values", [])[-1] if data.get("rmssd_values") else None
+
+    artifacts: dict[str, Any] = {
+        "csv": {"path": str(bundle.csv_path.name), "exists": True},
+        "phone_bridge_package": {
+            "session_id": phone_sid,
+            "kind": package.get("kind"),
+            "mode": package.get("mode"),
+            "ibi_count": len(ibi_raw),
+            "has_ecg_chunks": bool(ecg_chunks),
+            "ecg_sample_count": len(ecg_samples),
+            "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
+        },
+    }
+    if edf_ok:
+        artifacts["edf"] = {"path": str(bundle.edf_path.name), "exists": True}
 
     payload = {
         "schema_version": 1,
@@ -414,7 +530,7 @@ def import_saved_hrv_package(
             "first_data_at": started_at,
             "ended_at": ended_at,
             "emitted_at": emitted_at,
-            "duration_s": package.get("duration_s"),
+            "duration_s": duration_f or package.get("duration_s"),
         },
         "metrics": {
             "baseline_hr": None,
@@ -428,16 +544,7 @@ def import_saved_hrv_package(
         "disconnect_intervals": [],
         "disconnect_total_seconds": 0,
         "disclaimer": {},
-        "artifacts": {
-            "csv": {"path": str(bundle.csv_path.name), "exists": True},
-            "phone_bridge_package": {
-                "session_id": phone_sid,
-                "kind": package.get("kind"),
-                "mode": package.get("mode"),
-                "ibi_count": len(ibi_raw),
-                "has_ecg_chunks": bool(package.get("ecg_chunks")),
-            },
-        },
+        "artifacts": artifacts,
     }
     write_manifest(bundle.manifest_path, payload)
 

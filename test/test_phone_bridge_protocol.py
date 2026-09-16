@@ -215,8 +215,9 @@ class PhoneBridgeSavedHrvAssembleTests(unittest.TestCase):
         self.assertEqual(package["session_id"], "sid-1")
         self.assertEqual(package["ecg_chunks"], [])
 
-    def test_completes_on_ibi_even_when_has_ecg(self):
-        """ECG must not block Phase 1 ack/status (large wire lines)."""
+    def test_ibi_ready_but_waits_for_ecg_when_flagged(self):
+        from hnh.sensor import saved_hrv_ready_to_finalize
+
         assembly = SavedHrvAssembly(
             session_id="sid-1",
             summary=self._summary(has_ecg=True),
@@ -234,40 +235,27 @@ class PhoneBridgeSavedHrvAssembleTests(unittest.TestCase):
                 },
             )
         )
-        # ECG after IBI complete is still storable if applied before finalize.
-        assembly2 = SavedHrvAssembly(
-            session_id="sid-1",
-            summary=self._summary(has_ecg=True),
-        )
-        apply_ritual_chunk(
-            assembly2,
-            {
-                "type": "ritual_chunk",
-                "session_id": "sid-1",
-                "seq": 1,
-                "of": 1,
-                "content": "ecg",
-                "encoding": "int16_uv_b64",
-                "sample_rate_hz": 250,
-                "data": "AAEC",
-            },
-        )
-        self.assertFalse(saved_hrv_assembly_complete(assembly2))
+        self.assertFalse(saved_hrv_ready_to_finalize(assembly))
         self.assertTrue(
             apply_ritual_chunk(
-                assembly2,
+                assembly,
                 {
                     "type": "ritual_chunk",
                     "session_id": "sid-1",
                     "seq": 1,
                     "of": 1,
-                    "content": "ibi",
-                    "samples": [800],
+                    "content": "ecg",
+                    "encoding": "int16_uv_b64",
+                    "sample_rate_hz": 250,
+                    "scale_uv_per_lsb": 1.0,
+                    "data": "AAEC",
                 },
             )
         )
-        package = finalize_saved_hrv_package(assembly2)
+        self.assertTrue(saved_hrv_ready_to_finalize(assembly))
+        package = finalize_saved_hrv_package(assembly)
         self.assertEqual(len(package["ecg_chunks"]), 1)
+        self.assertEqual(package["ecg_chunks"][0]["data"], "AAEC")
 
     def test_ignores_chunk_for_other_session(self):
         assembly = SavedHrvAssembly(session_id="sid-1", summary=self._summary())
@@ -377,6 +365,46 @@ class PhoneBridgeSavedHrvClientTests(unittest.TestCase):
             }
         )
         self.assertEqual(ibis, [812])
+
+    def test_waits_for_ecg_then_finalizes(self):
+        client = PhoneBridgeClient()
+        packages: list[dict] = []
+        client._send_ndjson = lambda payload: None  # type: ignore[method-assign]
+        client.saved_hrv_package_ready.connect(lambda p: packages.append(dict(p)))
+        client._handle_bridge_message(
+            {
+                "type": "session_summary",
+                "session_id": "sid-ecg",
+                "mode": "record",
+                "has_ecg": True,
+                "transfer_reason": "delayed_push",
+            }
+        )
+        client._handle_bridge_message(
+            {
+                "type": "ritual_chunk",
+                "session_id": "sid-ecg",
+                "seq": 1,
+                "of": 1,
+                "content": "ibi",
+                "samples": [800],
+            }
+        )
+        self.assertEqual(packages, [])
+        client._handle_bridge_message(
+            {
+                "type": "ritual_chunk",
+                "session_id": "sid-ecg",
+                "seq": 1,
+                "of": 1,
+                "content": "ecg",
+                "encoding": "int16_uv_b64",
+                "sample_rate_hz": 250,
+                "data": "AAEC",
+            }
+        )
+        self.assertEqual(len(packages), 1)
+        self.assertEqual(len(packages[0]["ecg_chunks"]), 1)
 
 
 if __name__ == "__main__":

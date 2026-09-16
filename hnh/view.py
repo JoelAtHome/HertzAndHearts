@@ -11006,10 +11006,17 @@ class View(QMainWindow):
             rmssd_f = float(rmssd) if rmssd is not None else None
         except (TypeError, ValueError):
             rmssd_f = None
-        if rmssd_f is not None:
+        has_ecg = bool(package.get("ecg_chunks"))
+        if rmssd_f is not None and has_ecg:
+            self.show_status(
+                f"Saved HRV added to Session History ({rmssd_f:.1f} ms, with ECG)."
+            )
+        elif rmssd_f is not None:
             self.show_status(
                 f"Saved HRV added to Session History ({rmssd_f:.1f} ms)."
             )
+        elif has_ecg:
+            self.show_status("Saved HRV added to Session History (with ECG).")
         else:
             self.show_status("Saved HRV added to Session History.")
         if getattr(self, "_history_window", None) is not None:
