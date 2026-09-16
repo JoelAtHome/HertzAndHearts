@@ -6543,6 +6543,10 @@ class View(QMainWindow):
         self.ble_sensor = SensorClient()
         self.phone_bridge = PhoneBridgeClient()
         self._phone_find_worker: PhoneBridgeFindWorker | None = None
+        self._saved_hrv_request_pending = 0
+        self._saved_hrv_request_timer = QTimer(self)
+        self._saved_hrv_request_timer.setSingleShot(True)
+        self._saved_hrv_request_timer.timeout.connect(self._on_saved_hrv_request_timeout)
         self._connection_mode = self._saved_connection_mode
         self.sensor = self.phone_bridge if self._connection_mode == "phone" else self.ble_sensor
         self._bind_sensor_signals(self.sensor)
@@ -10298,7 +10302,28 @@ class View(QMainWindow):
         if not self.sensor.request_saved_hrv():
             self.show_status("Connect to Phone Bridge before requesting saved HRV.")
             return
+        self._saved_hrv_request_pending += 1
+        self._saved_hrv_request_timer.start(5000)
         self.show_status("Requested saved HRV from phone…")
+
+    def _clear_saved_hrv_request_wait(self) -> None:
+        self._saved_hrv_request_pending = 0
+        if self._saved_hrv_request_timer.isActive():
+            self._saved_hrv_request_timer.stop()
+
+    def _on_saved_hrv_request_timeout(self) -> None:
+        if not self._saved_hrv_request_pending:
+            return
+        self._saved_hrv_request_pending = 0
+        self.show_status("No new saved HRV.")
+
+    def _finish_saved_hrv_request(self, *, imported: bool) -> None:
+        """Clear a manual Request wait; show no-new copy when nothing useful arrived."""
+        if not self._saved_hrv_request_pending:
+            return
+        self._clear_saved_hrv_request_wait()
+        if not imported:
+            self.show_status("No new saved HRV.")
 
     def _refocus_after_profile_dialog(self):
         self.setEnabled(True)
@@ -11041,6 +11066,7 @@ class View(QMainWindow):
         if phone_sid and self._profile_store.get_phone_bridge_imported_session_id(
             self._session_profile_id, phone_sid
         ):
+            self._finish_saved_hrv_request(imported=False)
             return
         from hnh.import_session import import_saved_hrv_package
 
@@ -11052,11 +11078,13 @@ class View(QMainWindow):
                 self._profile_store,
             )
         except Exception as exc:
+            self._finish_saved_hrv_request(imported=False)
             self.show_status(f"Saved HRV import failed: {exc}")
             return
         if bundle is None:
-            # Dedupe hit or unusable IBIs — keep prior status; no modal.
+            self._finish_saved_hrv_request(imported=False)
             return
+        self._finish_saved_hrv_request(imported=True)
         rmssd = package.get("rmssd_ms")
         try:
             rmssd_f = float(rmssd) if rmssd is not None else None
