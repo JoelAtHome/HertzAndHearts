@@ -98,8 +98,11 @@ Notes:
 - Discovery uses UDP probe prefix `HnH_PHONE_BRIDGE_DISCOVER_V1` on port **45124**.
 - Official `type: rmssd` snapshots (phone-computed) appear in the side column as **Bridge RMSSD**. That is a cross-check only — the live **RMSSD** chip and charts stay PC-computed.
 - Soft preference: Stream or Record are both fine. The phone stays mode authority. HnH does not send `session_control`.
+- **Saved HRV (Record on phone):** after Stop, the phone may push a durable package on connect (`delayed_push`), when you use Tech **Send HRV**, or when HnH requests it. HnH replies with `ritual_ack`, dedupes by phone `session_id`, and writes **Session History** (IBIs + bridge RMSSD + ECG as `session.edf` when present). A package that arrives while live charts are running is saved quietly — no mode flip.
+- On connect, HnH also sends `ritual_request` (latest package). Use **More → Request saved HRV** while connected to pull again.
+- User-facing copy says **HRV** / **saved HRV** — never “ritual” (wire types stay `ritual_*`).
 
-**Ignored safely** until HnH adopts them: `session_state`, `session_control`, and other unknown `type` values. Discover fields `protocol` / `features` / `bridge_version` are accepted. See [ECG-Phone-Bridge PROTOCOL.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [HOST_HANDOFF.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/HOST_HANDOFF.md).
+**Still ignored / parked:** `session_control`, host–mode conflict UI, and other unknown `type` values. Discover fields `protocol` / `features` / `bridge_version` are accepted. See [ECG-Phone-Bridge PROTOCOL.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [HOST_HANDOFF.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/HOST_HANDOFF.md).
 
 ## 5) Smoke test sequence
 
@@ -109,6 +112,7 @@ Notes:
 4. Confirm HnH status shows connected.
 5. Confirm HR/RMSSD move within ~5-15 seconds.
 6. Open ECG window; verify waveform if ECG packets are forwarded.
+7. Optional saved-HRV check: phone **Record HRV** alone → Stop → connect HnH (or **More → Request saved HRV**) → status mentions Session History → **More → History / Session Replay** shows the row (ECG in replay when the package included it).
 
 ## 6) Reliability notes
 

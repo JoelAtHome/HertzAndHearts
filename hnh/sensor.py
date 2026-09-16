@@ -699,7 +699,17 @@ class PhoneBridgeClient(QObject):
         self._send_client_info()
         # Phone may have already optimistically marked the package acked after a
         # prior TCP push; pull latest so delayed packages still reach HnH.
-        self._send_ndjson(build_ritual_request(None))
+        self.request_saved_hrv()
+
+    def request_saved_hrv(self, session_id: str | None = None) -> bool:
+        """Ask the phone for a persisted saved-HRV package (PROTOCOL §7).
+
+        Returns True if the request was queued on the TCP socket.
+        """
+        if not self.is_connected():
+            return False
+        self._send_ndjson(build_ritual_request(session_id))
+        return True
 
     def _send_ndjson(self, payload: dict[str, object]) -> None:
         sock = self.client

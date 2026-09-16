@@ -6793,6 +6793,14 @@ class View(QMainWindow):
         self._more_menu.addAction("Support Development…", self._open_support_options)
         self._more_menu.addSeparator()
         self._import_action = self._more_menu.addAction("Import Session to History", self._on_import_session)
+        self._request_saved_hrv_action = self._more_menu.addAction(
+            "Request saved HRV", self._on_request_saved_hrv
+        )
+        self._request_saved_hrv_action.setToolTip(
+            "Ask the connected phone for its latest saved HRV recording "
+            "(same as Tech Send HRV). Adds to Session History when new."
+        )
+        self._more_menu.aboutToShow.connect(self._refresh_more_menu_actions)
         self._more_menu.addSeparator()
         self._help_menu = QMenu("Help", self._more_menu)
         self._help_menu.addAction("Check for Updates…", self._check_for_updates)
@@ -10251,6 +10259,22 @@ class View(QMainWindow):
                 "• EDF+ with HR and RMSSD channels\n"
                 "• Line-separated RR intervals in ms (Kubios/Elite HRV style)",
             )
+
+    def _refresh_more_menu_actions(self) -> None:
+        action = getattr(self, "_request_saved_hrv_action", None)
+        if action is None:
+            return
+        linked = isinstance(self.sensor, PhoneBridgeClient) and self.sensor.is_connected()
+        action.setEnabled(linked)
+
+    def _on_request_saved_hrv(self) -> None:
+        if not isinstance(self.sensor, PhoneBridgeClient):
+            self.show_status("Request saved HRV needs Phone Bridge.")
+            return
+        if not self.sensor.request_saved_hrv():
+            self.show_status("Connect to Phone Bridge before requesting saved HRV.")
+            return
+        self.show_status("Requested saved HRV from phone…")
 
     def _refocus_after_profile_dialog(self):
         self.setEnabled(True)

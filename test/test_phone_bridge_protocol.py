@@ -175,6 +175,23 @@ class PhoneBridgeSavedHrvParseTests(unittest.TestCase):
         )
 
 
+class PhoneBridgeRequestSavedHrvTests(unittest.TestCase):
+    def test_request_saved_hrv_requires_connection(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        self.assertFalse(client.request_saved_hrv())
+        self.assertEqual(sent, [])
+
+    def test_request_saved_hrv_when_connected(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        client.is_connected = lambda: True  # type: ignore[method-assign]
+        self.assertTrue(client.request_saved_hrv())
+        self.assertEqual(sent, [{"type": "ritual_request", "session_id": None}])
+
+
 class PhoneBridgeSavedHrvAssembleTests(unittest.TestCase):
     def _summary(self, **overrides):
         base = {
