@@ -1,6 +1,12 @@
 # Changelog
 
 ### Unreleased
++ bugfix: Opening the ECG window now paints the buffered trace immediately and keeps it aligned with the main timeline, instead of showing a blank strip until the next packet.
++ bugfix: Phone Bridge socket errors and refused connects now tear the TCP client down instead of leaving a zombie socket that disabled both Connect and Disconnect.
++ bugfix: Phone Bridge NDJSON drain now isolates handler exceptions and yields the event loop, so a bad ECG frame cannot freeze HR plotting or block reconnect.
++ bugfix: A second HnH launch now warns and exits instead of opening another window that cannot take over the phone's single TCP slot.
++ enhancement: Phone Bridge Connect timeout now tells you to reopen the phone app when the phone is still holding the last PC session.
++ test: Added Phone Bridge reconnect and NDJSON drain coverage (`test/test_phone_bridge_client.py`).
 
 ### Version 1.0.0-beta.3 (September 11 2026)
 + release: Bumped pre-release version to `1.0.0b3` (public label: `1.0.0-beta.3`).

@@ -18,7 +18,7 @@ def _configure_linux_qt_defaults() -> None:
 _configure_linux_qt_defaults()
 
 from PySide6.QtCore import QLockFile
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 from hnh.data_paths import app_data_root
 from hnh.view import View
 from hnh.model import Model
@@ -91,6 +91,10 @@ class Application(QApplication):
         self._instance_lock = QLockFile(str(lock_root / ".app-startup.lock"))
         self._instance_lock.setStaleLockTime(0)
         self._is_primary_instance = bool(self._instance_lock.tryLock(1))
+        self._model = None
+        self._view = None
+        if not self._is_primary_instance:
+            return
         self._model = Model()
         self._view = View(self._model)
         self._run_startup_recording_purge_if_primary()
@@ -126,6 +130,17 @@ def main():
     _warn_if_pandas_neurokit_combo_is_risky()
     _emit_research_use_startup_warning()
     app = Application(sys.argv)
+    if not app._is_primary_instance:
+        QMessageBox.warning(
+            None,
+            "Hertz & Hearts already running",
+            "Another Hertz & Hearts window is already open.\n\n"
+            "Use that window, or close it first (Task Manager if it is frozen).\n\n"
+            "A second copy cannot take over Phone Bridge — the phone stays "
+            "attached to the first window until that copy exits or you reopen "
+            "the phone bridge app.",
+        )
+        sys.exit(0)
     app.aboutToQuit.connect(lambda: app._view._flush_signal_fault_log("app exit"))
     app.aboutToQuit.connect(app.release_instance_lock)
     # Main window opens first, then profile selection popup on top (_run_startup_flow).

@@ -122,3 +122,13 @@ Notes:
 - time-to-first-beat
 - visible dropouts
 - average RMSSD continuity
+
+## If Connect fails after charts freeze or you restart HnH
+
+The phone holds **one** PC TCP session. Recording on the phone can keep running even when the PC link is wedged (that is why a phone-only session can still land in FlareTracker later).
+
+1. Force-stop or swipe away the phone bridge app, then open it again.
+2. Confirm it is still connected to the strap.
+3. In HnH, click `Connect` again.
+
+Restarting HnH alone is not enough if the phone never saw the old PC socket close. After a Phone Bridge app update that **replaces** on a new inbound connection, a second Connect from HnH should steal the slot without cycling the phone.

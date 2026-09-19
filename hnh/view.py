@@ -25,7 +25,6 @@ from PySide6.QtCore import (
     QEventLoop, QUrl, QDate, QLocale,
 )
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo, QBluetoothLocalDevice
-from PySide6.QtNetwork import QAbstractSocket
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout, QWidget, QLabel,
     QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
@@ -4367,9 +4366,16 @@ class EcgWindow(QMainWindow):
             self._values.append(val)
             self._sample_count += 1
         self._got_first_data = len(self._times) > 0
+        self._last_x_range = None
+        self._last_y_range = None
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
         self._refresh_timer.start()
         if self._got_first_data:
+            self._snap_trace_to_synced_xrange()
+            try:
+                self._paint_live_trace()
+            except Exception:
+                pass
             self._statusbar.showMessage("ECG streaming...")
         else:
             self._statusbar.showMessage("Waiting for ECG data from sensor\u2026")
@@ -4492,7 +4498,13 @@ class EcgWindow(QMainWindow):
         """Ensure buffered trace is visible when freezing before next timer redraw."""
         if len(self._times) < 2 or len(self._values) < 2:
             return
-        self._curve.setData(self._times, self._values)
+        n = min(len(self._times), len(self._values))
+        if n < 2:
+            return
+        self._curve.setData(
+            np.fromiter(self._times, dtype=float, count=n),
+            np.fromiter(self._values, dtype=float, count=n),
+        )
         y_lo = float(min(self._values))
         y_hi = float(max(self._values))
         margin = max(0.1, (y_hi - y_lo) * 0.15)
@@ -5042,18 +5054,8 @@ class EcgWindow(QMainWindow):
         if self._follow_main_xrange:
             synced_span = max(0.5, float(x_hi) - float(x_lo))
             self._view_sec = min(self._max_view_sec, synced_span)
-        if self._follow_main_xrange and self._times:
-            target_right = float(x_hi) - 2.0
-            latest = float(self._times[-1])
-            delta = target_right - latest
-            # Keep ECG trace anchored to the same right-edge semantics as main.
-            if abs(delta) > 0.75:
-                self._times = deque(
-                    (t + delta for t in self._times),
-                    maxlen=self._times.maxlen,
-                )
-                self._timeline_offset_sec += delta
         if self._follow_main_xrange:
+            self._snap_trace_to_synced_xrange()
             self._set_follow_main_xrange(float(x_lo), float(x_hi))
         self._update_zoom_button_states()
 
@@ -5064,6 +5066,62 @@ class EcgWindow(QMainWindow):
         self._view_sec = max(0.5, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
         self._refresh_relock_tooltip()
         self._update_zoom_button_states()
+
+    def _snap_trace_to_synced_xrange(self) -> None:
+        if not self._times or self._synced_xrange is None:
+            return
+        _x_lo, x_hi = self._synced_xrange
+        target_right = float(x_hi) - 2.0
+        latest = float(self._times[-1])
+        delta = target_right - latest
+        if abs(delta) <= 0.75:
+            return
+        self._times = deque(
+            (t + delta for t in self._times),
+            maxlen=self._times.maxlen,
+        )
+        self._timeline_offset_sec += delta
+
+    def _paint_live_trace(self, drained_min: float | None = None, drained_max: float | None = None) -> None:
+        n = len(self._times)
+        if n < 2:
+            return
+        self._yrange_frame_counter += 1
+        recalc_y = (
+            self._cached_y_bounds is None
+            or (self._yrange_frame_counter % self._yrange_recalc_stride) == 0
+        )
+        if recalc_y:
+            y_lo = float(min(self._values))
+            y_hi = float(max(self._values))
+        else:
+            y_lo, y_hi = self._cached_y_bounds
+            if drained_min is not None:
+                y_lo = min(y_lo, drained_min)
+            if drained_max is not None:
+                y_hi = max(y_hi, drained_max)
+        self._cached_y_bounds = (y_lo, y_hi)
+        margin = max(0.1, (y_hi - y_lo) * 0.15)
+        target_lo = y_lo - margin
+        target_hi = y_hi + margin
+        alpha = 0.15
+        self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
+        self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
+        self._set_yrange_if_needed(self._y_min_smooth, self._y_max_smooth)
+
+        t_max = float(self._times[-1])
+        if self._follow_main_xrange and self._synced_xrange is not None:
+            x_lo, x_hi = self._synced_xrange
+            self._set_follow_main_xrange(x_lo, x_hi)
+        else:
+            x_hi = t_max + 2.0
+            x_lo = x_hi - self._view_sec
+            self._set_xrange_if_needed(x_lo, x_hi)
+
+        self._curve.setData(
+            np.fromiter(self._times, dtype=float, count=n),
+            np.fromiter(self._values, dtype=float, count=n),
+        )
 
     def _redraw(self):
         if self._frozen:
@@ -5101,42 +5159,13 @@ class EcgWindow(QMainWindow):
                 drained_max = fval
             self._sample_count += 1
 
-        n = len(self._times)
-        if n < 2:
+        try:
+            self._paint_live_trace(
+                drained_min if drained_min != float("inf") else None,
+                drained_max if drained_max != float("-inf") else None,
+            )
+        except Exception:
             return
-
-        self._yrange_frame_counter += 1
-        recalc_y = (
-            self._cached_y_bounds is None
-            or (self._yrange_frame_counter % self._yrange_recalc_stride) == 0
-        )
-        if recalc_y:
-            y_lo = float(min(self._values))
-            y_hi = float(max(self._values))
-        else:
-            y_lo, y_hi = self._cached_y_bounds
-            if drained_min != float("inf"):
-                y_lo = min(y_lo, drained_min)
-                y_hi = max(y_hi, drained_max)
-        self._cached_y_bounds = (y_lo, y_hi)
-        margin = max(0.1, (y_hi - y_lo) * 0.15)
-        target_lo = y_lo - margin
-        target_hi = y_hi + margin
-        alpha = 0.15
-        self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
-        self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
-        self._set_yrange_if_needed(self._y_min_smooth, self._y_max_smooth)
-
-        t_max = float(self._times[-1])
-        if self._follow_main_xrange and self._synced_xrange is not None:
-            x_lo, x_hi = self._synced_xrange
-            self._set_follow_main_xrange(x_lo, x_hi)
-        else:
-            x_hi = t_max + 2.0
-            x_lo = x_hi - self._view_sec
-            self._set_xrange_if_needed(x_lo, x_hi)
-
-        self._curve.setData(self._times, self._values)
         redraw_elapsed_ms = (time.perf_counter_ns() - redraw_start_ns) / 1e6
         if self._redraw_ms_ema <= 0.0:
             self._redraw_ms_ema = redraw_elapsed_ms
@@ -7743,17 +7772,10 @@ class View(QMainWindow):
         super().closeEvent(event)
 
     def _is_sensor_connected(self) -> bool:
-        client = getattr(self.sensor, "client", None)
-        if client is None:
-            return False
-        # Phone bridge can leave a socket object allocated after connection-refused.
-        # Treat unconnected socket state as not connected so UI recovery remains available.
         if isinstance(self.sensor, PhoneBridgeClient):
-            try:
-                return client.state() != QAbstractSocket.UnconnectedState
-            except Exception:
-                return False
-        return True
+            return self.sensor.is_link_up()
+        client = getattr(self.sensor, "client", None)
+        return client is not None
 
     def _bind_sensor_signals(self, sensor_client) -> None:
         sensor_client.ibi_update.connect(self.model.update_ibis_buffer)
@@ -9739,6 +9761,8 @@ class View(QMainWindow):
 
     def _apply_connect_ready_state(self):
         if self._is_sensor_connected():
+            self.connect_button.setEnabled(False)
+            self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
             self.connect_button.setToolTip("Already connected to a sensor.")
             self.connect_button.setDefault(False)
             return
@@ -10293,6 +10317,7 @@ class View(QMainWindow):
     def _on_connect_timeout(self):
         if self._is_sensor_connected():
             return
+        # Abort hung Connecting/Closing sockets so the next Connect is not blocked.
         self.sensor.disconnect_client()
         self._forget_preloaded_sensor_entry()
         self.connect_button.setEnabled(True)
@@ -10300,6 +10325,13 @@ class View(QMainWindow):
         self.scan_button.setEnabled(True)
         self._apply_connect_ready_state()
         self._start_connect_hints()
+        if self._connection_mode == "phone":
+            self.show_status(
+                "Phone Bridge connection timed out. The phone may still be holding "
+                "the last PC session. Force-stop or reopen the phone bridge app, "
+                "then click Connect again."
+            )
+            return
         self.show_status(
             "Connection timed out. Make sure the strap is awake and in range, then try Connect again."
         )
@@ -11310,21 +11342,20 @@ class View(QMainWindow):
             self._connect_attempt_timer.stop()
             if isinstance(self.sensor, PhoneBridgeClient):
                 self._clear_phone_bridge_linux_ecg_session_flags()
-                client = getattr(self.sensor, "client", None)
-                if client is not None:
-                    try:
-                        client_state = client.state()
-                    except Exception:
-                        client_state = QAbstractSocket.UnconnectedState
-                    if client_state == QAbstractSocket.UnconnectedState:
-                        self.sensor.disconnect_client()
+                # Drop leftover sockets (refused, timed out, half-closed) so Connect
+                # is not stuck on "already connected" / disabled Disconnect.
+                if not self.sensor.is_link_up():
+                    self.sensor.disconnect_client()
             if "error" in status.lower() and not self._received_ibi_since_connect:
                 self._forget_preloaded_sensor_entry()
+            still_connected = self._is_sensor_connected()
             self._apply_connect_ready_state()
-            self.disconnect_button.setEnabled(False)
-            self.scan_button.setEnabled(True)
-            self._set_signal_indicator("Disconnected", "gray")
-            if not self._is_sensor_connected():
+            if still_connected:
+                self.disconnect_button.setEnabled(True)
+            else:
+                self.disconnect_button.setEnabled(False)
+                self.scan_button.setEnabled(True)
+                self._set_signal_indicator("Disconnected", "gray")
                 self._start_connect_hints()
             s_lower = status.lower()
             if "phone bridge" in s_lower and "connection refused" in s_lower:

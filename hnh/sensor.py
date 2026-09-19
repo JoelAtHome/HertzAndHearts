@@ -489,6 +489,9 @@ class PhoneBridgeClient(QObject):
     verity_limited_support = Signal()
     diagnostic_logged = Signal(object)
 
+    _MAX_BUFFER_BYTES: Final[int] = 512 * 1024
+    _MAX_LINES_PER_TURN: Final[int] = 48
+
     def __init__(self):
         super().__init__()
         self.client: Union[None, QTcpSocket] = None
@@ -499,6 +502,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._drain_scheduled = False
         self._saved_hrv_assembly: SavedHrvAssembly | None = None
         self._acked_hrv_session_ids: OrderedDict[str, None] = OrderedDict()
         self._saved_hrv_ecg_grace = QTimer(self)
@@ -523,10 +527,17 @@ class PhoneBridgeClient(QObject):
         except Exception:
             return False
 
+    def is_link_up(self) -> bool:
+        return self.is_connected()
+
     def connect_host(self, host: str, port: int) -> None:
-        if self.client is not None:
+        if self.is_link_up():
             self.status_update.emit("Phone Bridge already connected.")
             return
+        # A refused/dropped socket can linger as a non-None QTcpSocket in
+        # Unconnected/Closing state. Replace it so Connect works again.
+        if self.client is not None:
+            self._drop_socket(emit_status=False)
         host = (host or "").strip()
         if not host:
             self.status_update.emit("Phone Bridge host is empty.")
@@ -540,6 +551,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._drain_scheduled = False
         self._host = host
         self._port = int(port)
         sock.connected.connect(self._on_connected)
@@ -548,6 +560,10 @@ class PhoneBridgeClient(QObject):
         sock.errorOccurred.connect(self._on_error)
         # Avoid system HTTP/SOCKS proxy routing LAN IPs (can cause spurious timeouts).
         sock.setProxy(QNetworkProxy(QNetworkProxy.ProxyType.NoProxy))
+        try:
+            sock.setSocketOption(QAbstractSocket.SocketOption.KeepAliveOption, 1)
+        except Exception:
+            pass
         host_addr = QHostAddress(host)
         if host_addr.isNull():
             sock.connectToHost(host, self._port)
@@ -660,7 +676,19 @@ class PhoneBridgeClient(QObject):
         self._stop_link_watch()
         sock = self.client
         self.client = None
+        self._drain_scheduled = False
+        self._buffer.clear()
+        self._ecg_announced = False
+        self._rr_frames_seen = 0
+        self._ecg_frames_seen = 0
+        self._saved_hrv_assembly = None
+        if self._saved_hrv_ecg_grace.isActive():
+            self._saved_hrv_ecg_grace.stop()
+        self.bridge_rmssd_update.emit(None)
+        self.battery_update.emit(-1)
         if sock is None:
+            if emit_status:
+                self.status_update.emit("Disconnected from Phone Bridge.")
             return
         for signal, slot in (
             (sock.readyRead, self._on_ready_read),
@@ -672,20 +700,12 @@ class PhoneBridgeClient(QObject):
                 signal.disconnect(slot)
             except Exception:
                 pass
-        if sock.state() != QAbstractSocket.UnconnectedState:
-            sock.disconnectFromHost()
+        try:
             if sock.state() != QAbstractSocket.UnconnectedState:
                 sock.abort()
+        except Exception:
+            pass
         sock.deleteLater()
-        self._buffer.clear()
-        self._ecg_announced = False
-        self._rr_frames_seen = 0
-        self._ecg_frames_seen = 0
-        self._saved_hrv_assembly = None
-        if self._saved_hrv_ecg_grace.isActive():
-            self._saved_hrv_ecg_grace.stop()
-        self.bridge_rmssd_update.emit(None)
-        self.battery_update.emit(-1)
         if emit_status:
             self.status_update.emit("Disconnected from Phone Bridge.")
 
@@ -805,19 +825,7 @@ class PhoneBridgeClient(QObject):
 
     def _on_disconnected(self) -> None:
         had_client = self.client is not None
-        self._stop_link_watch()
-        if self.client is not None:
-            self.client.deleteLater()
-            self.client = None
-        self._buffer.clear()
-        self._ecg_announced = False
-        self._rr_frames_seen = 0
-        self._ecg_frames_seen = 0
-        self._saved_hrv_assembly = None
-        if self._saved_hrv_ecg_grace.isActive():
-            self._saved_hrv_ecg_grace.stop()
-        self.battery_update.emit(-1)
-        self.bridge_rmssd_update.emit(None)
+        self._drop_socket(emit_status=False)
         if had_client:
             self.status_update.emit(
                 "Phone Bridge disconnected (remote closed connection)."
@@ -830,23 +838,37 @@ class PhoneBridgeClient(QObject):
         msg = sock.errorString()
         try:
             err_code = int(sock.error())
-            self.status_update.emit(f"Phone Bridge error [{err_code}]: {msg}")
+            status = f"Phone Bridge error [{err_code}]: {msg}"
         except Exception:
-            self.status_update.emit(f"Phone Bridge error: {msg}")
+            status = f"Phone Bridge error: {msg}"
         self._drop_socket(emit_status=False)
+        self.status_update.emit(status)
 
     def _on_ready_read(self) -> None:
         if self.client is None:
             return
         self._buffer.extend(bytes(self.client.readAll()))
-        while True:
+        self._drain_ndjson()
+
+    def _drain_ndjson(self) -> None:
+        self._drain_scheduled = False
+        if len(self._buffer) > self._MAX_BUFFER_BYTES:
+            self._drop_socket(emit_status=False)
+            self.battery_update.emit(-1)
+            self.status_update.emit(
+                "Phone Bridge error: inbound buffer overflow; connection dropped."
+            )
+            return
+        lines_this_turn = 0
+        while lines_this_turn < self._MAX_LINES_PER_TURN:
             newline_idx = self._buffer.find(b"\n")
             if newline_idx < 0:
-                break
+                return
             raw = bytes(self._buffer[:newline_idx]).strip()
             del self._buffer[:newline_idx + 1]
             if not raw:
                 continue
+            lines_this_turn += 1
             try:
                 payload = json.loads(raw.decode("utf-8"))
             except Exception as exc:
@@ -856,7 +878,17 @@ class PhoneBridgeClient(QObject):
                         f"{exc!r} preview={raw[:80]!r}"
                     )
                 continue
-            self._handle_bridge_message(payload)
+            try:
+                self._handle_bridge_message(payload)
+            except Exception:
+                # A downstream slot must not strand remaining NDJSON in _buffer
+                # (that freezes HR/ECG while the TCP socket still looks connected).
+                if DEBUG:
+                    print("[PhoneBridge] handler error; continuing drain")
+                continue
+        if b"\n" in self._buffer and not self._drain_scheduled:
+            self._drain_scheduled = True
+            QTimer.singleShot(0, self._drain_ndjson)
 
     def _handle_bridge_message(self, payload: object) -> None:
         if not isinstance(payload, dict):
