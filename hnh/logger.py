@@ -1,6 +1,6 @@
 from datetime import datetime
 import time
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Signal, Slot
 from hnh.utils import NamedSignal
 
 
@@ -43,6 +43,20 @@ class Logger(QObject):
         self.file.close()
         self.recording_status.emit(1)
         self.status_update.emit(f"Saved recording file: {saved_path}")
+        self.file = None
+        self.current_path = None
+        self._recording_started_perf = None
+
+    @Slot()
+    def discard_recording(self):
+        """Close the open CSV without treating it as a saved session."""
+        if not self.file:
+            return
+        try:
+            self.file.close()
+        except Exception:
+            pass
+        self.recording_status.emit(1)
         self.file = None
         self.current_path = None
         self._recording_started_perf = None

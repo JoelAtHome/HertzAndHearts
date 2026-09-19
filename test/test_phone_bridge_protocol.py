@@ -10,7 +10,9 @@ from hnh.sensor import (
     build_phone_bridge_client_info,
     build_ritual_ack,
     finalize_saved_hrv_package,
+    is_feather_profile_status_message,
     parse_phone_bridge_discover_reply,
+    parse_phone_bridge_leads_off_status,
     parse_phone_bridge_rmssd,
     parse_phone_bridge_session_summary,
     saved_hrv_assembly_complete,
@@ -36,6 +38,128 @@ class PhoneBridgeClientInfoTests(unittest.TestCase):
         payload = build_phone_bridge_client_info(pc_user="  ", client_version="")
         self.assertEqual(payload["pc_user"], "Admin")
         self.assertNotIn("client_version", payload)
+
+
+class FeatherProfileStatusMessageTests(unittest.TestCase):
+    def test_recognizes_protocol_status_lines(self):
+        self.assertTrue(is_feather_profile_status_message("Feather profile confirm: Payton?"))
+        self.assertTrue(is_feather_profile_status_message("Feather profile switched: Payton"))
+        self.assertTrue(is_feather_profile_status_message("Feather profile kept: Patient 2"))
+        self.assertTrue(is_feather_profile_status_message("No Feather profile for Sandy"))
+
+    def test_rejects_unrelated_status(self):
+        self.assertFalse(is_feather_profile_status_message("Connected to Phone Bridge."))
+        self.assertFalse(is_feather_profile_status_message(""))
+        self.assertFalse(is_feather_profile_status_message("Receiving saved HRV…"))
+
+
+class PhoneBridgeLeadsOffParseTests(unittest.TestCase):
+    def test_active_when_both_true(self):
+        row = parse_phone_bridge_leads_off_status(
+            {
+                "type": "status",
+                "message": "Feather lead-off",
+                "connected": True,
+                "use_leads_off": True,
+                "leads_off": True,
+                "source_device": "FEATHER",
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertTrue(row["active"])
+        self.assertTrue(row["use_leads_off"])
+        self.assertTrue(row["leads_off"])
+        self.assertEqual(row["message"], "Feather lead-off")
+        self.assertEqual(row["source_device"], "FEATHER")
+
+    def test_inactive_when_use_false(self):
+        row = parse_phone_bridge_leads_off_status(
+            {
+                "type": "status",
+                "use_leads_off": False,
+                "leads_off": True,
+                "source_device": "FEATHER",
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertFalse(row["active"])
+        self.assertFalse(row["use_leads_off"])
+        self.assertTrue(row["leads_off"])
+
+    def test_clears_when_leads_reattached(self):
+        row = parse_phone_bridge_leads_off_status(
+            {
+                "type": "status",
+                "message": "Feather leads on",
+                "use_leads_off": True,
+                "leads_off": False,
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertFalse(row["active"])
+
+    def test_ignores_status_without_lod_keys(self):
+        self.assertIsNone(
+            parse_phone_bridge_leads_off_status(
+                {"type": "status", "message": "Phone bridge connected", "battery": 80}
+            )
+        )
+        self.assertIsNone(parse_phone_bridge_leads_off_status({"type": "rr", "rr_ms": 800}))
+
+    def test_coerces_string_bools(self):
+        row = parse_phone_bridge_leads_off_status(
+            {
+                "type": "status",
+                "use_leads_off": "true",
+                "leads_off": "1",
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertTrue(row["active"])
+
+    def test_missing_use_defaults_true_like_phone(self):
+        """Phone FeatherLeadOffParser: absent use_leads_off → true."""
+        row = parse_phone_bridge_leads_off_status(
+            {"type": "status", "leads_off": True, "source_device": "FEATHER"}
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertTrue(row["use_leads_off"])
+        self.assertTrue(row["active"])
+        self.assertEqual(row["message"], "Feather lead-off")
+
+
+class PhoneBridgeClientInfoResendTests(unittest.TestCase):
+    def test_set_client_profile_name_resends_when_connected(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        client.is_connected = lambda: True  # type: ignore[method-assign]
+        client.set_client_profile_name("Payton")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["type"], "client_info")
+        self.assertEqual(sent[0]["pc_user"], "Payton")
+        self.assertEqual(sent[0]["client_app"], PHONE_BRIDGE_CLIENT_APP)
+
+    def test_set_client_profile_name_skips_when_unchanged_or_offline(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        client.set_client_profile_name("Admin")
+        self.assertEqual(sent, [])
+        client.is_connected = lambda: False  # type: ignore[method-assign]
+        client.set_client_profile_name("Payton")
+        self.assertEqual(sent, [])
+        client.is_connected = lambda: True  # type: ignore[method-assign]
+        client.set_client_profile_name("Sandy")
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["pc_user"], "Sandy")
+        client.set_client_profile_name("sandy")
+        self.assertEqual(len(sent), 1)
 
 
 class PhoneBridgeDiscoverParseTests(unittest.TestCase):
@@ -336,7 +460,8 @@ class PhoneBridgeSavedHrvClientTests(unittest.TestCase):
         self.assertEqual(packages[0]["ibi_ms"], [790, 800])
         self.assertEqual(packages[0]["rmssd_ms"], 48.2)
         self.assertEqual(sent, [{"type": "ritual_ack", "session_id": "sid-1"}])
-        self.assertTrue(any("Receiving saved HRV" in s for s in statuses))
+        # Background delayed_push must not spam the status bar (misleading at session start).
+        self.assertFalse(any("Receiving saved HRV" in s for s in statuses))
 
         # Duplicate delayed_push: re-ack, no second package emit.
         client._handle_bridge_message(

@@ -95,9 +95,17 @@ Notes:
 - `type=rr`: `rr_ms` (or `ibi_ms`) is consumed by HnH.
 - `type=ecg`: `samples_mv` (or `samples`) list is consumed by HnH.
 - On connect, HnH sends `client_info` with `pc_user`, `client_app: "hertz_and_hearts"`, and `client_version`.
-- Discovery uses UDP probe prefix `HnH_PHONE_BRIDGE_DISCOVER_V1` on port **45124**.
-- Official `type: rmssd` snapshots (phone-computed) appear in the side column as **Bridge RMSSD**. That is a cross-check only — the live **RMSSD** chip and charts stay PC-computed.
+- HnH also re-sends `client_info` on every Switch User / active profile change while linked (`pc_user` = subject profile name). Phone β.59+ may soft-match that to a Feather patient and show Tech Keep/Switch on the phone; HnH shows those `status` lines as a non-blocking banner (no second confirm on PC).
+- Discovery uses UDP probe prefix `HnH_PHONE_BRIDGE_DISCOVER_V1` on port **45124**. Scan also TCP-probes the typed host and the last 4 successful IPs first (`~/.hnh_last_phone_bridge.json`).
+- Official `type: rmssd` snapshots (phone-computed) appear in the side column as **Bridge RMSSD**. In Stream mode the phone sends those about every **30 s** (Record: on Stop); the phone UI may show a local preview sooner. That is a cross-check only — the live **RMSSD** chip and charts stay PC-computed.
 - Soft preference: Stream or Record are both fine. The phone stays mode authority. HnH does not send `session_control`.
+- **Feather lead-off (LOD):** when Phone Bridge edge-forwards MCU status with `use_leads_off` / `leads_off` (**β.68+**), HnH shows a sticky **Check electrodes** banner only when both are true (ignore `leads_off` when `use_leads_off` is false). Not Polar `sensor_quality`. Example:
+
+```json
+{"type":"status","message":"Feather lead-off","connected":true,"use_leads_off":true,"leads_off":true,"source_device":"FEATHER"}
+```
+
+  **β.69+:** while LOD is active the phone **stops** live NDJSON `ecg` (and ritual ECG buffering); Tech strip may still move. HnH ECG can pause until `leads_off:false` — that is expected, not a host bug. IBI stays MCU-quiet via the publish gate. Wire docs: [PROTOCOL.md §3.1](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [FEATHER_BLE_GATT.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/FEATHER_BLE_GATT.md). MCU detail: [FEATHER_BLE.md](https://github.com/JoelAtHome/ECG-Box/blob/main/docs/FEATHER_BLE.md). HnH does not invent contact from ECG SNR.
 - **Saved HRV (Record on phone):** after Stop, the phone may push a durable package on connect (`delayed_push`), when you use Tech **Send HRV**, or when HnH requests it. HnH replies with `ritual_ack`, dedupes by phone `session_id`, and writes **Session History** (IBIs + bridge RMSSD + ECG as `session.edf` when present). A package that arrives while live charts are running is saved quietly — no mode flip.
 - On connect, HnH also sends `ritual_request` (latest package). Use **More → Request saved HRV** while connected to pull again.
 - User-facing copy says **HRV** / **saved HRV** — never “ritual” (wire types stay `ritual_*`).

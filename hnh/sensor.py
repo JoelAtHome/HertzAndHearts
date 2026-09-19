@@ -3,6 +3,7 @@ import socket
 import struct
 import os
 import platform
+import re
 import time
 import ipaddress
 from collections import OrderedDict
@@ -64,6 +65,68 @@ def build_phone_bridge_client_info(
     if client_version:
         payload["client_version"] = client_version
     return payload
+
+
+def is_feather_profile_status_message(message: str) -> bool:
+    """True for phone β.59+ Feather soft-match status lines (PROTOCOL §8.2)."""
+    text = str(message or "").strip().casefold()
+    return text.startswith("feather profile ") or text.startswith("no feather profile ")
+
+
+def _coerce_json_bool(raw: object) -> bool | None:
+    if isinstance(raw, bool):
+        return raw
+    if isinstance(raw, (int, float)) and raw in (0, 1):
+        return bool(raw)
+    if isinstance(raw, str):
+        token = raw.strip().casefold()
+        if token in {"1", "true", "yes", "on"}:
+            return True
+        if token in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def parse_phone_bridge_leads_off_status(payload: object) -> dict[str, object] | None:
+    """Normalize Feather LOD fields on NDJSON `status`, or None if absent.
+
+    Phone-Bridge edge-forwards MCU `use_leads_off` / `leads_off` (PROTOCOL §3.1).
+    Hosts must ignore `leads_off` when `use_leads_off` is false (2-lead boards).
+    Defaults match the phone parser: missing `use_leads_off` → true; missing
+    `leads_off` → false. Unrelated status lines without those keys return None
+    (do not clear prior LOD state).
+    """
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("type", "")).strip().lower() != "status":
+        return None
+    has_use = "use_leads_off" in payload
+    has_off = "leads_off" in payload
+    if not has_use and not has_off:
+        return None
+    use = _coerce_json_bool(payload.get("use_leads_off")) if has_use else True
+    off = _coerce_json_bool(payload.get("leads_off")) if has_off else False
+    if use is None and off is None:
+        return None
+    # Phone: missing use → true; missing leads_off → false; bad coerce keeps that default.
+    use_leads_off = bool(use) if use is not None else True
+    leads_off = bool(off) if off is not None else False
+    message = str(payload.get("message", "")).strip()
+    if not message:
+        if not use_leads_off:
+            message = "Feather lead-off disabled"
+        elif leads_off:
+            message = "Feather lead-off"
+        else:
+            message = "Feather leads OK"
+    active = bool(use_leads_off and leads_off)
+    return {
+        "use_leads_off": use_leads_off,
+        "leads_off": leads_off,
+        "active": active,
+        "message": message,
+        "source_device": str(payload.get("source_device", "")).strip() or None,
+    }
 
 
 PHONE_BRIDGE_ACKED_HRV_LIMIT: Final[int] = 64
@@ -485,6 +548,7 @@ class PhoneBridgeClient(QObject):
     status_update = Signal(str)
     battery_update = Signal(int)
     bridge_rmssd_update = Signal(object)
+    feather_leads_off_update = Signal(object)
     saved_hrv_package_ready = Signal(object)
     verity_limited_support = Signal()
     diagnostic_logged = Signal(object)
@@ -515,8 +579,14 @@ class PhoneBridgeClient(QObject):
         self._link_watch.timeout.connect(self._poll_link_alive)
 
     def set_client_profile_name(self, profile_name: str) -> None:
-        name = str(profile_name or "").strip()
-        self._client_profile_name = name or "Admin"
+        """Update subject name for client_info; re-send when linked (PROTOCOL §8.2)."""
+        name = str(profile_name or "").strip() or "Admin"
+        previous = str(getattr(self, "_client_profile_name", "") or "").strip() or "Admin"
+        self._client_profile_name = name
+        if name.casefold() == previous.casefold():
+            return
+        if self.is_connected():
+            self._send_client_info()
 
     def is_connected(self) -> bool:
         sock = self.client
@@ -686,6 +756,7 @@ class PhoneBridgeClient(QObject):
             self._saved_hrv_ecg_grace.stop()
         self.bridge_rmssd_update.emit(None)
         self.battery_update.emit(-1)
+        self._clear_feather_leads_off()
         if sock is None:
             if emit_status:
                 self.status_update.emit("Disconnected from Phone Bridge.")
@@ -708,6 +779,17 @@ class PhoneBridgeClient(QObject):
         sock.deleteLater()
         if emit_status:
             self.status_update.emit("Disconnected from Phone Bridge.")
+
+    def _clear_feather_leads_off(self) -> None:
+        self.feather_leads_off_update.emit(
+            {
+                "use_leads_off": False,
+                "leads_off": False,
+                "active": False,
+                "message": "",
+                "source_device": None,
+            }
+        )
 
     def _on_connected(self) -> None:
         sock = self.client
@@ -742,9 +824,6 @@ class PhoneBridgeClient(QObject):
             pass
 
     def _send_client_info(self) -> None:
-        sock = self.client
-        if sock is None:
-            return
         username = str(getattr(self, "_client_profile_name", "") or "").strip() or "Admin"
         try:
             host = str(platform.node() or "").strip() or socket.gethostname()
@@ -813,8 +892,8 @@ class PhoneBridgeClient(QObject):
         )
         if self._saved_hrv_ecg_grace.isActive():
             self._saved_hrv_ecg_grace.stop()
-        # Quiet progress — large ECG chunks may still follow; do not block UI.
-        self.status_update.emit("Receiving saved HRV…")
+        # Stay quiet on the status bar — connect/session start already has its own
+        # copy; large ECG chunks may still follow without blocking the UI.
 
     def _on_ritual_chunk(self, payload: dict) -> None:
         assembly = self._saved_hrv_assembly
@@ -896,6 +975,11 @@ class PhoneBridgeClient(QObject):
         msg_type = str(payload.get("type", "")).strip().lower()
         if msg_type == "status":
             text = str(payload.get("message", "")).strip()
+            lod = parse_phone_bridge_leads_off_status(payload)
+            if lod is not None:
+                self.feather_leads_off_update.emit(lod)
+                if lod.get("active") and not text:
+                    text = str(lod.get("message") or "Check electrodes — Feather lead-off.")
             if text:
                 self.status_update.emit(text)
             battery = payload.get("battery")
@@ -1161,6 +1245,27 @@ def _lan_ipv4_hosts_for_probe(max_hosts: int = 1024) -> list[str]:
     return out
 
 
+def _normalize_hint_hosts(hint_hosts: list[str] | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in hint_hosts or []:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        m = re.search(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", text)
+        host = m.group(1) if m else text
+        if host in seen:
+            continue
+        try:
+            ipaddress.IPv4Address(host)
+        except ValueError:
+            if " " in host or host.count(":") > 0:
+                continue
+        seen.add(host)
+        out.append(host)
+    return out
+
+
 def _tcp_probe_phone_bridge_hosts(
     hosts: list[str],
     port: int,
@@ -1194,25 +1299,58 @@ def _tcp_probe_phone_bridge_hosts(
     return sorted(found.values(), key=lambda d: str(d.get("hostname", "")).lower())
 
 
-def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object]]:
+def discover_phone_bridge_hosts(
+    timeout_s: float = 2.5,
+    *,
+    hint_hosts: list[str] | None = None,
+    tcp_port: int | None = None,
+) -> list[dict[str, object]]:
     """
     Discover Android phone-bridge instances on the LAN. Returns rows like:
     [{"ip": str, "hostname": str, "port": int, "app"?: str,
       "protocol"?: str, "bridge_version"?: str, "features"?: list[str]}, ...]
+
+    Order: TCP probe of hint IPs first (recent / typed), then UDP
+    broadcast/unicast, then LAN TCP sweep if still empty.
     """
+    port = int(tcp_port or PHONE_BRIDGE_PORT_DEFAULT)
+    if port < 1 or port > 65535:
+        port = int(PHONE_BRIDGE_PORT_DEFAULT)
+    hints = _normalize_hint_hosts(hint_hosts)
     found: dict[str, dict[str, object]] = {}
+
+    # Recent / typed IPs first (parallel; refused connects are fast).
+    if hints:
+        for row in _tcp_probe_phone_bridge_hosts(
+            hints, port=port, timeout_s=0.45, max_workers=8
+        ):
+            ip = str(row.get("ip", "")).strip()
+            if ip:
+                found[ip] = row
+
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         sock.bind(("", 0))
         sock.settimeout(0.35)
-        targets = _lan_ipv4_broadcast_strings()
+        broadcasts = _lan_ipv4_broadcast_strings()
 
         def _send_probe() -> None:
-            for addr in targets:
+            for addr in broadcasts:
                 try:
-                    sock.sendto(PHONE_BRIDGE_APP_DISCOVER, (addr, PHONE_BRIDGE_APP_DISCOVERY_PORT))
+                    sock.sendto(
+                        PHONE_BRIDGE_APP_DISCOVER,
+                        (addr, PHONE_BRIDGE_APP_DISCOVERY_PORT),
+                    )
+                except OSError:
+                    continue
+            for host in hints:
+                try:
+                    sock.sendto(
+                        PHONE_BRIDGE_APP_DISCOVER,
+                        (host, PHONE_BRIDGE_APP_DISCOVERY_PORT),
+                    )
                 except OSError:
                     continue
 
@@ -1238,20 +1376,23 @@ def discover_phone_bridge_hosts(timeout_s: float = 2.5) -> list[dict[str, object
                 continue
             if not isinstance(payload, dict):
                 continue
-            row = parse_phone_bridge_discover_reply(payload, ip=ip)
+            row = parse_phone_bridge_discover_reply(payload, ip=ip, default_port=port)
             if row is None:
                 continue
+            # Prefer UDP metadata (hostname / version) when both paths hit.
             found[ip] = row
     finally:
         try:
             sock.close()
         except OSError:
             pass
+
     if not found:
-        port = int(PHONE_BRIDGE_PORT_DEFAULT)
         tcp_hosts = _lan_ipv4_hosts_for_probe(max_hosts=1024)
+        hint_set = set(hints)
+        tcp_hosts = [h for h in tcp_hosts if h not in hint_set]
         for row in _tcp_probe_phone_bridge_hosts(
-            tcp_hosts, port=port, timeout_s=0.35, max_workers=32
+            tcp_hosts, port=port, timeout_s=0.30, max_workers=48
         ):
             ip = str(row.get("ip", "")).strip()
             if not ip:

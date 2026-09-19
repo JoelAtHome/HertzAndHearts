@@ -1,6 +1,17 @@
 # Changelog
 
 ### Unreleased
++ enhancement: Phone Bridge Feather lead-off — parse `use_leads_off` / `leads_off` on `status` NDJSON and show a sticky **Check electrodes** banner when both are true (clears on reconnect/clear status).
++ enhancement: Startup and Legal Disclaimer show a readable in-app scrollable text view (markdown source rendered; no raw `.md` / external file open).
++ enhancement: More → About links to [J. Kobe Labs](https://jkobelabs.com).
++ enhancement: Removed post-session donation nag and in-app Buy Me a Coffee; More → Support Development keeps optional GitHub Sponsors only.
++ bugfix: Background phone saved-HRV pull no longer shows “Receiving saved HRV…” on the status bar (was misleading at connect / new session start).
++ enhancement: Moved **Show SDNN** beside **Reset Baseline** so the toggle is easier to find.
++ enhancement: When SDNN plotting is off, the lower chart keeps a blank right-axis spacer so it stays the same width as the HR chart.
++ enhancement: Phone Scan probes the last 4 successful bridge IPs first (plus typed host), matching VNS-TA; stores MRU list in `~/.hnh_last_phone_bridge.json`.
++ enhancement: Lower-chart **Show SDNN** checkbox (per-profile) toggles the SDNN trace and right axis without stopping RMSSD or side-panel SDNN values.
++ enhancement: **Restart (no save)** discards the active recording (closes CSV, deletes session folder/history row), resets charts/baselines, and auto-starts a fresh session while still connected.
++ enhancement: Phone Bridge β.59+ Feather profile hint — re-send `client_info` on every active profile change (`pc_user` = subject name); show Feather soft-match `status` lines as a non-blocking banner (Keep/Switch stays on the phone).
 + bugfix: Opening the ECG window now paints the buffered trace immediately and keeps it aligned with the main timeline, instead of showing a blank strip until the next packet.
 + bugfix: Phone Bridge socket errors and refused connects now tear the TCP client down instead of leaving a zombie socket that disabled both Connect and Disconnect.
 + bugfix: Phone Bridge NDJSON drain now isolates handler exceptions and yields the event loop, so a bad ECG frame cannot freeze HR plotting or block reconnect.

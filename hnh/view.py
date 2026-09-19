@@ -1,4 +1,4 @@
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 import bisect
 import hashlib
 import os
@@ -27,7 +27,7 @@ from PySide6.QtCore import (
 from PySide6.QtBluetooth import QBluetoothAddress, QBluetoothDeviceInfo, QBluetoothLocalDevice
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QPushButton, QHBoxLayout, QVBoxLayout, QGridLayout, QWidget, QLabel,
-    QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit,
+    QComboBox, QSlider, QGroupBox, QFormLayout, QCheckBox, QLineEdit, QTextEdit, QTextBrowser,
     QProgressBar, QSizePolicy, QStatusBar, QFrame, QCompleter,
     QGraphicsView,
     QMessageBox, QDialog, QScrollArea, QGraphicsOpacityEffect, QInputDialog, QFileDialog,
@@ -45,6 +45,7 @@ from hnh.sensor import (
     SensorClient,
     SensorScanner,
     discover_phone_bridge_hosts,
+    is_feather_profile_status_message,
 )
 from hnh.linux_ble_prep import LinuxBlePrepWorker
 from hnh.logger import Logger
@@ -99,20 +100,6 @@ warnings.filterwarnings("ignore", category=UserWarning)
 pg.setConfigOptions(antialias=True)
 
 
-class PhoneBridgeFindWorker(QThread):
-    """Runs discover_phone_bridge_hosts() off the GUI thread."""
-
-    finished_ok = Signal(object)
-    finished_err = Signal(str)
-
-    def run(self) -> None:
-        try:
-            phones = discover_phone_bridge_hosts(2.5)
-            self.finished_ok.emit(phones)
-        except Exception as exc:
-            self.finished_err.emit(str(exc))
-
-
 SIDE_METRICS_COLUMN_WIDTH = 150
 
 # Tier 1 trend-guidance prefs (per profile; see WISHLIST progressive disclosure roadmap)
@@ -122,8 +109,12 @@ CONNECTION_PREF_MODE = "connection_mode"
 CONNECTION_PREF_PHONE_HOST = "phone_bridge_host"
 CONNECTION_PREF_PHONE_PORT = "phone_bridge_port"
 TIMELINE_PREF_MAIN_SPAN = "main_timeline_span"
+SHOW_SDNN_PLOT_PREF = "show_sdnn_plot"
 
 SENSOR_CONFIG = Path.home() / ".hnh_last_sensor.json"
+PHONE_BRIDGE_CONFIG = Path.home() / ".hnh_last_phone_bridge.json"
+# Most-recent-first ring of successful phone bridge IPs (scanned first on Find).
+PHONE_BRIDGE_RECENT_MAX = 4
 
 # Popup reasons that auto-dismiss; others (erratic HR, no data, total dropout) require acknowledgment.
 
@@ -135,8 +126,8 @@ _SIGNAL_POPUP_AUTO_DISMISS_REASONS = frozenset({
 _CARD0_DISCLAIMER_PATH = Path(__file__).with_name("disclaimer.md")
 _RESEARCH_USE_WARNING = "RESEARCH USE ONLY - NOT FOR CLINICAL DIAGNOSIS OR TREATMENT."
 _SUPPORT_SPONSORS_URL = "https://github.com/sponsors/JoelAtHome"
-_SUPPORT_BMAC_URL = "https://buymeacoffee.com/JoelAtHome"
 _SUPPORT_BRAND_NAME = "J. Kobe Labs"
+_SUPPORT_BRAND_URL = "https://jkobelabs.com"
 _CARD0_DISCLAIMER_FALLBACK = (
     "# Research Use Disclaimer\n\n"
     "This software is intended only for investigational and research use under\n"
@@ -156,6 +147,19 @@ def _load_card0_disclaimer_text() -> str:
 _CARD0_DISCLAIMER_TEXT = _load_card0_disclaimer_text()
 
 
+def _disclaimer_browser(parent=None) -> QTextBrowser:
+    """Readable rendered disclaimer (from markdown source, not raw .md syntax)."""
+    browser = QTextBrowser(parent)
+    browser.setOpenExternalLinks(False)
+    browser.setReadOnly(True)
+    browser.setFrameShape(QFrame.Shape.NoFrame)
+    browser.setMarkdown(_CARD0_DISCLAIMER_TEXT)
+    browser.setStyleSheet(
+        "QTextBrowser { background: white; color: #333; font-size: 14px; padding: 4px; }"
+    )
+    return browser
+
+
 def _display_version_label(raw_version: str) -> str:
     """Convert internal package version to user-facing label."""
     token = str(raw_version or "").strip()
@@ -172,6 +176,128 @@ def _one_page_share_path(bundle: SessionBundle, report_stage: str) -> Path:
     if report_stage.strip().lower() == "draft":
         return bundle.session_dir / "session_share_draft.pdf"
     return bundle.session_dir / "session_share.pdf"
+
+
+def _normalize_phone_bridge_entry(raw: object) -> dict | None:
+    """Validate one {host, port, label} entry; return None if unusable."""
+    if isinstance(raw, str):
+        host = raw.strip()
+        if not host:
+            return None
+        return {"host": host, "port": int(PHONE_BRIDGE_PORT_DEFAULT), "label": ""}
+    if not isinstance(raw, dict):
+        return None
+    host = str(raw.get("host", "")).strip()
+    if not host:
+        return None
+    try:
+        port = int(raw.get("port", PHONE_BRIDGE_PORT_DEFAULT))
+    except (TypeError, ValueError):
+        port = int(PHONE_BRIDGE_PORT_DEFAULT)
+    if port < 1024 or port > 65535:
+        port = int(PHONE_BRIDGE_PORT_DEFAULT)
+    return {
+        "host": host,
+        "port": port,
+        "label": str(raw.get("label", "")).strip(),
+    }
+
+
+def _load_recent_phone_bridges() -> list[dict]:
+    """Most-recent-first list of up to PHONE_BRIDGE_RECENT_MAX successful hosts."""
+    try:
+        data = json.loads(PHONE_BRIDGE_CONFIG.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    entries: list[dict] = []
+    seen: set[str] = set()
+
+    def _append(raw: object) -> None:
+        entry = _normalize_phone_bridge_entry(raw)
+        if entry is None:
+            return
+        key = entry["host"].lower()
+        if key in seen:
+            return
+        seen.add(key)
+        entries.append(entry)
+
+    if isinstance(data, dict):
+        hosts_raw = data.get("hosts")
+        if isinstance(hosts_raw, list):
+            for item in hosts_raw:
+                _append(item)
+        # Legacy single-host file (and top-level mirror of most recent).
+        _append(data)
+    elif isinstance(data, list):
+        for item in data:
+            _append(item)
+    return entries[:PHONE_BRIDGE_RECENT_MAX]
+
+
+def _save_last_phone_bridge(host: str, port: int, label: str = "") -> None:
+    host = (host or "").strip()
+    if not host:
+        return
+    try:
+        port_i = int(port)
+    except (TypeError, ValueError):
+        port_i = int(PHONE_BRIDGE_PORT_DEFAULT)
+    if port_i < 1024 or port_i > 65535:
+        port_i = int(PHONE_BRIDGE_PORT_DEFAULT)
+    label = (label or "").strip()
+    entry = {"host": host, "port": port_i, "label": label}
+    recent = [
+        e for e in _load_recent_phone_bridges() if e["host"].lower() != host.lower()
+    ]
+    recent.insert(0, entry)
+    recent = recent[:PHONE_BRIDGE_RECENT_MAX]
+    try:
+        PHONE_BRIDGE_CONFIG.write_text(
+            json.dumps(
+                {
+                    # Top-level mirror keeps older readers working.
+                    "host": host,
+                    "port": port_i,
+                    "label": label,
+                    "hosts": recent,
+                }
+            ),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+class PhoneBridgeFindWorker(QThread):
+    """Runs discover_phone_bridge_hosts() off the GUI thread."""
+
+    finished_ok = Signal(object)
+    finished_err = Signal(str)
+
+    def __init__(
+        self,
+        parent=None,
+        *,
+        hint_hosts: list[str] | None = None,
+        tcp_port: int | None = None,
+        timeout_s: float = 2.5,
+    ):
+        super().__init__(parent)
+        self._hint_hosts = list(hint_hosts or [])
+        self._tcp_port = tcp_port
+        self._timeout_s = float(timeout_s)
+
+    def run(self) -> None:
+        try:
+            phones = discover_phone_bridge_hosts(
+                self._timeout_s,
+                hint_hosts=self._hint_hosts,
+                tcp_port=self._tcp_port,
+            )
+            self.finished_ok.emit(phones)
+        except Exception as exc:
+            self.finished_err.emit(str(exc))
 
 
 def _warning_ok(parent, title: str, text: str) -> None:
@@ -351,6 +477,29 @@ class StatusBanner(QFrame):
         self._apply("error", text)
 
 
+class DisclaimerViewDialog(QDialog):
+    """Scrollable readable disclaimer (Legal Disclaimer link / re-read)."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Legal Disclaimer — Research Use Only")
+        self.setMinimumSize(720, 560)
+        self.setModal(True)
+        _ensure_linux_window_decorations(self)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(16, 16, 16, 12)
+        root.setSpacing(10)
+        self._browser = _disclaimer_browser(self)
+        root.addWidget(self._browser, stretch=1)
+        close_btn = QPushButton("Close")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        root.addLayout(btn_row)
+
+
 class Card0Dialog(QDialog):
     """Startup welcome/disclaimer card for Hertz & Hearts."""
 
@@ -417,11 +566,10 @@ class Card0Dialog(QDialog):
             "QFrame { background: white; border-radius: 8px; border: 1px solid #e5e8ea; }"
         )
         card_lay = QVBoxLayout(self._card)
-        card_lay.setContentsMargins(24, 18, 24, 18)
+        card_lay.setContentsMargins(16, 12, 16, 12)
 
-        self._disclaimer = QLabel(_CARD0_DISCLAIMER_TEXT)
-        self._disclaimer.setWordWrap(True)
-        self._disclaimer.setTextFormat(Qt.MarkdownText)
+        self._disclaimer = _disclaimer_browser(self._card)
+        self._disclaimer.setMinimumHeight(280)
         card_lay.addWidget(self._disclaimer)
         lay.addWidget(self._card)
         lay.addSpacing(12)
@@ -497,7 +645,8 @@ class Card0Dialog(QDialog):
         )
         self._ver.setFixedWidth(self._ver.sizeHint().width() + 28)
         self._disclaimer.setStyleSheet(
-            f"color: #333; font-size: {body_px}px; line-height: 1.35;"
+            f"QTextBrowser {{ background: white; color: #333; font-size: {body_px}px; "
+            f"padding: 4px; line-height: 1.35; }}"
         )
         self._ack_notice.setStyleSheet(
             f"color: #7f8c8d; font-size: {max(12, int(body_px * 0.9))}px; font-style: italic;"
@@ -6369,6 +6518,7 @@ class ViewSignals(QObject):
     annotation = Signal(tuple)
     start_recording = Signal(str)
     save_recording = Signal()
+    discard_recording = Signal()
     request_buffer_reset = Signal()
 
 
@@ -6542,6 +6692,7 @@ class View(QMainWindow):
 
         self.ble_sensor = SensorClient()
         self.phone_bridge = PhoneBridgeClient()
+        self.phone_bridge.set_client_profile_name(self._session_profile_id)
         self._phone_find_worker: PhoneBridgeFindWorker | None = None
         self._saved_hrv_request_pending = 0
         self._saved_hrv_request_timer = QTimer(self)
@@ -6581,6 +6732,9 @@ class View(QMainWindow):
         self.logger_thread.finished.connect(self.logger.save_recording)
         self.signals.start_recording.connect(self.logger.start_recording)
         self.signals.save_recording.connect(self.logger.save_recording)
+        self.signals.discard_recording.connect(
+            self.logger.discard_recording, Qt.ConnectionType.BlockingQueuedConnection
+        )
         self.signals.annotation.connect(self.logger.write_to_file)
         self.logger.recording_status.connect(self.show_recording_status)
         self.logger.status_update.connect(self.show_status)
@@ -6711,7 +6865,21 @@ class View(QMainWindow):
         self.bridge_host_combo = QComboBox()
         self.bridge_host_combo.setEditable(True)
         self.bridge_host_combo.setMinimumWidth(180)
-        self.bridge_host_combo.setEditText((self._saved_bridge_host or "").strip())
+        recent_phones = _load_recent_phone_bridges()
+        for entry in recent_phones:
+            label = entry.get("label") or entry["host"]
+            self.bridge_host_combo.addItem(
+                label, {"ip": entry["host"], "port": entry["port"]}
+            )
+        prefer_host = (self._saved_bridge_host or "").strip()
+        if prefer_host:
+            self.bridge_host_combo.setEditText(prefer_host)
+        elif recent_phones:
+            label = recent_phones[0].get("label") or recent_phones[0]["host"]
+            self.bridge_host_combo.setEditText(label)
+            self._saved_bridge_port = int(recent_phones[0]["port"])
+        else:
+            self.bridge_host_combo.setEditText("")
         _bh_le = self.bridge_host_combo.lineEdit()
         if _bh_le is not None:
             _bh_le.setPlaceholderText("Phone IP")
@@ -6803,6 +6971,9 @@ class View(QMainWindow):
         self.start_recording_button.clicked.connect(self.start_session)
         self.stop_save_button = QPushButton("Stop && Save")
         self.stop_save_button.clicked.connect(self._stop_and_save)
+        self.restart_no_save_button = QPushButton("Restart (no save)")
+        self.restart_no_save_button.setEnabled(False)
+        self.restart_no_save_button.clicked.connect(self._restart_session_without_save)
         self.logout_button = QPushButton("Switch User")
         self.logout_button.setToolTip("Switch user profile (same popup as startup).")
         self.logout_button.clicked.connect(self._on_logout_clicked)
@@ -6913,6 +7084,10 @@ class View(QMainWindow):
         self.stop_save_button.setToolTip(
             "Stop recording and save session (CSV, report, EDF+) to the path configured in Settings."
         )
+        self.restart_no_save_button.setToolTip(
+            "Discard the current recording (delete session folder), clear charts, "
+            "and start a fresh session without saving."
+        )
         self.annotation.setToolTip("Choose or type a session annotation.")
         self.annotation_button.setToolTip("Add the current annotation to the session log.")
         self.baseline_hr_label.setToolTip(
@@ -6924,7 +7099,8 @@ class View(QMainWindow):
         self.current_hr_label.setToolTip("Current averaged heart rate in beats per minute.")
         self.rmssd_label.setToolTip("Current RMSSD heart rate variability metric.")
         self.bridge_rmssd_label.setToolTip(
-            "Official RMSSD snapshot from the phone. Does not replace the live PC RMSSD above."
+            "Official RMSSD snapshot from the phone (Stream: ~every 30s; Record: on Stop). "
+            "Phone UI can show a local preview sooner. Does not replace the live PC RMSSD above."
         )
         self.sdnn_label.setToolTip("Current SDNN heart rate variability metric.")
         self.stress_ratio_label.setToolTip("Current LF/HF ratio estimate.")
@@ -6970,6 +7146,51 @@ class View(QMainWindow):
         _ub_layout.addWidget(self._update_banner_later)
         self.vlayout0.addWidget(self._update_banner_frame)
 
+        # Phone β.59+ Feather soft-match status (non-blocking; no second confirm on PC).
+        self._feather_profile_banner = QFrame()
+        self._feather_profile_banner.setVisible(False)
+        self._feather_profile_banner.setObjectName("featherProfileBanner")
+        self._feather_profile_banner.setStyleSheet(
+            "QFrame#featherProfileBanner { background: #f0fdf4; border: 1px solid #86efac; "
+            "border-radius: 4px; }"
+        )
+        _fp_layout = QHBoxLayout(self._feather_profile_banner)
+        _fp_layout.setContentsMargins(10, 6, 10, 6)
+        self._feather_profile_banner_label = QLabel("")
+        self._feather_profile_banner_label.setWordWrap(True)
+        self._feather_profile_banner_label.setStyleSheet("font-size: 12px; color: #166534;")
+        _fp_layout.addWidget(self._feather_profile_banner_label, stretch=1)
+        self._feather_profile_banner_dismiss = QPushButton("OK")
+        self._feather_profile_banner_dismiss.setStyleSheet(
+            "QPushButton { font-size: 11px; padding: 4px 12px; }"
+        )
+        self._feather_profile_banner_dismiss.clicked.connect(self._hide_feather_profile_banner)
+        _fp_layout.addWidget(self._feather_profile_banner_dismiss)
+        self.vlayout0.addWidget(self._feather_profile_banner)
+        self._feather_profile_banner_timer = QTimer(self)
+        self._feather_profile_banner_timer.setSingleShot(True)
+        self._feather_profile_banner_timer.timeout.connect(self._hide_feather_profile_banner)
+
+        # Feather LOD from Phone Bridge status (use_leads_off && leads_off).
+        self._feather_leads_off_banner = QFrame()
+        self._feather_leads_off_banner.setVisible(False)
+        self._feather_leads_off_banner.setObjectName("featherLeadsOffBanner")
+        self._feather_leads_off_banner.setStyleSheet(
+            "QFrame#featherLeadsOffBanner { background: #fff7ed; border: 1px solid #fdba74; "
+            "border-radius: 4px; }"
+        )
+        _lod_layout = QHBoxLayout(self._feather_leads_off_banner)
+        _lod_layout.setContentsMargins(10, 6, 10, 6)
+        self._feather_leads_off_banner_label = QLabel(
+            "Check electrodes — Feather lead-off detected."
+        )
+        self._feather_leads_off_banner_label.setWordWrap(True)
+        self._feather_leads_off_banner_label.setStyleSheet(
+            "font-size: 12px; color: #9a3412; font-weight: bold;"
+        )
+        _lod_layout.addWidget(self._feather_leads_off_banner_label, stretch=1)
+        self.vlayout0.addWidget(self._feather_leads_off_banner)
+
         # Header row: center active profile over plot column, keep controls on right.
         header_row = QHBoxLayout()
         header_row.setContentsMargins(0, 0, 0, 0)
@@ -6981,7 +7202,7 @@ class View(QMainWindow):
         self._disclaimer_link.setTextFormat(Qt.RichText)
         self._disclaimer_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
         self._disclaimer_link.setOpenExternalLinks(False)
-        self._disclaimer_link.setToolTip("Open the full legal disclaimer file.")
+        self._disclaimer_link.setToolTip("Open the research-use legal disclaimer.")
         self._disclaimer_link.linkActivated.connect(self._open_disclaimer_file)
         self._debug_mode_badge = QLabel("DEBUG ON")
         self._debug_mode_badge.setStyleSheet(
@@ -7066,6 +7287,14 @@ class View(QMainWindow):
         self.reset_button.setFixedWidth(108)
         reset_group.addWidget(self.reset_axes_button)
         reset_group.addWidget(self.reset_button)
+        self.show_sdnn_checkbox = QCheckBox("Show SDNN")
+        self.show_sdnn_checkbox.setToolTip(
+            "Show or hide the SDNN (right-axis) trace on the lower chart. "
+            "RMSSD plotting is unchanged; SDNN values are still computed for the side panel."
+        )
+        self.show_sdnn_checkbox.setStyleSheet("font-size: 11px;")
+        self.show_sdnn_checkbox.stateChanged.connect(self._on_show_sdnn_toggled)
+        reset_group.addWidget(self.show_sdnn_checkbox)
         freeze_row.addLayout(reset_group)
         freeze_row.addStretch()
         plots_column.addLayout(freeze_row)
@@ -7163,6 +7392,8 @@ class View(QMainWindow):
         self.start_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.stop_save_button.setMaximumWidth(110)
         self.stop_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.restart_no_save_button.setMaximumWidth(130)
+        self.restart_no_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._more_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._disclaimer_link.setStyleSheet(
             "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
@@ -7187,6 +7418,7 @@ class View(QMainWindow):
         toolbar_top.addWidget(self.battery_label)
         toolbar_top.addWidget(self.start_recording_button)
         toolbar_top.addWidget(self.stop_save_button)
+        toolbar_top.addWidget(self.restart_no_save_button)
         self._morning_baseline_cb = QCheckBox("Morning baseline")
         self._morning_baseline_cb.setToolTip(
             "When checked, a short protocol reminder appears while recording and the "
@@ -7241,6 +7473,7 @@ class View(QMainWindow):
         self._update_connection_mode_ui()
         self._update_session_actions()
         self._load_tier1_morning_baseline_pref()
+        self._load_show_sdnn_plot_pref()
         QTimer.singleShot(0, self._run_startup_flow)
         QTimer.singleShot(3500, self._schedule_background_update_check)
 
@@ -7334,6 +7567,9 @@ class View(QMainWindow):
         self._set_debug_mode(bool(self.settings.DEBUG), announce=False, persist=False)
         if announce:
             self.show_status(f"Active user: {self._session_profile_id}")
+        # Subject name for phone client_info (PROTOCOL §8.2); re-sends when linked.
+        if hasattr(self, "phone_bridge"):
+            self.phone_bridge.set_client_profile_name(self._session_profile_id)
         if getattr(self, "_trends_window", None) is not None:
             self._trends_window.set_active_profile(self._session_profile_id)
         if getattr(self, "_history_window", None) is not None:
@@ -7362,6 +7598,7 @@ class View(QMainWindow):
             self._set_connection_mode(mode)
             self._apply_connect_ready_state()
         self._load_tier1_morning_baseline_pref()
+        self._load_show_sdnn_plot_pref()
         self._update_session_actions()
         QTimer.singleShot(
             int(max(0.0, self._start_new_profile_switch_grace_seconds) * 1000.0) + 25,
@@ -7502,6 +7739,63 @@ class View(QMainWindow):
                 "1" if self._morning_baseline_cb.isChecked() else "0",
             )
         self._update_morning_baseline_banner_visibility()
+
+    def _load_show_sdnn_plot_pref(self) -> None:
+        if not getattr(self, "show_sdnn_checkbox", None):
+            return
+        pid = str(getattr(self, "_session_profile_id", "") or "").strip()
+        raw = "1"
+        if pid:
+            raw = self._profile_store.get_profile_pref(pid, SHOW_SDNN_PLOT_PREF, "1")
+        on = str(raw).strip().lower() not in {"0", "false", "no", "off"}
+        self.show_sdnn_checkbox.blockSignals(True)
+        self.show_sdnn_checkbox.setChecked(on)
+        self.show_sdnn_checkbox.blockSignals(False)
+        self._apply_sdnn_plot_visibility(on)
+
+    def _on_show_sdnn_toggled(self, _state: int) -> None:
+        on = self.show_sdnn_checkbox.isChecked()
+        pid = str(getattr(self, "_session_profile_id", "") or "").strip()
+        if pid:
+            self._profile_store.set_profile_pref(
+                pid, SHOW_SDNN_PLOT_PREF, "1" if on else "0"
+            )
+        self._apply_sdnn_plot_visibility(on)
+
+    def _sdnn_plot_enabled(self) -> bool:
+        cb = getattr(self, "show_sdnn_checkbox", None)
+        if cb is None:
+            return True
+        return bool(cb.isChecked())
+
+    def _apply_sdnn_plot_visibility(self, visible: bool | None = None) -> None:
+        show = self._sdnn_plot_enabled() if visible is None else bool(visible)
+        if getattr(self, "sdnn_series", None) is not None:
+            self.sdnn_series.setVisible(show)
+        axis = getattr(self, "hrv_y_axis_right", None)
+        if axis is not None:
+            # Keep the right axis mounted so plot width matches the HR chart
+            # (which always reserves a blank right axis). Only hide labels/title.
+            axis.setVisible(True)
+            if show:
+                sdnn_color = QColor(0, 130, 255)
+                axis.setTitleText("HRV(SDNN) --x--")
+                axis.setTitleBrush(QBrush(sdnn_color))
+                axis.setLabelsColor(sdnn_color)
+                axis.setLabelsVisible(True)
+                axis.setLineVisible(True)
+                axis.setGridLineVisible(True)
+            else:
+                axis.setTitleText(" ")
+                axis.setTitleBrush(QBrush(QColor(0, 0, 0, 0)))
+                axis.setLabelsVisible(False)
+                axis.setLineVisible(False)
+                axis.setGridLineVisible(False)
+        for seg in getattr(self, "_sdnn_segments", []) or []:
+            try:
+                seg.setVisible(show)
+            except Exception:
+                pass
 
     def _update_morning_baseline_banner_visibility(self) -> None:
         if not getattr(self, "_morning_baseline_banner", None):
@@ -7794,6 +8088,9 @@ class View(QMainWindow):
         saved_hrv = getattr(sensor_client, "saved_hrv_package_ready", None)
         if saved_hrv is not None:
             saved_hrv.connect(self._on_saved_hrv_package)
+        lod = getattr(sensor_client, "feather_leads_off_update", None)
+        if lod is not None:
+            lod.connect(self._on_feather_leads_off_update)
 
     def _unbind_sensor_signals(self, sensor_client) -> None:
         try:
@@ -7830,6 +8127,12 @@ class View(QMainWindow):
         if saved_hrv is not None:
             try:
                 saved_hrv.disconnect(self._on_saved_hrv_package)
+            except Exception:
+                pass
+        lod = getattr(sensor_client, "feather_leads_off_update", None)
+        if lod is not None:
+            try:
+                lod.disconnect(self._on_feather_leads_off_update)
             except Exception:
                 pass
 
@@ -7926,6 +8229,8 @@ class View(QMainWindow):
             self.bridge_rmssd_label.setVisible(phone_mode)
             if not phone_mode:
                 self._on_bridge_rmssd_snapshot(None)
+        if not phone_mode:
+            self._on_feather_leads_off_update(None)
 
     def _phone_bridge_host_value(self) -> str:
         idx = self.bridge_host_combo.currentIndex()
@@ -7981,7 +8286,20 @@ class View(QMainWindow):
         self.scan_button.setEnabled(False)
         self._focus_bridge_host_line_edit_without_select_all()
         self.show_status("Searching for phone bridges on the network…")
-        self._phone_find_worker = PhoneBridgeFindWorker(self)
+        hints: list[str] = []
+        current = self._phone_bridge_host_value().strip()
+        if current:
+            hints.append(current)
+        for saved in _load_recent_phone_bridges():
+            h = str(saved.get("host", "")).strip()
+            if h and h not in hints:
+                hints.append(h)
+        self._phone_find_worker = PhoneBridgeFindWorker(
+            self,
+            hint_hosts=hints,
+            tcp_port=int(self.bridge_port_spin.value()),
+            timeout_s=2.5,
+        )
         self._phone_find_worker.finished_ok.connect(self._on_phone_find_finished)
         self._phone_find_worker.finished_err.connect(self._on_phone_find_failed)
         self._phone_find_worker.start()
@@ -8000,11 +8318,35 @@ class View(QMainWindow):
             self.show_status("Phone discovery returned nothing.")
             return
         current = self._phone_bridge_host_value()
+        rows: list[dict[str, object]] = [
+            p for p in phones if isinstance(p, dict) and str(p.get("ip", "")).strip()
+        ]
+        seen_ips = {
+            str(p.get("ip", "")).strip().lower()
+            for p in rows
+            if str(p.get("ip", "")).strip()
+        }
+        # Keep remembered successful IPs in the dropdown even if Scan missed them.
+        recent_extras: list[tuple[str, dict[str, object]]] = []
+        for saved in _load_recent_phone_bridges():
+            host = str(saved.get("host", "")).strip()
+            if not host or host.lower() in seen_ips:
+                continue
+            seen_ips.add(host.lower())
+            label = str(saved.get("label") or "").strip() or host
+            recent_extras.append(
+                (
+                    label,
+                    {
+                        "ip": host,
+                        "hostname": host,
+                        "port": int(saved.get("port", PHONE_BRIDGE_PORT_DEFAULT)),
+                    },
+                )
+            )
         self.bridge_host_combo.blockSignals(True)
         self.bridge_host_combo.clear()
-        for p in phones:
-            if not isinstance(p, dict):
-                continue
+        for p in rows:
             ip = str(p.get("ip", "")).strip()
             if not ip:
                 continue
@@ -8017,6 +8359,8 @@ class View(QMainWindow):
             if version:
                 label = f"{label} · {version}"
             self.bridge_host_combo.addItem(label, dict(p))
+        for label, data in recent_extras:
+            self.bridge_host_combo.addItem(label, data)
         self.bridge_host_combo.blockSignals(False)
         idx = -1
         for i in range(self.bridge_host_combo.count()):
@@ -8040,7 +8384,7 @@ class View(QMainWindow):
                 self.bridge_host_combo.setEditText(current)
         self._on_phone_bridge_endpoint_changed()
         self._focus_bridge_host_line_edit_without_select_all()
-        n = len(phones)
+        n = len(rows)
         if n == 0:
             candidate = current.strip()
             port = int(self.bridge_port_spin.value())
@@ -8077,9 +8421,7 @@ class View(QMainWindow):
                     pass
         if n:
             feature_hint = ""
-            for p in phones:
-                if not isinstance(p, dict):
-                    continue
+            for p in rows:
                 feats = p.get("features")
                 if isinstance(feats, list) and feats:
                     feature_hint = f" Features: {', '.join(str(f) for f in feats[:6])}."
@@ -8207,6 +8549,7 @@ class View(QMainWindow):
             connected and not is_recording and not profile_switch_cooldown
         )
         self.stop_save_button.setEnabled(is_recording)
+        self.restart_no_save_button.setEnabled(is_recording)
         if getattr(self, "_morning_baseline_cb", None):
             self._morning_baseline_cb.setEnabled(True)
         self._import_action.setEnabled(not is_recording)
@@ -8645,6 +8988,60 @@ class View(QMainWindow):
         """Stop recording and save session (CSV, report, EDF+) to Session Save Path."""
         self.finalize_session(show_message=True, build_final_report=True)
 
+    def _restart_session_without_save(self):
+        """Discard the active recording, clear charts, and start a fresh session."""
+        if self._session_state != "recording":
+            self.show_status("No active session to restart.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Restart Without Saving",
+            "Discard the current recording and start a new session?\n\n"
+            "The session folder will be deleted. Charts and baselines will reset.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        bundle = self._session_bundle
+        session_id = bundle.session_id if bundle is not None else None
+        session_dir = bundle.session_dir if bundle is not None else None
+        self._record_disconnect_end()
+        self.signals.discard_recording.emit()
+        if session_id:
+            try:
+                self._profile_store.delete_sessions_by_ids([session_id])
+            except Exception:
+                pass
+        if session_dir is not None:
+            try:
+                shutil.rmtree(Path(session_dir), ignore_errors=True)
+            except Exception:
+                pass
+        self._session_bundle = None
+        self._session_annotations = []
+        self._session_hr_values = []
+        self._session_hr_times = []
+        self._session_rmssd_values = []
+        self._session_rmssd_times = []
+        self._session_hrv_values = []
+        self._session_hrv_times = []
+        self._session_reset_markers_seconds = []
+        self._session_report_time_offset_seconds = 0.0
+        self._session_stress_ratio_values = []
+        self._session_stress_ratio_times = []
+        self._session_snr_values = []
+        self._session_qtc_payload = default_qtc_payload()
+        self._last_qtc_diag_logged = ()
+        self._disconnect_intervals = []
+        self._set_session_state("idle")
+        self.reset_baseline()
+        if self._is_sensor_connected():
+            self.start_session(auto=True)
+            self.show_status("Session restarted without saving.")
+        else:
+            self.show_status("Previous session discarded. Connect a sensor to start again.")
+
     def finalize_session(self, show_message: bool = True, build_final_report: bool = True):
         if self._session_state != "recording":
             if show_message:
@@ -8681,7 +9078,6 @@ class View(QMainWindow):
             self.show_status(f"Session save failed: {exc}")
         if show_message and self._session_bundle is not None:
             self.show_status(f"Session finalized: {self._session_bundle.session_dir}")
-            self._show_post_session_support_prompt()
 
     def connect_sensor(self):
         if self._connection_mode == "phone":
@@ -9199,14 +9595,9 @@ class View(QMainWindow):
         return super().eventFilter(obj, event)
 
     def _open_disclaimer_file(self, _link: str = ""):
-        if not _CARD0_DISCLAIMER_PATH.exists():
-            self.show_status(
-                f"Disclaimer file not found: {_CARD0_DISCLAIMER_PATH}",
-                print_to_terminal=False,
-            )
-            return
-        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(_CARD0_DISCLAIMER_PATH))):
-            self.show_status("Unable to open disclaimer file.", print_to_terminal=False)
+        dlg = DisclaimerViewDialog(self)
+        _ensure_linux_window_decorations(dlg)
+        dlg.exec()
 
     def _open_support_page(self, url: str) -> bool:
         if QDesktopServices.openUrl(QUrl(url)):
@@ -9312,17 +9703,16 @@ class View(QMainWindow):
                 "Open GitHub Sponsors",
             )
         )
-        cards.addWidget(
-            _build_card(
-                "Buy Me a Coffee (no GitHub login)",
-                _SUPPORT_BMAC_URL,
-                "Open Buy Me a Coffee",
-            )
-        )
         root.addLayout(cards)
 
-        note = QLabel("Tip: scan a QR code with your phone. Internet connection is required to donate.")
+        note = QLabel(
+            "Optional support stays on GitHub Sponsors (and may also appear on the "
+            f"<a href='{_SUPPORT_BRAND_URL}'>{_SUPPORT_BRAND_NAME}</a> site). "
+            "Scan the QR with your phone if helpful. Internet connection required."
+        )
         note.setWordWrap(True)
+        note.setOpenExternalLinks(True)
+        note.setTextFormat(Qt.TextFormat.RichText)
         root.addWidget(note)
 
         actions = QHBoxLayout()
@@ -9377,6 +9767,44 @@ class View(QMainWindow):
     def _hide_update_banner(self) -> None:
         self._update_banner_frame.setVisible(False)
         self._update_banner_release = None
+
+    def _show_feather_profile_banner(self, message: str) -> None:
+        """Non-blocking phone Feather soft-match status; no Keep/Switch dialog on PC."""
+        text = str(message or "").strip()
+        if not text:
+            return
+        banner = getattr(self, "_feather_profile_banner", None)
+        label = getattr(self, "_feather_profile_banner_label", None)
+        timer = getattr(self, "_feather_profile_banner_timer", None)
+        if banner is None or label is None:
+            return
+        label.setText(text)
+        banner.setVisible(True)
+        if timer is not None:
+            timer.start(8000)
+
+    def _hide_feather_profile_banner(self) -> None:
+        timer = getattr(self, "_feather_profile_banner_timer", None)
+        if timer is not None:
+            timer.stop()
+        banner = getattr(self, "_feather_profile_banner", None)
+        if banner is not None:
+            banner.setVisible(False)
+
+    def _on_feather_leads_off_update(self, payload: object) -> None:
+        """Sticky check-electrodes cue when Phone Bridge reports Feather LOD."""
+        banner = getattr(self, "_feather_leads_off_banner", None)
+        label = getattr(self, "_feather_leads_off_banner_label", None)
+        if banner is None or label is None:
+            return
+        if not isinstance(payload, dict) or not payload.get("active"):
+            banner.setVisible(False)
+            return
+        msg = str(payload.get("message") or "").strip()
+        if not msg:
+            msg = "Feather lead-off"
+        label.setText(f"Check electrodes — {msg}")
+        banner.setVisible(True)
 
     def _on_update_banner_download(self) -> None:
         rel = self._update_banner_release
@@ -9449,108 +9877,13 @@ class View(QMainWindow):
             "<p style='margin-top:0'><b>Hertz & Hearts</b></p>"
             f"<p>{release_label}</p>"
             f"<p>{_RESEARCH_USE_WARNING}</p>"
-            f"<p>Developed by {_SUPPORT_BRAND_NAME}.</p>"
+            f"<p>Developed by <a href='{_SUPPORT_BRAND_URL}'>{_SUPPORT_BRAND_NAME}</a>.</p>"
+            f"<p><a href='{_SUPPORT_BRAND_URL}'>{_SUPPORT_BRAND_URL}</a></p>"
         )
         msg.setStandardButtons(QMessageBox.StandardButton.Ok)
         msg.setDefaultButton(QMessageBox.StandardButton.Ok)
         _ensure_linux_window_decorations(msg)
         msg.exec()
-
-    def _should_show_post_session_support_prompt(self) -> bool:
-        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
-        if not profile_id:
-            return False
-        if profile_id.casefold() == "guest":
-            # Guest sessions are intentionally non-persistent for this reminder.
-            return True
-        never = self._profile_store.get_profile_pref(
-            profile_id, "support_prompt_never", default="0"
-        )
-        if str(never).strip() == "1":
-            return False
-        hide_until_raw = self._profile_store.get_profile_pref(
-            profile_id, "support_prompt_hide_until", default=""
-        )
-        hide_until_text = str(hide_until_raw).strip()
-        if not hide_until_text:
-            return True
-        try:
-            hide_until = datetime.fromisoformat(hide_until_text)
-        except ValueError:
-            return True
-        return datetime.now() >= hide_until
-
-    def _set_support_prompt_hide_for_days(self, days: int) -> None:
-        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
-        if not profile_id:
-            return
-        if profile_id.casefold() == "guest":
-            return
-        hide_until = datetime.now() + timedelta(days=max(1, int(days)))
-        self._profile_store.set_profile_pref(
-            profile_id, "support_prompt_hide_until", hide_until.isoformat()
-        )
-        self._profile_store.set_profile_pref(profile_id, "support_prompt_never", "0")
-
-    def _set_support_prompt_never(self) -> None:
-        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
-        if not profile_id:
-            return
-        if profile_id.casefold() == "guest":
-            return
-        self._profile_store.set_profile_pref(profile_id, "support_prompt_never", "1")
-        self._profile_store.clear_profile_pref(profile_id, "support_prompt_hide_until")
-
-    def _show_post_session_support_prompt(self) -> None:
-        if not self._should_show_post_session_support_prompt():
-            return
-        profile_id = str(getattr(self, "_session_profile_id", "") or "").strip()
-        is_guest = profile_id.casefold() == "guest"
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle("Support Hertz & Hearts")
-        msg.setText(
-            f"Hertz & Hearts is maintained by {_SUPPORT_BRAND_NAME}. "
-            "This project is intended for research and educational use, not clinical diagnosis. "
-            "If Hertz & Hearts aids your research or personal practice, optional donations support "
-            "maintenance, bug fixes, testing, documentation, and future features."
-        )
-        if is_guest:
-            msg.setInformativeText(
-                "Guest sessions do not store reminder preferences."
-            )
-        else:
-            msg.setInformativeText(
-                "Choose how often you want to see this reminder for this user profile."
-            )
-        gh_btn = msg.addButton("Donate via GitHub Sponsors", QMessageBox.AcceptRole)
-        bmac_btn = msg.addButton(
-            "Donate via Buy Me a Coffee",
-            QMessageBox.ActionRole,
-        )
-        hide_week_btn = None
-        never_btn = None
-        if not is_guest:
-            hide_week_btn = msg.addButton("Hide for 1 week", QMessageBox.ActionRole)
-            never_btn = msg.addButton("Never show again", QMessageBox.DestructiveRole)
-        not_now_btn = msg.addButton("Not now", QMessageBox.RejectRole)
-        msg.setDefaultButton(not_now_btn)
-        msg.exec()
-
-        clicked = msg.clickedButton()
-        if clicked == gh_btn:
-            self._open_support_page(_SUPPORT_SPONSORS_URL)
-            return
-        if clicked == bmac_btn:
-            self._open_support_page(_SUPPORT_BMAC_URL)
-            return
-        if hide_week_btn is not None and clicked == hide_week_btn:
-            self._set_support_prompt_hide_for_days(7)
-            self.show_status("Support reminder hidden for 1 week.")
-            return
-        if never_btn is not None and clicked == never_btn:
-            self._set_support_prompt_never()
-            self.show_status("Support reminder disabled for this profile.")
 
     def _start_pc_ble_sensor_scan(self) -> None:
         """Begin PC BLE discovery; Linux runs BlueZ prep in a worker with a short dialog first."""
@@ -11330,6 +11663,9 @@ class View(QMainWindow):
 
     def show_status(self, status: str, print_to_terminal=True):
         display_status = status
+        feather_status = is_feather_profile_status_message(status)
+        if feather_status:
+            self._show_feather_profile_banner(status)
         if status.startswith("Scanning for BLE sensors..."):
             self._on_scan_state_changed(True)
         elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
@@ -11354,6 +11690,12 @@ class View(QMainWindow):
             self.connect_button.setEnabled(False)
             self.disconnect_button.setEnabled(True)
             self.scan_button.setEnabled(False)
+            if self._connection_mode == "phone":
+                host = self._phone_bridge_host_value().strip()
+                port = int(self.bridge_port_spin.value())
+                label = self.bridge_host_combo.currentText().strip()
+                _save_last_phone_bridge(host, port, label=label)
+                self._persist_connection_prefs()
             self._auto_start_recording()
             if (
                 platform.system() == "Linux"
@@ -11392,7 +11734,8 @@ class View(QMainWindow):
                     "then click Scan or Connect."
                 )
 
-        if not self.is_phase_active:
+        # Feather soft-match lines use their own banner; do not overwrite phase progress.
+        if not self.is_phase_active and not feather_status:
             if "error" in status.lower():
                 self.recording_statusbar.set_error(status)
             else:
@@ -11623,6 +11966,7 @@ class View(QMainWindow):
             self.sdnn_series, self._sdnn_segments, self.hrv_widget.chart(),
             self.hrv_widget.x_axis, self.hrv_y_axis_right,
         )
+        self._apply_sdnn_plot_visibility()
 
     def _record_disconnect_start(self, reason: str):
         """Record start of disconnect interval; used for manifest/CSV/report."""
