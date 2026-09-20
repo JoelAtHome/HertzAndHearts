@@ -90,8 +90,8 @@ Raw ideas go here first.
 - Proposed approach: Save a small ECG image snippet at each cursor capture and include it in a dedicated report section with timestamp and Δt metadata.
 - Effort: M
 - Impact: High
-- Status: idea
-- Notes: **Partial today:** `Capture Image` / session-folder `ecg_snapshot_*.png` exists, and Log Δt writes text annotations into the report — but cursor Log Δt does **not** auto-attach a snippet, and reports do not embed those PNGs. Remaining work: on Log Δt (or report build), attach capped snippets (3–5) with timestamp/Δt into a report section.
+- Status: done
+- Notes: Log Δt grabs the ECG plot, saves `ecg_cursor_capture_*.png` in the session folder, keeps the newest 5 in memory/manifest, and embeds them in the Word report section **ECG Cursor Captures**. History rebuild reads `ecg_cursor_captures` from the manifest.
 
 ### [UX] Zoom/pan controls for two main live plots (HR + RMSSD/SDNN)
 - Problem: During live monitoring, users cannot inspect recent details on the two main charts because view ranges are auto-driven and there is no direct zoom/pan interaction.

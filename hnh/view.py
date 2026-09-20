@@ -55,6 +55,7 @@ from hnh.config import (
     PLOT_WARMUP_SECONDS, MAIN_PLOT_START_SECONDS, MAIN_PLOT_SYNC_MIN_IBIS,
     ECG_SAMPLE_RATE,
     ECG_QRS_UNCERTAINTY_PCT,
+    ECG_CURSOR_CAPTURE_REPORT_CAP,
     RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
     SIGNAL_POPUP_AUTO_DISMISS_MS,
     PSD_VAGAL_BAND,
@@ -76,10 +77,12 @@ from hnh.help_content import (
 )
 from hnh.report import (
     format_datetime_for_display,
+    format_ecg_cursor_dt_ms,
     format_ecg_sensor_display_name,
     generate_session_report,
     generate_session_share_pdf,
     get_date_display_format_for_qt,
+    normalize_ecg_cursor_interval_label,
 )
 from hnh.session_artifacts import (
     SessionBundle,
@@ -4513,10 +4516,12 @@ class EcgWindow(QMainWindow):
         )
         self._cursor_b_select_button.toggled.connect(lambda checked: self._select_active_cursor("B", checked))
         self._cursor_interval_type_combo = QComboBox()
-        self._cursor_interval_type_combo.addItems(["R-R", "QRS", "QT", "PR", "Other"])
+        self._cursor_interval_type_combo.addItems(["—", "R-R", "QRS", "QT", "PR", "Other"])
         self._cursor_interval_type_combo.setMinimumWidth(54)
         self._cursor_interval_type_combo.setMaximumWidth(58)
-        self._cursor_interval_type_combo.setToolTip("Context for the logged interval (what Δt represents).")
+        self._cursor_interval_type_combo.setToolTip(
+            "Optional interval label for Log Δt (leave as — if you only need the duration)."
+        )
         self._cursor_capture_button = QPushButton("Log Δt")
         self._cursor_capture_button.setFixedWidth(62)
         self._cursor_capture_button.setToolTip("Log cursor interval as session annotation with selected context.")
@@ -5074,15 +5079,21 @@ class EcgWindow(QMainWindow):
         a_t = float(self._cursor_a_line.value())
         b_t = float(self._cursor_b_line.value())
         dt_ms = abs(b_t - a_t) * 1000.0
-        interval_type = self._cursor_interval_type_combo.currentText().strip() or "R-R"
+        interval_type = normalize_ecg_cursor_interval_label(
+            self._cursor_interval_type_combo.currentText()
+        )
+        pixmap = self._plot_widget.grab()
         payload = {
             "a_t_sec": a_t,
             "b_t_sec": b_t,
             "dt_ms": dt_ms,
             "interval_type": interval_type,
+            "pixmap": None if pixmap.isNull() else pixmap,
         }
         self.cursor_measurement_captured.emit(payload)
-        self._statusbar.showMessage(f"Logged ECG cursor interval: Δt={dt_ms:.1f} ms ({interval_type})")
+        self._statusbar.showMessage(
+            f"Logged ECG cursor interval: {format_ecg_cursor_dt_ms(dt_ms, interval_type)}"
+        )
 
     def _capture_plot_image(self):
         """Grab plot widget (axes, waveform, cursors, Δt) and emit for saving to session folder."""
@@ -6696,6 +6707,7 @@ class View(QMainWindow):
         self._update_banner_release: update_check.ReleaseInfo | None = None
         self._ibi_diag_last_counts = {"beats_received": 0, "buffer_updates": 0}
         self._session_annotations: list[tuple[str, str]] = []
+        self._session_ecg_cursor_captures: list[dict] = []
         self._session_hr_values: list[float] = []
         self._session_hr_times: list[float] = []
         self._session_rmssd_values: list[float] = []
@@ -8881,6 +8893,9 @@ class View(QMainWindow):
             "last_hr": last_hr,
             "last_rmssd": last_rmssd,
             "annotations": list(self._session_annotations),
+            "ecg_cursor_captures": [
+                dict(item) for item in self._session_ecg_cursor_captures
+            ],
             "hr_values": list(self._session_hr_values),
             "hr_time_seconds": list(self._session_hr_times),
             "rmssd_values": list(self._session_rmssd_values),
@@ -8969,7 +8984,11 @@ class View(QMainWindow):
                 "last_rmssd": last_rmssd,
                 "qtc": qtc_payload,
                 "annotation_count": len(self._session_annotations),
+                "ecg_cursor_capture_count": len(self._session_ecg_cursor_captures),
             },
+            "ecg_cursor_captures": [
+                dict(item) for item in self._session_ecg_cursor_captures
+            ],
             "disconnect_intervals": disc_intervals,
             "disconnect_total_seconds": total_disc_sec,
             "disclaimer": self._current_disclaimer_payload(),
@@ -9062,6 +9081,7 @@ class View(QMainWindow):
             self.show_status(f"Unable to create session folder: {exc}")
             return
         self._session_annotations = []
+        self._session_ecg_cursor_captures = []
         self._session_hr_values = []
         self._session_hr_times = []
         self._session_rmssd_values = []
@@ -9148,6 +9168,7 @@ class View(QMainWindow):
                 pass
         self._session_bundle = None
         self._session_annotations = []
+        self._session_ecg_cursor_captures = []
         self._session_hr_values = []
         self._session_hr_times = []
         self._session_rmssd_values = []
@@ -9328,6 +9349,7 @@ class View(QMainWindow):
         self._sdnn_smooth_buf = []
         self._rmssd_smooth_post_warmup = False
         self._session_annotations = []
+        self._session_ecg_cursor_captures = []
         self._session_hr_values = []
         self._session_hr_times = []
         self._session_rmssd_values = []
@@ -10886,13 +10908,74 @@ class View(QMainWindow):
             b_t = float(payload.get("b_t_sec"))
         except (TypeError, ValueError):
             return
-        interval_type = payload.get("interval_type", "").strip() or "R-R"
-        text = f"ECG cursor Δt={dt_ms:.1f} ms ({interval_type}) (A={a_t:.3f}s, B={b_t:.3f}s)"
+        interval_type = normalize_ecg_cursor_interval_label(payload.get("interval_type", ""))
+        dt_label = format_ecg_cursor_dt_ms(dt_ms, interval_type)
+        text = f"ECG cursor {dt_label} (A={a_t:.3f}s, B={b_t:.3f}s)"
         if self._session_state == "recording":
             ts = datetime.now().strftime("%H:%M:%S")
             self._session_annotations.append((ts, text))
             self.signals.annotation.emit(NamedSignal("Annotation", text))
+            self._save_ecg_cursor_capture(
+                ts=ts,
+                dt_ms=dt_ms,
+                interval_type=interval_type,
+                a_t=a_t,
+                b_t=b_t,
+                pixmap=payload.get("pixmap"),
+            )
         self.show_status(text)
+
+    def _save_ecg_cursor_capture(
+        self,
+        *,
+        ts: str,
+        dt_ms: float,
+        interval_type: str,
+        a_t: float,
+        b_t: float,
+        pixmap: object,
+    ) -> None:
+        """Save Log Δt plot snippet for the session report (capped)."""
+        if self._session_bundle is None:
+            return
+        if pixmap is None or (hasattr(pixmap, "isNull") and pixmap.isNull()):
+            self.show_status(f"{ts}: logged Δt (no image capture).")
+            return
+        session_dir = Path(self._session_bundle.session_dir)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"ecg_cursor_capture_{stamp}.png"
+        path = session_dir / filename
+        if path.exists():
+            for idx in range(1, 100):
+                alt = session_dir / f"ecg_cursor_capture_{stamp}_{idx:02d}.png"
+                if not alt.exists():
+                    path = alt
+                    filename = alt.name
+                    break
+        try:
+            ok = pixmap.save(str(path))
+        except Exception as exc:
+            self.show_status(f"ECG cursor capture save failed: {exc}")
+            return
+        if not ok:
+            self.show_status("ECG cursor capture save failed.")
+            return
+        entry = {
+            "time": ts,
+            "dt_ms": float(dt_ms),
+            "interval_type": interval_type,
+            "a_t_sec": float(a_t),
+            "b_t_sec": float(b_t),
+            "image": filename,
+        }
+        self._session_ecg_cursor_captures.append(entry)
+        cap = max(1, int(ECG_CURSOR_CAPTURE_REPORT_CAP))
+        if len(self._session_ecg_cursor_captures) > cap:
+            self._session_ecg_cursor_captures = self._session_ecg_cursor_captures[-cap:]
+        try:
+            self._persist_manifest("recording", report_stage="draft")
+        except Exception:
+            pass
 
     @Slot(object)
     def _on_ecg_image_captured(self, pixmap: object):

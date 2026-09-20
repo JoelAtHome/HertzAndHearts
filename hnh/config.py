@@ -145,6 +145,9 @@ LINUX_ENABLE_PMD_EXPERIMENTAL: Final[bool] = False
 # smooth animation and CPU/GPU load.
 ECG_REFRESH_MS: Final[int] = 33
 
+# Max ECG cursor Log Δt snapshots embedded in the session Word report.
+ECG_CURSOR_CAPTURE_REPORT_CAP: Final[int] = 5
+
 # ──────────────────────────────────────────────────────────────────────
 #  SIGNAL QUALITY DETECTION
 # ──────────────────────────────────────────────────────────────────────

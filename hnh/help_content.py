@@ -140,7 +140,9 @@ HELP_TOPICS: dict[str, HelpTopic] = {
                 items=(
                     "<b>Freeze</b>: pause the stream to place cursors and measure Δt.",
                     "<b>Cursors A / B</b>: drag lines or nudge with keyboard when frozen.",
-                    "<b>Log Δt</b>: save the interval as a session annotation with a type label.",
+                    "<b>Log Δt</b>: save the interval as a session annotation and attach a "
+                    "plot snippet to the report (up to 5 per session). Optional type label "
+                    "(R-R / QRS / QT / …) — leave as — if you only need duration.",
                     "<b>Zoom / Relock</b>: inspect a window of time; Relock follows the main plot.",
                     "<b>Capture Image</b>: snapshot the plot into the session folder.",
                 ),

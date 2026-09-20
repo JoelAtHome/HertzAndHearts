@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from hnh.config import (
+    ECG_CURSOR_CAPTURE_REPORT_CAP,
     ECG_QRS_UNCERTAINTY_PCT,
     ECG_QTc_UNCERTAINTY_PCT,
     RMSSD_NOISY_MS,
@@ -27,6 +28,27 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 
 
 _REPORT_RMSSD_HRV_STABILIZE_SECONDS = 60.0
+
+
+def normalize_ecg_cursor_interval_label(raw: object) -> str:
+    """Return an optional interval label, or '' when unspecified / placeholder."""
+    text = str(raw or "").strip()
+    if not text or text in {"—", "-", "–", "Type…", "Unspecified"}:
+        return ""
+    return text
+
+
+def format_ecg_cursor_dt_ms(dt_ms: float, interval_type: object = "") -> str:
+    """Format cursor Δt for status/annotation/report captions.
+
+    Unspecified labels are omitted so a default combo value does not look like
+    a deliberate interval classification (e.g. avoid bare ``(R-R)``).
+    """
+    label = normalize_ecg_cursor_interval_label(interval_type)
+    base = f"Δt={float(dt_ms):.1f} ms"
+    if not label:
+        return base
+    return f"{base} · {label}"
 
 
 def format_ecg_sensor_display_name(
@@ -395,6 +417,78 @@ def _add_image_with_caption(
     image_para.paragraph_format.keep_together = keep_block
     image_para.add_run().add_picture(str(image_path), width=Inches(width_inches))
     doc.add_paragraph("")
+
+
+def _normalize_ecg_cursor_captures(
+    raw: object,
+    *,
+    session_dir: Path,
+    max_count: int = 5,
+) -> list[dict[str, Any]]:
+    """Validate cursor-capture entries and resolve image paths that exist."""
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        image_raw = str(item.get("image") or "").strip()
+        if not image_raw:
+            continue
+        image_path = Path(image_raw)
+        if not image_path.is_absolute():
+            image_path = session_dir / image_path
+        if not image_path.is_file():
+            continue
+        try:
+            dt_ms = float(item.get("dt_ms"))
+        except (TypeError, ValueError):
+            continue
+        time_label = str(item.get("time") or "").strip() or "--"
+        interval_type = normalize_ecg_cursor_interval_label(item.get("interval_type"))
+        out.append(
+            {
+                "time": time_label,
+                "dt_ms": dt_ms,
+                "interval_type": interval_type,
+                "image_path": image_path,
+            }
+        )
+        if len(out) >= max(1, int(max_count)):
+            break
+    return out
+
+
+def _add_ecg_cursor_captures_section(
+    doc: Document,
+    data: dict[str, Any],
+    session_dir: Path,
+) -> None:
+    cap_limit = max(1, int(ECG_CURSOR_CAPTURE_REPORT_CAP))
+    captures = _normalize_ecg_cursor_captures(
+        data.get("ecg_cursor_captures"),
+        session_dir=session_dir,
+        max_count=cap_limit,
+    )
+    if not captures:
+        return
+    _add_heading(doc, "ECG Cursor Captures")
+    note = doc.add_paragraph(
+        "Interval snapshots logged with ECG Log Δt during the session "
+        f"(up to {cap_limit}). Research / educational context only — not diagnostic."
+    )
+    for run in note.runs:
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
+    for cap in captures:
+        caption = f"{cap['time']} — {format_ecg_cursor_dt_ms(cap['dt_ms'], cap['interval_type'])}"
+        _add_image_with_caption(
+            doc,
+            caption,
+            cap["image_path"],
+            width_inches=6.2,
+            keep_block=True,
+        )
 
 
 def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Path]:
@@ -855,6 +949,7 @@ def generate_session_report(path: str, data: dict) -> None:
         session_start (datetime), session_end (datetime),
         csv_path,
         annotations  -- list of (timestamp_str, text)
+        ecg_cursor_captures -- optional list of dicts with time/dt_ms/interval_type/image
         hr_values, rmssd_values, stress_ratio_values, snr_values  -- lists of floats for stats
         hr_time_seconds, rmssd_time_seconds, hrv_time_seconds, stress_ratio_time_seconds -- timeline arrays
         notes  -- str from user
@@ -1131,6 +1226,9 @@ def generate_session_report(path: str, data: dict) -> None:
             table.rows[r].cells[0].width = ann_time_w
             table.rows[r].cells[1].width = ann_text_w
         doc.add_paragraph("")
+
+    # Section 6b: ECG cursor captures (Log Δt snippets)
+    _add_ecg_cursor_captures_section(doc, data, output.parent)
 
     # Section 7: Annotation Associations (Exploratory)
     associations = data.get("annotation_associations") or []

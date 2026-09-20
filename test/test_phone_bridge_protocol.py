@@ -46,6 +46,7 @@ class FeatherProfileStatusMessageTests(unittest.TestCase):
         self.assertTrue(is_feather_profile_status_message("Feather profile confirm: Payton?"))
         self.assertTrue(is_feather_profile_status_message("Feather profile switched: Payton"))
         self.assertTrue(is_feather_profile_status_message("Feather profile kept: Patient 2"))
+        self.assertTrue(is_feather_profile_status_message("Feather profile already: Payton"))
         self.assertTrue(is_feather_profile_status_message("No Feather profile for Sandy"))
 
     def test_rejects_unrelated_status(self):
@@ -63,6 +64,12 @@ class FeatherProfileStatusMessageTests(unittest.TestCase):
         self.assertIn("Switch User", text)
         self.assertIn("select/create/rename", text.casefold())
         self.assertNotIn("No Feather profile", text)
+
+    def test_already_rewritten_to_detected(self):
+        self.assertEqual(
+            format_feather_profile_status_message("Feather profile already: Payton"),
+            "Detected Feather profile: Payton",
+        )
 
     def test_other_feather_lines_unchanged(self):
         msg = "Feather profile switched: Payton"

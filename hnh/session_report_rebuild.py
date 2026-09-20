@@ -232,6 +232,11 @@ def build_report_data_from_session_dir(
         "last_hr": last_hr,
         "last_rmssd": last_rmssd,
         "annotations": list(series.get("annotations") or []),
+        "ecg_cursor_captures": (
+            list(manifest.get("ecg_cursor_captures") or [])
+            if isinstance(manifest, dict)
+            else []
+        ),
         "hr_values": hr_values,
         "hr_time_seconds": list(series.get("hr_time_seconds") or []),
         "rmssd_values": rmssd_values,

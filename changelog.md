@@ -1,6 +1,7 @@
 # Changelog
 
 ### Unreleased
++ enhancement: ECG Log Δt saves capped plot snippets (`ecg_cursor_capture_*.png`, newest 5) into the session folder/manifest and embeds them in the Word report **ECG Cursor Captures** section.
 + enhancement: Toolbar end-state `More ▾` + Settings gear (⚙); About moved under Help; Settings removed from More (Ctrl+, unchanged).
 + enhancement: ECG/QTc Relock stays visible while frozen with dynamic tooltips (locked / manual / resume+relock).
 + docs: Help-facing User Guide and Troubleshooting copy no longer mentions Bluetooth/BLE; connection guidance is Phone Bridge / Wi‑Fi only.

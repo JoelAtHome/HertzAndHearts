@@ -78,10 +78,16 @@ def format_feather_profile_status_message(message: str) -> str:
     text = str(message or "").strip()
     if not text:
         return text
-    prefix = "no feather profile for "
     folded = text.casefold()
-    if folded.startswith(prefix):
-        name = text[len(prefix) :].strip() or "this user"
+    already_prefix = "feather profile already:"
+    if folded.startswith(already_prefix):
+        name = text[len(already_prefix) :].strip()
+        if name:
+            return f"Detected Feather profile: {name}"
+        return "Detected Feather profile"
+    no_match_prefix = "no feather profile for "
+    if folded.startswith(no_match_prefix):
+        name = text[len(no_match_prefix) :].strip() or "this user"
         return (
             f"Phone Feather profile for {name} is nonexistent/deselected. "
             "Streaming uses phone’s current Feather "
