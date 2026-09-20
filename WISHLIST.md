@@ -82,8 +82,8 @@ Raw ideas go here first.
 - Proposed approach: Mirror ECG tooltip behavior in QTc window with dynamic text updates tied to freeze/manual/relock transitions.
 - Effort: S
 - Impact: Med
-- Status: idea
-- Notes: Include explicit wording that relock also resumes streaming when frozen, matching actual button behavior.
+- Status: done
+- Notes: ECG + QTc Relock stay visible while frozen; tooltip states locked / manual / “Resume streaming and relock…”. Relock while frozen resumes stream and locks to main.
 
 ### ECG capture snapshots in report
 - Problem: Cursor capture annotations are text-only, so measured intervals lose visual context in exported reports.
@@ -91,15 +91,15 @@ Raw ideas go here first.
 - Effort: M
 - Impact: High
 - Status: idea
-- Notes: Cap included snapshots per report (e.g., 3-5) to control document size and keep layout readable.
+- Notes: **Partial today:** `Capture Image` / session-folder `ecg_snapshot_*.png` exists, and Log Δt writes text annotations into the report — but cursor Log Δt does **not** auto-attach a snippet, and reports do not embed those PNGs. Remaining work: on Log Δt (or report build), attach capped snippets (3–5) with timestamp/Δt into a report section.
 
 ### [UX] Zoom/pan controls for two main live plots (HR + RMSSD/SDNN)
 - Problem: During live monitoring, users cannot inspect recent details on the two main charts because view ranges are auto-driven and there is no direct zoom/pan interaction.
 - Proposed approach: Add mouse-wheel zoom and drag pan to both main live plots with an explicit viewport mode model (`AUTO_FOLLOW` vs `MANUAL_VIEW`) and a `Relock/Reset View` control to return to auto-follow.
 - Effort: M
 - Impact: Med
-- Status: idea
-- Notes: Medium priority. Main risk is regression from auto-range logic fighting manual viewport changes, especially around `Freeze Two Main Plots`, `Freeze All`, baseline reset, reconnect, and long-session pruning. Keep implementation event-driven/throttled to avoid redraw churn. Acceptance checks: (1) no jitter/snap-back while manually zoomed, (2) relock restores current auto behavior, (3) no measurable UI slowdown in long sessions, (4) no behavior change when users never interact with zoom/pan.
+- Status: done
+- Notes: Shipped as freeze-gated interaction: Freeze Two Main Plots enables pan/zoom (+/−/Reset); live mode stays auto-follow. Matches the practical workflow without fighting live auto-range. Reopen only if testers need live manual view without freezing.
 
 Help content template (per screen):
 - Title: `<Screen Name> — Quick Guide` (exception: main window = **Quick Start Guide**)

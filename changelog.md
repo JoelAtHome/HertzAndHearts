@@ -1,6 +1,8 @@
 # Changelog
 
 ### Unreleased
++ enhancement: Toolbar end-state `More ▾` + Settings gear (⚙); About moved under Help; Settings removed from More (Ctrl+, unchanged).
++ enhancement: ECG/QTc Relock stays visible while frozen with dynamic tooltips (locked / manual / resume+relock).
 + docs: Help-facing User Guide and Troubleshooting copy no longer mentions Bluetooth/BLE; connection guidance is Phone Bridge / Wi‑Fi only.
 + enhancement: Contextual Help — typed topic registry (`hnh/help_content.py`), F1 on main/ECG/QTc/Poincaré/PSD/Trends/History/Settings, More → Help → User Guide + Quick Start Guide + Troubleshooting, ECG `i` / Waveform Primer, ECG primer markdown; QTc/Poincaré/PSD info dialogs share the same topics.
 + enhancement: Session reports (docx + one-page PDF) include **ECG Sensor** (typically `Feather ECG-Box` or `Polar H10`), taken from phone-bridge `source_device` / session manifest.

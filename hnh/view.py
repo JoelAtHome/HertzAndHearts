@@ -4727,8 +4727,10 @@ class EcgWindow(QMainWindow):
         # Manual mode mirrors Poincare-style drag+wheel on X.
         manual_mode = not self._follow_main_xrange
         self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
-        # Avoid redundant controls while frozen: Resume is the primary action.
-        self._relock_button.setVisible(not self._frozen)
+        # Keep Relock visible while frozen: it resumes streaming and relocks to main.
+        self._relock_button.setVisible(True)
+        if self._frozen:
+            self._relock_button.setEnabled(True)
 
     def _render_snapshot_for_frozen_view(self):
         """Ensure buffered trace is visible when freezing before next timer redraw."""
@@ -4760,7 +4762,9 @@ class EcgWindow(QMainWindow):
 
     def _refresh_relock_tooltip(self):
         if self._frozen:
-            self._relock_button.setToolTip("Relock is available while streaming/manual view.")
+            self._relock_button.setToolTip(
+                "Resume streaming and relock this chart to the main plot time range."
+            )
         elif self._follow_main_xrange:
             self._relock_button.setToolTip("Chart is already locked to the main plot time range.")
         else:
@@ -5844,11 +5848,16 @@ class QtcWindow(QMainWindow):
     def _apply_interaction_mode(self):
         manual_mode = not self._follow_main_xrange
         self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
-        self._relock_button.setVisible(not self._frozen)
+        # Keep Relock visible while frozen: it resumes streaming and relocks to main.
+        self._relock_button.setVisible(True)
+        if self._frozen:
+            self._relock_button.setEnabled(True)
 
     def _refresh_relock_tooltip(self):
         if self._frozen:
-            self._relock_button.setToolTip("Relock is available while streaming/manual view.")
+            self._relock_button.setToolTip(
+                "Resume streaming and relock this chart to the main plot time range."
+            )
         elif self._follow_main_xrange:
             self._relock_button.setToolTip("Chart is already locked to the main plot time range.")
         else:
@@ -7045,12 +7054,12 @@ class View(QMainWindow):
         self.logout_button.setToolTip("Switch user profile (same popup as startup).")
         self.logout_button.clicked.connect(self._on_logout_clicked)
 
-        # More menu — History, Trends, Profiles, Session Admin, Switch User, Settings, Import, Help, About
+        # More menu — History, Trends, Profiles, Session Admin, Switch User, Import, Help
         self._more_button = QToolButton()
         self._more_button.setText("More")
         self._more_button.setToolTip(
-            "Additional actions: History, Trends, Profiles, Session Admin, Settings, "
-            "Support Development, Import, Help, About."
+            "Additional actions: History, Trends, Profiles, Session Admin, "
+            "Support Development, Import, Help."
         )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
@@ -7067,7 +7076,6 @@ class View(QMainWindow):
             "Session Integrity Audit…", self._open_session_integrity_utility
         )
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
-        self._more_menu.addAction("Settings…", self._open_settings)
         self._more_menu.addAction("Support Development…", self._open_support_options)
         self._more_menu.addSeparator()
         self._import_action = self._more_menu.addAction(
@@ -7089,11 +7097,20 @@ class View(QMainWindow):
         self._help_menu.addAction("Troubleshooting…", self._show_troubleshooting)
         self._help_menu.addSeparator()
         self._help_menu.addAction("Check for Updates…", self._check_for_updates)
+        self._help_menu.addAction("About Hertz && Hearts…", self._show_about_dialog)
         self._more_menu.addMenu(self._help_menu)
-        self._more_menu.addAction("About Hertz && Hearts…", self._show_about_dialog)
         self._more_button.setMenu(self._more_menu)
         self._refresh_more_menu_actions()
         install_f1_help(self, "main")
+
+        # Settings gear (right of More); Ctrl+, still opens Settings
+        self._settings_button = QToolButton()
+        self._settings_button.setText("\u2699")
+        self._settings_button.setToolTip("Settings (Ctrl+,)")
+        self._settings_button.setAutoRaise(True)
+        self._settings_button.clicked.connect(self._open_settings)
+        self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
+        self._settings_shortcut.activated.connect(self._open_settings)
 
         # History, Trends, Profiles moved to More menu
 
@@ -7119,10 +7136,6 @@ class View(QMainWindow):
         if self.annotation.lineEdit() is not None:
             self.annotation.lineEdit().installEventFilter(self)
         self._apply_freeze_button_states()
-
-        # Settings moved to More menu; keep Ctrl+, shortcut
-        self._settings_shortcut = QShortcut(QKeySequence("Ctrl+,"), self)
-        self._settings_shortcut.activated.connect(self._open_settings)
 
         # Tooltips for buttons and key data fields.
         self.scan_button.setToolTip(
@@ -7324,6 +7337,7 @@ class View(QMainWindow):
             self._disclaimer_link,
             self._debug_mode_badge,
             self._more_button,
+            self._settings_button,
         ):
             _w.installEventFilter(self)
         self._refresh_debug_mode_ui()
@@ -7478,6 +7492,9 @@ class View(QMainWindow):
         self.restart_no_save_button.setMaximumWidth(130)
         self.restart_no_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._more_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self._settings_button.setStyleSheet(
+            "QToolButton { font-size: 14px; padding: 2px 8px; }"
+        )
         self._disclaimer_link.setStyleSheet(
             "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
         )
@@ -7510,6 +7527,7 @@ class View(QMainWindow):
         self._morning_baseline_cb.stateChanged.connect(self._on_morning_baseline_toggled)
         toolbar_top.addWidget(self._morning_baseline_cb)
         toolbar_top.addWidget(self._more_button)
+        toolbar_top.addWidget(self._settings_button)
 
         _sep1 = QFrame()
         _sep1.setFixedSize(1, 18)
@@ -7933,7 +7951,7 @@ class View(QMainWindow):
             "• You have seen BLE disconnects or \"No data received\".\n\n"
             "When to try PMD ON (experimental):\n"
             "• You need full ECG/QTc PMD behavior and your adapter is stable.\n\n"
-            "Path: More → Settings… → Show Advanced → ECG Monitor → "
+            "Path: Settings (gear) → Show Advanced → ECG Monitor → "
             "Linux PMD/ECG Path (Experimental)."
         )
         settings_btn = msg.addButton("Open Settings", QMessageBox.ActionRole)
