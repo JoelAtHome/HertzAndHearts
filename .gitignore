@@ -11,7 +11,6 @@ installer_output/
 *.profile
 .DS_Store
 uv.lock
-Sessions/
 *.db
 *.log
 .app-startup.lock
@@ -19,3 +18,18 @@ Sessions/
 # Local sample/test datasets
 /Import Samples/
 /test_data/
+
+# Runtime session data (any profile / backup / custom save path)
+Sessions/
+Session Backups/
+**/session_manifest.json
+**/session.csv
+**/session.edf
+**/session_report.docx
+**/session_report_draft.docx
+**/session_share.pdf
+**/session_share_draft.pdf
+**/ecg_cursor_capture_*.png
+**/ecg_snapshot_*.png
+**/qtc_snapshot_*.png
+**/session_visual_*.png
