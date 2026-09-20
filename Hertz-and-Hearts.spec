@@ -145,6 +145,8 @@ a = Analysis(
         # dev placeholder version, and the update check then treats every
         # published release — including the installed one — as an upgrade.
         ("pyproject.toml", "."),
+        # In-app Help → User Guide (rendered from markdown).
+        ("docs/USER_GUIDE.md", "docs"),
     ] + _app_metadata,
     hiddenimports=_hiddenimports,
     hookspath=[],

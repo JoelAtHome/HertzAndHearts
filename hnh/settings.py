@@ -28,6 +28,7 @@ from hnh.data_paths import (
     legacy_data_root,
     recommended_data_root,
 )
+from hnh.help_content import install_f1_help
 
 SETTINGS_FILE = Path.home() / ".hnh_settings.json"
 TIMELINE_PREF_MAIN_SPAN = "main_timeline_span"
@@ -1051,6 +1052,7 @@ class SettingsDialog(QDialog):
         btn_row.addWidget(cancel_btn)
 
         root.addLayout(btn_row)
+        install_f1_help(self, "settings")
 
     # --- factory-default highlighting ------------------------------------
 

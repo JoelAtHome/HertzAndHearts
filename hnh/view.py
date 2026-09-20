@@ -54,7 +54,7 @@ from hnh.model import Model
 from hnh.config import (
     PLOT_WARMUP_SECONDS, MAIN_PLOT_START_SECONDS, MAIN_PLOT_SYNC_MIN_IBIS,
     ECG_SAMPLE_RATE,
-    ECG_QRS_UNCERTAINTY_PCT, ECG_QTc_UNCERTAINTY_PCT,
+    ECG_QRS_UNCERTAINTY_PCT,
     RMSSD_NOISY_MS, RMSSD_POOR_MS, SIGNAL_DEGRADE_POPUP_COUNT,
     SIGNAL_POPUP_AUTO_DISMISS_MS,
     PSD_VAGAL_BAND,
@@ -68,6 +68,7 @@ from hnh.settings import (
     profile_scoped_keys,
     setting_scope,
 )
+from hnh.help_content import install_f1_help, show_help, show_user_guide
 from hnh.report import (
     format_datetime_for_display,
     format_ecg_sensor_display_name,
@@ -1182,6 +1183,7 @@ class SessionHistoryDialog(QDialog):
         self.populate(profile_name=profile_name, sessions=sessions)
         self._populate_replay_session_combo()
         self._sync_history_buttons()
+        install_f1_help(self, "history")
 
     @staticmethod
     def _format_started(value: str | None) -> str:
@@ -2153,6 +2155,7 @@ class TrendsWindow(QMainWindow):
         self._refresh_plot()
         self._refresh_compare_session_list()
         self._refresh_tag_insights()
+        install_f1_help(self, "trends")
 
     def _refresh_plot(self):
         profile = self._profile_combo.currentText().strip() or self._active_profile
@@ -4532,6 +4535,12 @@ class EcgWindow(QMainWindow):
         controls_row.addWidget(self._relock_button)
         controls_row.addWidget(self._freeze_button)
         controls_row.addWidget(self._pin_button)
+        self._info_button = QPushButton("i")
+        self._info_button.setFixedWidth(22)
+        self._info_button.setToolTip("ECG Quick Guide (F1)")
+        self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
+        self._info_button.clicked.connect(lambda: show_help(self, "ecg"))
+        controls_row.addWidget(self._info_button)
 
         self._statusbar = QStatusBar()
         self.setStatusBar(self._statusbar)
@@ -4554,6 +4563,7 @@ class EcgWindow(QMainWindow):
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
         self._refresh_timer.timeout.connect(self._redraw)
         self._update_zoom_button_states()
+        install_f1_help(self, "ecg")
 
     def start(self):
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
@@ -5527,9 +5537,9 @@ class QtcWindow(QMainWindow):
         self._pin_button.toggled.connect(self._set_pinned)
         self._info_button = QPushButton("i")
         self._info_button.setFixedWidth(22)
-        self._info_button.setToolTip("How to interpret QTc trend and uncertainty.")
+        self._info_button.setToolTip("QTc Quick Guide (F1)")
         self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
-        self._info_button.clicked.connect(self._show_info)
+        self._info_button.clicked.connect(lambda: show_help(self, "qtc"))
         self._capture_image_button = QPushButton("Capture Image")
         self._capture_image_button.setFixedWidth(100)
         self._capture_image_button.setToolTip("Save a snapshot of this QTc plot to the session folder.")
@@ -5573,6 +5583,7 @@ class QtcWindow(QMainWindow):
         view_box = self._plot_widget.getViewBox()
         if hasattr(view_box, "sigRangeChangedManually"):
             view_box.sigRangeChangedManually.connect(self._on_manual_range_changed)
+        install_f1_help(self, "qtc")
 
     def _capture_plot_image(self):
         """Grab QTc plot widget and emit for saving to session folder."""
@@ -5714,29 +5725,6 @@ class QtcWindow(QMainWindow):
                 return
         self._plot_widget.setYRange(float(lo), float(hi), padding=0)
         self._last_y_range = (float(lo), float(hi))
-
-    def _show_info(self):
-        msg = QMessageBox(self)
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle("QTc Trend Guide")
-        msg.setText(
-            "<b>How to read this chart</b><br><br>"
-            "• <b>Rolling median QTc</b>: smoothed central QTc estimate.<br>"
-            "• <b>Uncertainty band (IQR)</b>: wider band means less confidence.<br>"
-            "• <b>Dashed segments</b>: lower signal quality periods.<br>"
-            "• <b>Shaded area above 470 ms</b>: elevated reference zone.<br><br>"
-            f"<b>Measurement uncertainty</b>: QTc from single-lead ECG may vary by approximately ±{ECG_QTc_UNCERTAINTY_PCT}% from reference."
-        )
-        msg.setInformativeText("Trend context only; requires clinical review.")
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.setDefaultButton(QMessageBox.Ok)
-        msg.setMinimumWidth(520)
-        flags = msg.windowFlags()
-        flags &= ~Qt.WindowMinimizeButtonHint
-        flags &= ~Qt.WindowMaximizeButtonHint
-        flags |= Qt.CustomizeWindowHint | Qt.WindowTitleHint | Qt.WindowCloseButtonHint
-        msg.setWindowFlags(flags)
-        msg.open()
 
     def clear(self):
         self._times.clear()
@@ -6127,7 +6115,7 @@ class PoincareWindow(QMainWindow):
         header.addStretch()
         self._info_button = QPushButton("i")
         self._info_button.setFixedWidth(22)
-        self._info_button.setToolTip("What is a Poincare plot?")
+        self._info_button.setToolTip("Poincare Quick Guide (F1)")
         self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
         self._info_button.clicked.connect(self.info_requested.emit)
         header.addWidget(self._info_button)
@@ -6182,6 +6170,7 @@ class PoincareWindow(QMainWindow):
         self.statusBar().showMessage("Waiting for beat data...")
         self._pinned = False
         self._update_pin_button_visual()
+        install_f1_help(self, "poincare")
 
     def _update_pin_button_visual(self):
         self._pin_button.setChecked(self._pinned)
@@ -6437,7 +6426,7 @@ class PSDWindow(QMainWindow):
         header.addStretch()
         self._info_button = QPushButton("i")
         self._info_button.setFixedWidth(22)
-        self._info_button.setToolTip("What is Vagal Resonance and this PSD plot?")
+        self._info_button.setToolTip("PSD Quick Guide (F1)")
         self._info_button.setStyleSheet("font-size: 11px; padding: 2px 4px;")
         self._info_button.clicked.connect(self.info_requested.emit)
         header.addWidget(self._info_button)
@@ -6500,6 +6489,7 @@ class PSDWindow(QMainWindow):
         self.statusBar().showMessage("Waiting for R-R data...")
         self._pinned = False
         self._update_pin_button_visual()
+        install_f1_help(self, "psd")
 
     def _update_pin_button_visual(self):
         self._pin_button.setChecked(self._pinned)
@@ -7089,11 +7079,15 @@ class View(QMainWindow):
         self._more_menu.aboutToShow.connect(self._refresh_more_menu_actions)
         self._more_menu.addSeparator()
         self._help_menu = QMenu("Help", self._more_menu)
+        self._help_menu.addAction("Quick Start Guide…\tF1", lambda: show_help(self, "main"))
+        self._help_menu.addAction("User Guide…", self._show_user_guide)
+        self._help_menu.addSeparator()
         self._help_menu.addAction("Check for Updates…", self._check_for_updates)
         self._more_menu.addMenu(self._help_menu)
         self._more_menu.addAction("About Hertz && Hearts…", self._show_about_dialog)
         self._more_button.setMenu(self._more_menu)
         self._refresh_more_menu_actions()
+        install_f1_help(self, "main")
 
         # History, Trends, Profiles moved to More menu
 
@@ -9557,55 +9551,14 @@ class View(QMainWindow):
 
     def show_poincare_info(self):
         parent = self.poincare_window if self.poincare_window.isVisible() else self
-        msg = QMessageBox(parent)
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle("Poincare Plot Help")
-        msg.setWindowModality(Qt.WindowModal)
-        msg.setText(
-            "<b>What this shows</b><br>"
-            "Each dot is one heartbeat interval compared with the next:<br>"
-            "RR(n) on x-axis and RR(n+1) on y-axis.<br><br>"
-            "<b>How to read it quickly</b><br>"
-            "- Tight cluster: usually steadier rhythm and cleaner signal (often good).<br>"
-            "- Wider cloud: more variability; can be physiologic, but can also reflect noise/artifact.<br><br>"
-            "<b>Metrics</b><br>"
-            "- SD1: short-term variability.<br>"
-            "- SD2: longer-term variability.<br>"
-            "- SD1/SD2: balance of short vs longer-term variability.<br><br>"
-            "SD = standard deviation.<br><br>"
-            "<b>Important</b><br>"
-            "Motion artifact, poor strap contact, or dropouts can distort the plot."
-        )
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.setDefaultButton(QMessageBox.Ok)
-        msg.exec()
+        show_help(parent, "poincare")
 
     def show_psd_info(self):
         parent = self.psd_window if self.psd_window.isVisible() else self
-        msg = QMessageBox(parent)
-        msg.setIcon(QMessageBox.Information)
-        msg.setWindowTitle("PSD & Vagal Resonance Help")
-        msg.setWindowModality(Qt.WindowModal)
-        msg.setText(
-            "<b>What this shows</b><br>"
-            "Power Spectral Density (PSD) of heart rate variability from the "
-            "interpolated R-R interval stream. FFT-based (Welch method).<br><br>"
-            "<b>Vagal Resonance (0.1 Hz)</b><br>"
-            "The shaded band highlights 0.07–0.13 Hz (~6 breaths/min). A narrow, "
-            "high-amplitude peak here indicates optimal vagal tone and baroreflex "
-            "resonance—often associated with pelvic floor relaxation and coherent "
-            "breathing.<br><br>"
-            "<b>When will changes appear?</b><br>"
-            "The plot uses roughly the last minute of heartbeats. Expect 1–2 minutes "
-            "of steady breathing at a new rate before the peak shifts or stabilizes. "
-            "Contributors: breathing consistency, stillness (reduces motion artifact), "
-            "electrode contact, and physiological state (stress, relaxation, caffeine).<br><br>"
-            "<b>Interaction</b><br>"
-            "Drag to pan, mouse wheel or +/- buttons to zoom. Reset restores 0–0.5 Hz view."
-        )
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.setDefaultButton(QMessageBox.Ok)
-        msg.exec()
+        show_help(parent, "psd")
+
+    def _show_user_guide(self) -> None:
+        show_user_guide(self)
 
     def _update_poincare(self, data: NamedSignal):
         if data.name != "ibis":
