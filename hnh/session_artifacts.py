@@ -124,6 +124,7 @@ class SessionBundle:
     report_draft_path: Path
     manifest_path: Path
     edf_path: Path
+    ecg_stream_path: Path
     started_at: datetime
 
 
@@ -153,6 +154,7 @@ def create_session_bundle(
         report_draft_path=session_dir / "session_report_draft.docx",
         manifest_path=session_dir / "session_manifest.json",
         edf_path=session_dir / "session.edf",
+        ecg_stream_path=session_dir / "session_ecg.f32",
         started_at=now,
     )
 

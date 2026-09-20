@@ -51,7 +51,7 @@ This is **wellness / research context only**, not medical advice.
 
 ## 4) Access History and Replay
 
-1. Open `More -> History / Session Replay`.
+1. Open `More -> Session History…`.
 2. Select a session to review.
 3. Use Replay controls to inspect timeline.
 4. Use `Generate report` for past sessions as needed.

@@ -93,6 +93,7 @@ from hnh.session_artifacts import (
 )
 from hnh.session_artifacts import _slugify as _slugify_profile
 from hnh.edf_export import export_session_edf_plus
+from hnh.ecg_stream import EcgSampleStream
 from hnh.profile_store import ProfileStore
 from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correlations
 from hnh.perf_probe import get_perf_probe
@@ -489,7 +490,7 @@ class StatusBanner(QFrame):
 
 
 class DisclaimerViewDialog(QDialog):
-    """Scrollable readable disclaimer (Legal Disclaimer link / re-read)."""
+    """Scrollable readable disclaimer (More → Help → Legal Disclaimer)."""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1009,7 +1010,8 @@ class SessionHistoryDialog(QDialog):
         self._show_hidden = False
 
         root = QVBoxLayout(self)
-        tabs = QTabWidget()
+        self._tabs = QTabWidget()
+        tabs = self._tabs
 
         # ---- Tab 1: History ----
         tab_history = QWidget()
@@ -1028,12 +1030,24 @@ class SessionHistoryDialog(QDialog):
         self._unhide_btn = QPushButton("Unhide selected")
         self._unhide_btn.clicked.connect(self._on_unhide_selected)
         history_actions.addWidget(self._unhide_btn)
+        self._delete_btn = QPushButton("Delete selected…")
+        self._delete_btn.setToolTip(
+            "Permanently delete the selected session from history and remove its folder on disk."
+        )
+        self._delete_btn.clicked.connect(self._on_delete_selected)
+        history_actions.addWidget(self._delete_btn)
         self._purge_abandoned_btn = QPushButton("Purge abandoned…")
         self._purge_abandoned_btn.clicked.connect(self._on_purge_abandoned)
         history_actions.addWidget(self._purge_abandoned_btn)
         self._generate_report_btn = QPushButton("Generate report")
         self._generate_report_btn.clicked.connect(self._on_generate_report_selected)
         history_actions.addWidget(self._generate_report_btn)
+        self._replay_selected_btn = QPushButton("Replay selected")
+        self._replay_selected_btn.setToolTip(
+            "Open the Replay tab with this session selected, loaded, and cued at the start."
+        )
+        self._replay_selected_btn.clicked.connect(self._on_replay_selected)
+        history_actions.addWidget(self._replay_selected_btn)
         self._copy_folder_btn = QPushButton("Copy folder path")
         self._copy_folder_btn.clicked.connect(self._on_copy_folder_path)
         history_actions.addWidget(self._copy_folder_btn)
@@ -1100,13 +1114,21 @@ class SessionHistoryDialog(QDialog):
         self._replay_speed_combo.setCurrentIndex(2)
         replay_controls.addWidget(self._replay_speed_combo)
 
+        self._replay_fit_time_btn = QPushButton("Fit time")
+        self._replay_fit_time_btn.setEnabled(False)
+        self._replay_fit_time_btn.setToolTip(
+            "Reset the shared time axis to show the full session."
+        )
+        self._replay_fit_time_btn.clicked.connect(self._replay_fit_time_axis)
+        replay_controls.addWidget(self._replay_fit_time_btn)
+
         replay_controls.addStretch()
         tab_replay_layout.addLayout(replay_controls)
 
         hint = QLabel(
-            "Mouse wheel zooms; drag vertically to pan each plot’s amplitude. "
-            "Time axis is shared across plots (no horizontal drag). "
-            "Use the timeline scrubber or Play to move through time."
+            "Mouse wheel zooms time and amplitude (plots stay time-linked). "
+            "Drag to pan. Use Fit time to show the full session again. "
+            "Timeline scrubber or Play moves the playhead."
         )
         hint.setStyleSheet("font-size: 11px; color: #666; font-style: italic;")
         hint.setWordWrap(True)
@@ -1125,14 +1147,14 @@ class SessionHistoryDialog(QDialog):
         self._replay_ecg_plot = self._replay_plot_stack.addPlot(row=2, col=0, title="ECG")
         self._replay_ecg_plot.setLabel("bottom", "Time (s)")
         self._replay_ecg_plot.showGrid(x=True, y=True, alpha=0.3)
-        # One shared time axis: wheel-zoom and range stay aligned; no horizontal drag per plot.
+        # Shared time axis: wheel-zoom / drag-pan stay aligned across plots.
         self._replay_rmssd_plot.setXLink(self._replay_hr_plot)
         self._replay_ecg_plot.setXLink(self._replay_hr_plot)
         for _rp in (self._replay_hr_plot, self._replay_rmssd_plot, self._replay_ecg_plot):
-            _rp.setMouseEnabled(x=False, y=True)
+            _rp.setMouseEnabled(x=True, y=True)
             _vb = _rp.getViewBox()
             if _vb is not None:
-                _vb.setMouseEnabled(x=False, y=True)
+                _vb.setMouseEnabled(x=True, y=True)
         tab_replay_layout.addWidget(self._replay_plot_stack, stretch=1)
 
         self._replay_readout_label = QLabel("")
@@ -1164,6 +1186,7 @@ class SessionHistoryDialog(QDialog):
         tab_replay_layout.addLayout(ann_layout)
 
         tabs.addTab(tab_replay, "Replay")
+        tabs.currentChanged.connect(self._on_history_tab_changed)
 
         root.addWidget(tabs, stretch=1)
 
@@ -1191,7 +1214,26 @@ class SessionHistoryDialog(QDialog):
         self.populate(profile_name=profile_name, sessions=sessions)
         self._populate_replay_session_combo()
         self._sync_history_buttons()
+        self._refresh_window_title_for_tab()
         install_f1_help(self, "history")
+
+    def show_tab(self, tab: str = "history") -> None:
+        """Select History or Replay tab (`history` / `replay`)."""
+        key = str(tab or "history").strip().casefold()
+        index = 1 if key in {"replay", "session replay"} else 0
+        tabs = getattr(self, "_tabs", None)
+        if tabs is not None:
+            tabs.setCurrentIndex(index)
+        self._refresh_window_title_for_tab()
+
+    def _on_history_tab_changed(self, _index: int) -> None:
+        self._refresh_window_title_for_tab()
+
+    def _refresh_window_title_for_tab(self) -> None:
+        tabs = getattr(self, "_tabs", None)
+        on_replay = tabs is not None and tabs.currentIndex() == 1
+        label = "Session Replay" if on_replay else "Session History"
+        self.setWindowTitle(f"{label} — {self._profile_name}")
 
     @staticmethod
     def _format_started(value: str | None) -> str:
@@ -1224,7 +1266,8 @@ class SessionHistoryDialog(QDialog):
             for s in self._sessions
             if str(s.get("session_id") or "").strip()
         }
-        self.setWindowTitle(f"Session History — {profile_name}")
+        self._profile_name = str(profile_name or "").strip() or self._profile_name
+        self._refresh_window_title_for_tab()
         hidden_count = sum(1 for s in self._all_sessions if str(s.get("is_hidden") or "0") == "1")
         self._update_history_summary(hidden_count)
         self._table.setSortingEnabled(False)
@@ -1310,23 +1353,44 @@ class SessionHistoryDialog(QDialog):
             return None
         return self._sessions_by_id.get(sid)
 
+    def _active_recording_session_id(self) -> str | None:
+        parent = self.parent()
+        if parent is None:
+            return None
+        if getattr(parent, "_session_state", None) != "recording":
+            return None
+        bundle = getattr(parent, "_session_bundle", None)
+        if bundle is None:
+            return None
+        sid = str(getattr(bundle, "session_id", "") or "").strip()
+        return sid or None
+
     def _sync_history_buttons(self):
         selected = self._selected_session()
         if selected is None:
             self._hide_btn.setEnabled(False)
             self._unhide_btn.setEnabled(False)
+            self._delete_btn.setEnabled(False)
             self._generate_report_btn.setEnabled(False)
+            self._replay_selected_btn.setEnabled(False)
             self._copy_folder_btn.setEnabled(False)
             self._copy_csv_btn.setEnabled(False)
             return
         hidden = str(selected.get("is_hidden") or "0") == "1"
         session_dir = Path(str(selected.get("session_dir") or ""))
         has_csv = (session_dir / "session.csv").exists()
+        has_edf = (session_dir / "session.edf").exists()
         folder_path = str(selected.get("session_dir") or "").strip()
         csv_path = str(selected.get("csv_path") or "").strip()
+        session_id = str(selected.get("session_id") or "").strip()
+        active_sid = self._active_recording_session_id()
         self._hide_btn.setEnabled(not hidden)
         self._unhide_btn.setEnabled(hidden)
+        self._delete_btn.setEnabled(bool(session_id) and session_id != active_sid)
         self._generate_report_btn.setEnabled(session_dir.exists() and has_csv)
+        self._replay_selected_btn.setEnabled(
+            session_dir.exists() and (has_csv or has_edf)
+        )
         self._copy_folder_btn.setEnabled(bool(folder_path and folder_path != "--"))
         self._copy_csv_btn.setEnabled(bool(csv_path and csv_path != "--"))
 
@@ -1474,6 +1538,18 @@ class SessionHistoryDialog(QDialog):
         menu.addSeparator()
         open_folder_action = menu.addAction("Open folder")
         open_folder_action.setEnabled(folder_exists)
+        menu.addSeparator()
+        replay_action = menu.addAction("Replay selected")
+        has_replay_data = folder_exists and (
+            (Path(folder_text) / "session.csv").exists()
+            or (Path(folder_text) / "session.edf").exists()
+        )
+        replay_action.setEnabled(has_replay_data)
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete selected…")
+        session_id = str(selected.get("session_id") or "").strip()
+        active_sid = self._active_recording_session_id()
+        delete_action.setEnabled(bool(session_id) and session_id != active_sid)
 
         chosen = menu.exec(self._table.viewport().mapToGlobal(pos))
         if chosen == copy_folder_action:
@@ -1482,6 +1558,10 @@ class SessionHistoryDialog(QDialog):
             self._on_copy_csv_path()
         elif chosen == open_folder_action:
             self._open_selected_folder()
+        elif chosen == replay_action:
+            self._on_replay_selected()
+        elif chosen == delete_action:
+            self._on_delete_selected()
 
     def _reload_history(self):
         if self._profile_store is None:
@@ -1542,6 +1622,61 @@ class SessionHistoryDialog(QDialog):
 
     def _on_unhide_selected(self):
         self._set_selected_hidden(False)
+
+    def _on_delete_selected(self):
+        if self._profile_store is None:
+            return
+        selected = self._selected_session()
+        if selected is None:
+            return
+        session_id = str(selected.get("session_id") or "").strip()
+        if not session_id:
+            return
+        active_sid = self._active_recording_session_id()
+        if active_sid and session_id == active_sid:
+            _warning_ok(
+                self,
+                "Delete Session",
+                "Cannot delete the session that is currently recording.\n"
+                "Stop & Save or Restart without Save first.",
+            )
+            return
+        folder_text = str(selected.get("session_dir") or "").strip() or "(no folder path)"
+        started = self._format_started(selected.get("started_at"))
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Delete Session")
+        msg.setText(
+            "Permanently delete this session from history and disk?\n"
+            "This cannot be undone."
+        )
+        msg.setInformativeText(
+            f"Started: {started}\n"
+            f"Session ID: {session_id}\n"
+            f"Folder:\n{folder_text}"
+        )
+        delete_btn = msg.addButton("Delete", QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        _ensure_linux_window_decorations(msg)
+        msg.exec()
+        if msg.clickedButton() != delete_btn:
+            return
+        self.setEnabled(False)
+        self._set_history_status("Deleting session...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            result = self._profile_store.delete_sessions_and_folders([session_id])
+            self._reload_history()
+            removed = int(result.get("removed_rows") or 0)
+            if removed > 0:
+                self._set_history_status("Session deleted.", clear_after_ms=2200)
+            else:
+                self._set_history_status("Session was not found in history.", clear_after_ms=2200)
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
 
     def _on_show_hidden_toggled(self, checked: bool):
         selected = self._selected_session()
@@ -1648,6 +1783,79 @@ class SessionHistoryDialog(QDialog):
             ),
         )
 
+    def _on_replay_selected(self):
+        """Switch to Replay, select/load this session, cue at t=0 for Play."""
+        selected = self._selected_session()
+        if selected is None:
+            return
+        session_id = str(selected.get("session_id") or "").strip()
+        session_dir = Path(str(selected.get("session_dir") or "").strip())
+        if not session_id or not session_dir.exists():
+            _warning_ok(self, "Session Replay", "Selected session folder is unavailable.")
+            return
+        if not (session_dir / "session.csv").exists() and not (session_dir / "session.edf").exists():
+            _warning_ok(
+                self,
+                "Session Replay",
+                "Selected session has no session.csv or session.edf to replay.",
+            )
+            return
+
+        self._populate_replay_session_combo()
+        target_dir = str(session_dir)
+        match_idx = -1
+        for i in range(self._replay_session_combo.count()):
+            data = self._replay_session_combo.itemData(i)
+            if data is None:
+                continue
+            if str(data).strip() == target_dir:
+                match_idx = i
+                break
+            try:
+                if Path(str(data)).resolve() == session_dir.resolve():
+                    match_idx = i
+                    break
+            except OSError:
+                continue
+        if match_idx < 0:
+            # Session may be hidden from the filtered list; add a one-off entry.
+            started = self._format_started(selected.get("started_at"))
+            label = f"{started}  ({session_id})"
+            self._replay_session_combo.addItem(label, target_dir)
+            match_idx = self._replay_session_combo.count() - 1
+
+        self._replay_session_combo.setCurrentIndex(match_idx)
+        self.show_tab("replay")
+        self.setEnabled(False)
+        self._set_history_status("Loading session for replay...")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+        try:
+            self._replay_load_session()
+            duration = float((self._replay_data or {}).get("duration_seconds") or 0.0)
+            if duration > 0:
+                self._replay_play_btn.setEnabled(True)
+                self._replay_play_btn.setFocus(Qt.FocusReason.OtherFocusReason)
+                self._set_history_status(
+                    "Session loaded — press Play to start.",
+                    clear_after_ms=2500,
+                )
+            else:
+                self._set_history_status(
+                    "Session loaded, but no timeline data to play.",
+                    clear_after_ms=3000,
+                )
+        except Exception as exc:
+            self._set_history_status("Replay load failed.", clear_after_ms=3000)
+            _warning_ok(
+                self,
+                "Session Replay",
+                f"Could not load this session for replay.\n\n{exc}",
+            )
+        finally:
+            QApplication.restoreOverrideCursor()
+            self.setEnabled(True)
+
     def _on_replay_session_changed(self, _idx: int):
         """When session selection changes, enable Load if valid."""
         session_dir = self._replay_session_combo.currentData()
@@ -1737,10 +1945,27 @@ class SessionHistoryDialog(QDialog):
         self._replay_ann_combo.blockSignals(False)
 
         self._replay_play_btn.setEnabled(duration > 0)
+        self._replay_fit_time_btn.setEnabled(duration > 0)
         self._replay_playing = False
         self._replay_play_btn.setText("Play")
         self._replay_timer.stop()
+        self._replay_fit_time_axis()
         self._replay_update_playhead()
+
+    def _replay_fit_time_axis(self) -> None:
+        """Show the full session on the shared time axis."""
+        duration = float((self._replay_data or {}).get("duration_seconds") or 0.0)
+        x_max = max(duration, 1.0)
+        plot = getattr(self, "_replay_hr_plot", None)
+        if plot is None:
+            return
+        plot.setLimits(xMin=-0.05 * x_max, xMax=x_max * 1.05)
+        plot.setXRange(0.0, x_max, padding=0.02)
+        for other in (self._replay_rmssd_plot, self._replay_ecg_plot):
+            try:
+                other.setLimits(xMin=-0.05 * x_max, xMax=x_max * 1.05)
+            except Exception:
+                pass
 
     def _replay_toggle_play(self):
         """Play or pause replay."""
@@ -3200,27 +3425,55 @@ class DuplicateSessionIdLabel(QLabel):
 class SessionIntegrityDialog(QDialog):
     """Admin utility to audit and repair session index integrity."""
 
-    def __init__(self, store: ProfileStore, scan_roots: list[Path], parent=None):
+    def __init__(
+        self,
+        store: ProfileStore,
+        scan_root_entries: list[tuple[str, Path]],
+        parent=None,
+    ):
         super().__init__(parent)
         self._store = store
-        self._scan_roots = [Path(p) for p in scan_roots]
+        # (label, path, removable)
+        self._root_entries: list[tuple[str, Path, bool]] = [
+            (str(label), Path(path), False) for label, path in scan_root_entries
+        ]
         self._last_audit: dict | None = None
 
         self.setModal(True)
         self.setWindowTitle("Session History Integrity")
-        self.resize(920, 620)
+        self.resize(920, 640)
 
         root = QVBoxLayout(self)
         intro = QLabel(
-            "Audit DB session history vs session folders on disk, then apply targeted repairs."
+            "Audit DB session history vs session folders on disk, then apply targeted repairs.\n"
+            "Scan roots always include App Data Sessions plus each profile’s Session Save Path "
+            "(when set). Add any other folder tree that contains sessions (e.g. a copied Sessions folder)."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
 
-        roots_label = QLabel("\n".join([f"Scan root: {p}" for p in self._scan_roots]) or "Scan roots: (none)")
-        roots_label.setStyleSheet("font-size: 11px; color: #495057;")
-        roots_label.setWordWrap(True)
-        root.addWidget(roots_label)
+        roots_box = QGroupBox("Scan roots")
+        roots_lay = QVBoxLayout(roots_box)
+        self._roots_list = QListWidget()
+        self._roots_list.setMinimumHeight(110)
+        roots_lay.addWidget(self._roots_list)
+        roots_btns = QHBoxLayout()
+        self._add_root_btn = QPushButton("Add folder to scan…")
+        self._add_root_btn.setToolTip(
+            "Include another folder tree (for example a backup or project Sessions copy) "
+            "without changing Session Save Path."
+        )
+        self._add_root_btn.clicked.connect(self._add_scan_folder)
+        roots_btns.addWidget(self._add_root_btn)
+        self._remove_root_btn = QPushButton("Remove selected")
+        self._remove_root_btn.setToolTip("Remove an extra folder you added (built-in roots stay).")
+        self._remove_root_btn.clicked.connect(self._remove_selected_scan_folder)
+        roots_btns.addWidget(self._remove_root_btn)
+        roots_btns.addStretch()
+        roots_lay.addLayout(roots_btns)
+        root.addWidget(roots_box)
+        self._roots_list.currentItemChanged.connect(self._on_roots_selection_changed)
+        self._refresh_roots_list()
 
         opts = QHBoxLayout()
         self._remove_missing_db_cb = QCheckBox("Remove DB rows for sessions missing on disk")
@@ -3299,6 +3552,92 @@ class SessionIntegrityDialog(QDialog):
         buttons.addWidget(close_btn)
         root.addLayout(buttons)
 
+        self._update_apply_enabled()
+
+    def _current_scan_roots(self) -> list[Path]:
+        """Exact + nest-deduped paths used for Analyze / Apply."""
+        exact: list[Path] = []
+        seen: set[str] = set()
+        for _label, path, _removable in self._root_entries:
+            key = str(path).strip().casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            exact.append(Path(path))
+        exact.sort(key=lambda p: len(str(p)))
+
+        def _is_under(child: Path, parent: Path) -> bool:
+            try:
+                child.resolve().relative_to(parent.resolve())
+                return True
+            except (OSError, ValueError):
+                try:
+                    child.expanduser().relative_to(parent.expanduser())
+                    return True
+                except ValueError:
+                    return False
+
+        deduped: list[Path] = []
+        for path in exact:
+            if any(_is_under(path, parent) for parent in deduped):
+                continue
+            deduped.append(path)
+        return deduped
+
+    def _refresh_roots_list(self) -> None:
+        self._roots_list.clear()
+        for label, path, removable in self._root_entries:
+            tag = "extra" if removable else "built-in"
+            item = QListWidgetItem(f"{label} · {path}")
+            item.setData(Qt.ItemDataRole.UserRole, str(path))
+            item.setData(Qt.ItemDataRole.UserRole + 1, bool(removable))
+            item.setToolTip(f"{tag}: {path}")
+            if removable:
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                )
+            else:
+                # Built-in roots are display-only (cannot be removed).
+                item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            self._roots_list.addItem(item)
+        self._roots_list.clearSelection()
+        self._remove_root_btn.setEnabled(False)
+
+    def _on_roots_selection_changed(self, current, _previous) -> None:
+        removable = bool(current.data(Qt.ItemDataRole.UserRole + 1)) if current else False
+        self._remove_root_btn.setEnabled(removable)
+
+    def _add_scan_folder(self) -> None:
+        chosen = QFileDialog.getExistingDirectory(
+            self,
+            "Add session folder tree to scan",
+            str(Path.home()),
+        )
+        if not chosen:
+            return
+        path = Path(chosen)
+        key = str(path).casefold()
+        for _label, existing, _rem in self._root_entries:
+            if str(existing).casefold() == key:
+                _info_ok(self, "Scan roots", "That folder is already in the scan list.")
+                return
+        self._root_entries.append((f"Extra folder", path, True))
+        self._refresh_roots_list()
+        self._last_audit = None
+        self._report.setPlainText("Scan roots changed. Click Analyze again.")
+        self._update_apply_enabled()
+
+    def _remove_selected_scan_folder(self) -> None:
+        item = self._roots_list.currentItem()
+        if item is None or not bool(item.data(Qt.ItemDataRole.UserRole + 1)):
+            return
+        key = str(item.data(Qt.ItemDataRole.UserRole) or "").casefold()
+        self._root_entries = [
+            entry for entry in self._root_entries if str(entry[1]).casefold() != key
+        ]
+        self._refresh_roots_list()
+        self._last_audit = None
+        self._report.setPlainText("Scan roots changed. Click Analyze again.")
         self._update_apply_enabled()
 
     def resizeEvent(self, event):
@@ -3572,7 +3911,9 @@ class SessionIntegrityDialog(QDialog):
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            refreshed = self._store.audit_session_history_integrity(scan_roots=self._scan_roots)
+            refreshed = self._store.audit_session_history_integrity(
+                scan_roots=self._current_scan_roots()
+            )
         finally:
             QApplication.restoreOverrideCursor()
         self._last_audit = refreshed
@@ -3592,7 +3933,9 @@ class SessionIntegrityDialog(QDialog):
     def _analyze(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            audit = self._store.audit_session_history_integrity(scan_roots=self._scan_roots)
+            audit = self._store.audit_session_history_integrity(
+                scan_roots=self._current_scan_roots()
+            )
         finally:
             QApplication.restoreOverrideCursor()
         self._last_audit = audit
@@ -3625,7 +3968,9 @@ class SessionIntegrityDialog(QDialog):
                 repair_mismatched_rows=bool(self._repair_mismatch_cb.isChecked()),
                 fill_missing_session_trends=bool(self._fill_trends_cb.isChecked()),
             )
-            refreshed = self._store.audit_session_history_integrity(scan_roots=self._scan_roots)
+            refreshed = self._store.audit_session_history_integrity(
+                scan_roots=self._current_scan_roots()
+            )
         finally:
             QApplication.restoreOverrideCursor()
         self._last_audit = refreshed
@@ -6723,6 +7068,7 @@ class View(QMainWindow):
         self._last_qtc_diag_logged: tuple = ()  # (method, qrs_source) for DEBUG throttle
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
+        self._ecg_stream: EcgSampleStream | None = None
         self._disclaimer_acknowledged_at: str | None = None
         self._disclaimer_ack_mode = "not_recorded"
         self._session_root = app_data_root()
@@ -7070,13 +7416,14 @@ class View(QMainWindow):
         self._more_button = QToolButton()
         self._more_button.setText("More")
         self._more_button.setToolTip(
-            "Additional actions: History, Trends, Profiles, Session Admin, "
-            "Support Development, Import, Help."
+            "Additional actions: Session History, Session Replay, Trends, Profiles, "
+            "Session Admin, Support Development, Import, Help, Legal Disclaimer."
         )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
         self._more_menu.setToolTipsVisible(True)
-        self._more_menu.addAction("History / Session Replay", self._open_history)
+        self._more_menu.addAction("Session History…", lambda: self._open_history("history"))
+        self._more_menu.addAction("Session Replay…", lambda: self._open_history("replay"))
         self._more_menu.addAction("Trend / Compare / Insight", self._open_trends)
         self._more_profiles_action = self._more_menu.addAction(
             "Manage Profiles", self._open_profile_manager
@@ -7110,6 +7457,8 @@ class View(QMainWindow):
         self._help_menu.addSeparator()
         self._help_menu.addAction("Check for Updates…", self._check_for_updates)
         self._help_menu.addAction("About Hertz && Hearts…", self._show_about_dialog)
+        self._help_menu.addSeparator()
+        self._help_menu.addAction("Legal Disclaimer…", self._open_disclaimer_file)
         self._more_menu.addMenu(self._help_menu)
         self._more_button.setMenu(self._more_menu)
         self._refresh_more_menu_actions()
@@ -7306,12 +7655,6 @@ class View(QMainWindow):
         self.profile_header_label = QLabel(self._profile_header_rich_text(self._session_profile_id))
         self._apply_profile_header_style(highlight=False)
         self.profile_header_label.setAlignment(Qt.AlignCenter)
-        self._disclaimer_link = QLabel('<a href="open-disclaimer">Legal Disclaimer</a>')
-        self._disclaimer_link.setTextFormat(Qt.RichText)
-        self._disclaimer_link.setTextInteractionFlags(Qt.TextBrowserInteraction)
-        self._disclaimer_link.setOpenExternalLinks(False)
-        self._disclaimer_link.setToolTip("Open the research-use legal disclaimer.")
-        self._disclaimer_link.linkActivated.connect(self._open_disclaimer_file)
         self._debug_mode_badge = QLabel("DEBUG ON")
         self._debug_mode_badge.setStyleSheet(
             "font-size: 10px; font-weight: 700; color: #7e0000; "
@@ -7329,24 +7672,15 @@ class View(QMainWindow):
         profile_zone_layout.addWidget(self.logout_button, alignment=Qt.AlignVCenter)
         profile_zone_layout.addWidget(self._debug_mode_badge, alignment=Qt.AlignVCenter)
         profile_zone_layout.addStretch()
-        self.controls_zone = QWidget()
-        controls_zone_layout = QHBoxLayout(self.controls_zone)
-        controls_zone_layout.setContentsMargins(0, 0, 0, 0)
-        controls_zone_layout.setSpacing(8)
-        controls_zone_layout.addWidget(self._disclaimer_link, alignment=Qt.AlignVCenter)
-        controls_zone_layout.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         header_row.addWidget(self.profile_zone, stretch=1)
-        header_row.addWidget(self.controls_zone)
         self._top_bar = QWidget()
         self._top_bar.setLayout(header_row)
         self.vlayout0.addWidget(self._top_bar)
         for _w in (
             self._top_bar,
             self.profile_zone,
-            self.controls_zone,
             self.profile_header_label,
             self.logout_button,
-            self._disclaimer_link,
             self._debug_mode_badge,
             self._more_button,
             self._settings_button,
@@ -7506,9 +7840,6 @@ class View(QMainWindow):
         self._more_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._settings_button.setStyleSheet(
             "QToolButton { font-size: 14px; padding: 2px 8px; }"
-        )
-        self._disclaimer_link.setStyleSheet(
-            "font-size: 11px; color: #1b6ec2; text-decoration: underline;"
         )
         self.address_menu.setMinimumWidth(240)
         self.address_menu.setMaximumWidth(240)
@@ -8192,6 +8523,7 @@ class View(QMainWindow):
         sensor_client.ibi_update.connect(self.model.update_ibis_buffer)
         sensor_client.verity_limited_support.connect(self._on_verity_limited_support)
         sensor_client.ecg_update.connect(self.model.update_ecg_samples)
+        sensor_client.ecg_update.connect(self._append_ecg_stream)
         sensor_client.status_update.connect(self.show_status)
         sensor_client.battery_update.connect(self._update_battery_display)
         sensor_client.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
@@ -8216,6 +8548,10 @@ class View(QMainWindow):
             pass
         try:
             sensor_client.ecg_update.disconnect(self.model.update_ecg_samples)
+        except Exception:
+            pass
+        try:
+            sensor_client.ecg_update.disconnect(self._append_ecg_stream)
         except Exception:
             pass
         try:
@@ -8398,7 +8734,9 @@ class View(QMainWindow):
         self.bridge_scan_phones_btn.setEnabled(False)
         self.scan_button.setEnabled(False)
         self._focus_bridge_host_line_edit_without_select_all()
-        self.show_status("Searching for phone bridges on the network…")
+        # Keep sticky Feather mismatch banners readable; discovery can finish quietly.
+        if not self._feather_profile_banner_is_visible_sticky():
+            self.show_status("Searching for phone bridges on the network…")
         hints: list[str] = []
         current = self._phone_bridge_host_value().strip()
         if current:
@@ -8525,10 +8863,15 @@ class View(QMainWindow):
                         )
                         self._focus_bridge_host_line_edit_without_select_all()
                         self._on_phone_bridge_endpoint_changed()
-                        self.show_status(
-                            "No broadcast discovery replies, but current host is reachable. "
-                            "You can Connect now."
-                        )
+                        if self._is_sensor_connected():
+                            self.show_status(
+                                "No broadcast discovery replies; current host still reachable."
+                            )
+                        else:
+                            self.show_status(
+                                "No broadcast discovery replies, but current host is reachable. "
+                                "You can Connect now."
+                            )
                         return
                 except OSError:
                     pass
@@ -8539,15 +8882,26 @@ class View(QMainWindow):
                 if isinstance(feats, list) and feats:
                     feature_hint = f" Features: {', '.join(str(f) for f in feats[:6])}."
                     break
-            self.show_status(
-                f"Found {n} phone bridge app(s). Choose host/port above, then Connect."
-                f"{feature_hint}"
-            )
+            if self._is_sensor_connected():
+                self.show_status(
+                    f"Found {n} phone bridge app(s). Host list updated."
+                    f"{feature_hint}"
+                )
+            else:
+                self.show_status(
+                    f"Found {n} phone bridge app(s). Choose host/port above, then Connect."
+                    f"{feature_hint}"
+                )
         else:
-            self.show_status(
-                "No phone bridge apps found. Check Wi‑Fi, firewall, "
-                "and that the Android bridge app is open."
-            )
+            if self._is_sensor_connected():
+                self.show_status(
+                    "No new phone bridge apps found on the network (still connected)."
+                )
+            else:
+                self.show_status(
+                    "No phone bridge apps found. Check Wi‑Fi, firewall, "
+                    "and that the Android bridge app is open."
+                )
 
     def _on_phone_find_failed(self, msg: str) -> None:
         self.bridge_scan_phones_btn.setEnabled(True)
@@ -8837,10 +9191,24 @@ class View(QMainWindow):
         session_end = datetime.now()
         last_rmssd = self._session_rmssd_values[-1] if self._session_rmssd_values else None
         last_hr = self._session_hr_values[-1] if self._session_hr_values else None
-        ecg_samples = list(getattr(self.model, "_ecg_buffer", []))
-        max_samples = int(ECG_SAMPLE_RATE * 8)
-        if len(ecg_samples) > max_samples:
-            ecg_samples = ecg_samples[-max_samples:]
+        # Prefer the on-disk stream (full session). Fall back to the live ring buffer.
+        ecg_samples: list[float] = []
+        ecg_stream_path = ""
+        stream = self._ecg_stream
+        if stream is not None:
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        if self._session_bundle is not None:
+            stream_path = self._session_bundle.ecg_stream_path
+            ecg_stream_path = str(stream_path)
+            if stream_path.exists():
+                from hnh.ecg_stream import read_ecg_stream_samples
+
+                ecg_samples = read_ecg_stream_samples(stream_path)
+        if not ecg_samples:
+            ecg_samples = list(getattr(self.model, "_ecg_buffer", []))
         qtc_payload = self._session_qtc_payload or self.model.latest_qtc_payload or default_qtc_payload()
         csv_path = str(self._session_bundle.csv_path) if self._session_bundle else ""
         tag_associations: list[dict] = []
@@ -8907,6 +9275,7 @@ class View(QMainWindow):
             "stress_ratio_time_seconds": list(self._session_stress_ratio_times),
             "snr_values": list(self._session_snr_values),
             "ecg_samples": ecg_samples,
+            "ecg_stream_path": ecg_stream_path,
             "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
             "ecg_is_simulated": False,
             "notes": "",
@@ -8931,6 +9300,39 @@ class View(QMainWindow):
             self.show_status(f"Saved EDF+ file: {result}")
             return
         self.show_status(f"EDF+ export skipped: {result}")
+
+    def _open_ecg_stream(self) -> None:
+        self._close_ecg_stream()
+        bundle = self._session_bundle
+        if bundle is None:
+            return
+        try:
+            self._ecg_stream = EcgSampleStream.open_write(
+                bundle.ecg_stream_path,
+                sample_rate_hz=ECG_SAMPLE_RATE,
+            )
+        except OSError as exc:
+            self._ecg_stream = None
+            self.show_status(f"ECG stream open failed: {exc}")
+
+    def _close_ecg_stream(self) -> None:
+        stream = self._ecg_stream
+        self._ecg_stream = None
+        if stream is None:
+            return
+        try:
+            stream.close()
+        except Exception:
+            pass
+
+    def _append_ecg_stream(self, samples) -> None:
+        stream = self._ecg_stream
+        if stream is None or self._session_state != "recording":
+            return
+        try:
+            stream.append(samples)
+        except Exception:
+            pass
 
     def _current_disclaimer_payload(self) -> dict:
         text = _CARD0_DISCLAIMER_TEXT.strip() or _CARD0_DISCLAIMER_FALLBACK
@@ -9080,6 +9482,7 @@ class View(QMainWindow):
         except Exception as exc:
             self.show_status(f"Unable to create session folder: {exc}")
             return
+        self._open_ecg_stream()
         self._session_annotations = []
         self._session_ecg_cursor_captures = []
         self._session_hr_values = []
@@ -9122,6 +9525,7 @@ class View(QMainWindow):
         if self._session_state != "recording":
             return
         self._record_disconnect_end()  # Close any open interval before abandoning
+        self._close_ecg_stream()
         self.signals.save_recording.emit()
         if self._session_bundle is not None:
             self._record_session_trend_from_current_state()
@@ -9155,6 +9559,7 @@ class View(QMainWindow):
         session_id = bundle.session_id if bundle is not None else None
         session_dir = bundle.session_dir if bundle is not None else None
         self._record_disconnect_end()
+        self._close_ecg_stream()
         self.signals.discard_recording.emit()
         if session_id:
             try:
@@ -9197,6 +9602,7 @@ class View(QMainWindow):
                 self.show_status("No active session to save.")
             return
         self._record_disconnect_end()  # Close any open disconnect interval for manifest
+        self._close_ecg_stream()
         destination_root = self._session_save_path_from_settings()
         self.signals.save_recording.emit()
         if build_final_report and self._session_bundle is not None:
@@ -9688,10 +10094,8 @@ class View(QMainWindow):
             obj in {
                 getattr(self, "_top_bar", None),
                 getattr(self, "profile_zone", None),
-                getattr(self, "controls_zone", None),
                 getattr(self, "profile_header_label", None),
                 getattr(self, "logout_button", None),
-                getattr(self, "_disclaimer_link", None),
                 getattr(self, "_debug_mode_badge", None),
                 getattr(self, "_more_button", None),
                 getattr(self, "_settings_button", None),
@@ -9881,6 +10285,42 @@ class View(QMainWindow):
         self._update_banner_frame.setVisible(False)
         self._update_banner_release = None
 
+    def _feather_profile_banner_is_sticky(self, message: str) -> bool:
+        """Mismatch / no-profile lines stay until OK; soft sync lines may auto-dismiss."""
+        text = str(message or "").strip().casefold()
+        if not text:
+            return False
+        sticky_markers = (
+            "nonexistent/deselected",
+            "no feather profile",
+            "ambiguous feather profile",
+        )
+        return any(marker in text for marker in sticky_markers)
+
+    def _feather_profile_banner_is_visible_sticky(self) -> bool:
+        banner = getattr(self, "_feather_profile_banner", None)
+        label = getattr(self, "_feather_profile_banner_label", None)
+        if banner is None or label is None or not banner.isVisible():
+            return False
+        return self._feather_profile_banner_is_sticky(label.text())
+
+    def _is_phone_discovery_status(self, status: str) -> bool:
+        text = str(status or "").strip()
+        if not text:
+            return False
+        folded = text.casefold()
+        return (
+            folded.startswith("searching for phone bridges")
+            or (
+                folded.startswith("found ")
+                and "phone bridge" in folded
+            )
+            or folded.startswith("no broadcast discovery")
+            or folded.startswith("no phone bridge apps found")
+            or folded.startswith("no new phone bridge")
+            or folded.startswith("phone discovery returned nothing")
+        )
+
     def _show_feather_profile_banner(self, message: str) -> None:
         """Non-blocking phone Feather soft-match status; no Keep/Switch dialog on PC."""
         text = str(message or "").strip()
@@ -9891,10 +10331,26 @@ class View(QMainWindow):
         timer = getattr(self, "_feather_profile_banner_timer", None)
         if banner is None or label is None:
             return
+        sticky = self._feather_profile_banner_is_sticky(text)
         label.setText(text)
+        if sticky:
+            banner.setStyleSheet(
+                "QFrame#featherProfileBanner { background: #fff7ed; border: 1px solid #fdba74; "
+                "border-radius: 4px; }"
+            )
+            label.setStyleSheet("font-size: 12px; color: #9a3412;")
+        else:
+            banner.setStyleSheet(
+                "QFrame#featherProfileBanner { background: #f0fdf4; border: 1px solid #86efac; "
+                "border-radius: 4px; }"
+            )
+            label.setStyleSheet("font-size: 12px; color: #166534;")
         banner.setVisible(True)
         if timer is not None:
-            timer.start(8000)
+            if sticky:
+                timer.stop()
+            else:
+                timer.start(12000)
 
     def _hide_feather_profile_banner(self) -> None:
         timer = getattr(self, "_feather_profile_banner_timer", None)
@@ -10366,7 +10822,7 @@ class View(QMainWindow):
                 self._apply_disclaimer_prompt_reset(pending_reset)
         self._refresh_annotation_list()
 
-    def _open_history(self):
+    def _open_history(self, tab: str = "history"):
         sessions = self._profile_store.list_sessions(
             profile_name=self._session_profile_id,
             include_hidden=True,
@@ -10384,6 +10840,7 @@ class View(QMainWindow):
             )
         else:
             self._history_window.set_context(self._session_profile_id, sessions)
+        self._history_window.show_tab(tab)
         self._history_window.show()
         self._history_window.showNormal()
         self._history_window.raise_()
@@ -10523,35 +10980,44 @@ class View(QMainWindow):
             except ValueError:
                 return False
 
-    def _session_integrity_scan_roots(self) -> list[Path]:
-        roots: list[Path] = []
-        roots.append(self._session_root / "Sessions")
+    def _session_integrity_scan_root_entries(self) -> list[tuple[str, Path]]:
+        """Labeled roots for Integrity UI (App Data + each profile Session Save Path)."""
+        entries: list[tuple[str, Path]] = []
+        seen: set[str] = set()
+
+        def _add(label: str, path: Path) -> None:
+            key = str(path).strip().casefold()
+            if not key or key in seen:
+                return
+            seen.add(key)
+            entries.append((label, Path(path)))
+
+        _add("App data Sessions", self._session_root / "Sessions")
         save_key = self._profile_setting_pref_key("SESSION_SAVE_PATH")
         for profile in self._profile_store.list_profiles(include_archived=True):
             raw = str(self._profile_store.get_profile_pref(profile, save_key, "") or "").strip()
-            if not raw:
-                continue
-            roots.append(Path(raw))
+            if raw:
+                _add(f"Session Save Path [{profile}]", Path(raw))
+            else:
+                _add(
+                    f"Session Save Path [{profile}] (app default)",
+                    self._session_root / "Sessions" / _slugify_profile(profile),
+                )
         current_path = str(getattr(self.settings, "SESSION_SAVE_PATH", "") or "").strip()
         if current_path:
-            roots.append(Path(current_path))
-        # Exact-path dedupe first.
-        exact: list[Path] = []
-        seen: set[str] = set()
-        for p in roots:
-            key = str(Path(p)).strip().casefold()
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            exact.append(Path(p))
-        # Drop nested save paths (e.g. Sessions/Guest under Sessions) so the same
-        # manifest is not discovered twice via overlapping rglob scans.
+            active = str(self._session_profile_id or "active").strip() or "active"
+            _add(f"Session Save Path [{active}] (current UI)", Path(current_path))
+        return entries
+
+    def _session_integrity_scan_roots(self) -> list[Path]:
+        """Nest-deduped paths used for disk scans."""
+        exact = [path for _label, path in self._session_integrity_scan_root_entries()]
         exact.sort(key=lambda p: len(str(p)))
         deduped: list[Path] = []
-        for p in exact:
-            if any(self._path_is_under(p, parent) for parent in deduped):
+        for path in exact:
+            if any(self._path_is_under(path, parent) for parent in deduped):
                 continue
-            deduped.append(p)
+            deduped.append(path)
         return deduped
 
     def _open_session_integrity_utility(self):
@@ -10567,7 +11033,7 @@ class View(QMainWindow):
             return
         dlg = SessionIntegrityDialog(
             store=self._profile_store,
-            scan_roots=self._session_integrity_scan_roots(),
+            scan_root_entries=self._session_integrity_scan_root_entries(),
             parent=self,
         )
         dlg.exec()
@@ -11913,6 +12379,13 @@ class View(QMainWindow):
         if feather_status:
             display_status = format_feather_profile_status_message(status)
             self._show_feather_profile_banner(display_status)
+            # Mirror sticky mismatches into the main status banner so discovery
+            # results cannot replace them with "Choose host/port… Connect".
+            if (
+                not self.is_phase_active
+                and self._feather_profile_banner_is_sticky(display_status)
+            ):
+                self.recording_statusbar.set_idle(display_status)
         if status.startswith("Scanning for BLE sensors..."):
             self._on_scan_state_changed(True)
         elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
@@ -11982,14 +12455,21 @@ class View(QMainWindow):
                 )
 
         # Feather soft-match lines use their own banner; do not overwrite phase progress.
-        if not self.is_phase_active and not feather_status:
+        # Sticky mismatch banners also win over phone-discovery status noise.
+        discovery_while_sticky = (
+            not feather_status
+            and self._feather_profile_banner_is_visible_sticky()
+            and self._is_phone_discovery_status(status)
+        )
+        if not self.is_phase_active and not feather_status and not discovery_while_sticky:
             if "error" in status.lower():
                 self.recording_statusbar.set_error(status)
             else:
                 self.recording_statusbar.set_idle(status)
 
         self._update_connection_mode_ui()
-        self.statusbar.showMessage(display_status)
+        if not discovery_while_sticky:
+            self.statusbar.showMessage(display_status)
         self._update_session_actions()
 
         if print_to_terminal and self.settings.DEBUG:

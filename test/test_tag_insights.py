@@ -23,6 +23,7 @@ def _bundle(root: Path, session_id: str, started_at: datetime) -> SessionBundle:
         report_draft_path=session_dir / "session_report_draft.docx",
         manifest_path=session_dir / "session_manifest.json",
         edf_path=session_dir / "session.edf",
+        ecg_stream_path=session_dir / "session_ecg.f32",
         started_at=started_at,
     )
 

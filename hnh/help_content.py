@@ -351,14 +351,18 @@ HELP_TOPICS: dict[str, HelpTopic] = {
             HelpBlock(
                 kind="paragraph",
                 title="Purpose",
-                text="Browse past sessions for the active profile and replay HR / RMSSD / ECG timelines.",
+                text="Browse past sessions for the active profile and replay HR / RMSSD / ECG timelines. "
+                "Open from More → Session History… or More → Session Replay… (same window, matching tab).",
             ),
             HelpBlock(
                 kind="list",
                 title="How to use",
                 items=(
-                    "<b>History tab</b>: list sessions; generate reports; copy folder/CSV paths; hide/unhide.",
-                    "<b>Replay tab</b>: load a session, scrub the timeline, and jump to annotations.",
+                    "<b>History tab</b>: list sessions; generate reports; copy folder/CSV paths; "
+                    "hide/unhide; delete selected (confirm → history + folder); "
+                    "<b>Replay selected</b> jumps to Replay with that session loaded.",
+                    "<b>Replay tab</b>: load a session, scrub the timeline, zoom/pan time "
+                    "(shared across plots; Fit time resets), and jump to annotations.",
                     "Wheel-zoom keeps Replay plots time-aligned.",
                 ),
             ),
@@ -367,7 +371,9 @@ HELP_TOPICS: dict[str, HelpTopic] = {
                 title="Guardrails",
                 items=(
                     "Abandoned or incomplete sessions may lack reports until you Generate report.",
-                    "Hidden sessions stay on disk until you purge or manage them deliberately.",
+                    "Hidden sessions stay on disk until you delete them or purge abandoned ones.",
+                    "Delete selected removes the folder permanently — prefer Hide when unsure.",
+                    "The session currently recording cannot be deleted from History.",
                 ),
             ),
             HelpBlock(

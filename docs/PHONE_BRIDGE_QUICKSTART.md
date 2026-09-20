@@ -120,7 +120,7 @@ Notes:
 4. Confirm HnH status shows connected.
 5. Confirm HR/RMSSD move within ~5-15 seconds.
 6. Open ECG window; verify waveform if ECG packets are forwarded.
-7. Optional saved-HRV check: phone **Record HRV** alone → Stop → connect HnH (or **More → Request saved HRV**) → status mentions Session History → **More → History / Session Replay** shows the row (ECG in replay when the package included it).
+7. Optional saved-HRV check: phone **Record HRV** alone → Stop → connect HnH (or **More → Request saved HRV**) → status mentions Session History → **More → Session History…** shows the row (ECG in **More → Session Replay…** when the package included it).
 
 ## 6) Reliability notes
 

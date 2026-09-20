@@ -1610,6 +1610,59 @@ class ProfileStore:
             removed_trends = int(cur_trends.rowcount or 0)
         return {"removed_rows": removed_rows, "removed_trends": removed_trends}
 
+    def delete_sessions_and_folders(self, session_ids: list[str]) -> dict[str, int]:
+        """Delete session folders on disk, then history + trend rows for those IDs."""
+        cleaned: list[str] = []
+        seen: set[str] = set()
+        for raw in session_ids:
+            sid = str(raw or "").strip()
+            if not sid or sid in seen:
+                continue
+            seen.add(sid)
+            cleaned.append(sid)
+        if not cleaned:
+            return {
+                "found": 0,
+                "deleted_dirs": 0,
+                "missing_dirs": 0,
+                "removed_rows": 0,
+                "removed_trends": 0,
+            }
+
+        qmarks = ",".join(["?"] * len(cleaned))
+        with self._db() as conn:
+            rows = conn.execute(
+                f"SELECT session_id, session_dir FROM session_history WHERE session_id IN ({qmarks})",
+                tuple(cleaned),
+            ).fetchall()
+
+        deleted_dirs = 0
+        missing_dirs = 0
+        found_ids: list[str] = []
+        for row in rows:
+            sid = str(row["session_id"] or "").strip()
+            if not sid:
+                continue
+            found_ids.append(sid)
+            session_dir = Path(str(row["session_dir"] or "")).resolve()
+            if session_dir.exists() and session_dir.is_dir():
+                shutil.rmtree(session_dir, ignore_errors=True)
+                if session_dir.exists():
+                    missing_dirs += 1
+                else:
+                    deleted_dirs += 1
+            else:
+                missing_dirs += 1
+
+        db_result = self.delete_sessions_by_ids(found_ids or cleaned)
+        return {
+            "found": len(found_ids),
+            "deleted_dirs": deleted_dirs,
+            "missing_dirs": missing_dirs,
+            "removed_rows": int(db_result.get("removed_rows") or 0),
+            "removed_trends": int(db_result.get("removed_trends") or 0),
+        }
+
     def set_session_hidden(self, session_id: str, hidden: bool) -> bool:
         sid = str(session_id).strip()
         if not sid:

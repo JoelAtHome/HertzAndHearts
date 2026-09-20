@@ -22,6 +22,7 @@ def _bundle(root: Path, session_id: str) -> SessionBundle:
         report_draft_path=session_dir / "session_report_draft.docx",
         manifest_path=session_dir / "session_manifest.json",
         edf_path=session_dir / "session.edf",
+        ecg_stream_path=session_dir / "session_ecg.f32",
         started_at=datetime.now(),
     )
 
@@ -257,6 +258,29 @@ class ProfileStoreTests(unittest.TestCase):
             self.assertFalse(b2.session_dir.exists())
             self.assertTrue(b3.session_dir.exists())
             self.assertEqual(len(store.list_sessions(state="abandoned", include_hidden=True)), 0)
+
+    def test_delete_sessions_and_folders(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Admin")
+
+            keep = _bundle(root, "keep1")
+            drop = _bundle(root, "drop1")
+            store.record_session_started("Admin", keep)
+            store.record_session_started("Admin", drop)
+            store.record_session_finished("keep1", "finalized")
+            store.record_session_finished("drop1", "finalized")
+            store.record_session_trend("Admin", "drop1", datetime.now(), avg_hr=71.0)
+
+            result = store.delete_sessions_and_folders(["drop1", "missing-id"])
+            self.assertEqual(result["removed_rows"], 1)
+            self.assertEqual(result["deleted_dirs"], 1)
+            self.assertFalse(drop.session_dir.exists())
+            self.assertTrue(keep.session_dir.exists())
+            ids = {str(s.get("session_id")) for s in store.list_sessions(include_hidden=True)}
+            self.assertIn("keep1", ids)
+            self.assertNotIn("drop1", ids)
 
     def test_purge_recording_sessions_deletes_rows_and_dirs(self):
         with TemporaryDirectory() as tmp:

@@ -7,6 +7,8 @@ from typing import Iterable
 
 import numpy as np
 
+from hnh.ecg_stream import read_ecg_stream_samples
+
 
 def _resample_series(values: list[float], sample_count: int) -> np.ndarray:
     if sample_count <= 0:
@@ -18,6 +20,26 @@ def _resample_series(values: list[float], sample_count: int) -> np.ndarray:
     src_x = np.linspace(0.0, 1.0, num=len(values), endpoint=True)
     dst_x = np.linspace(0.0, 1.0, num=sample_count, endpoint=True)
     return np.interp(dst_x, src_x, np.asarray(values, dtype=float))
+
+
+def _fit_ecg_to_duration(
+    values: list[float],
+    *,
+    sample_count: int,
+) -> np.ndarray:
+    """Pad or truncate ECG to an exact sample count — never stretch-resample."""
+    if sample_count <= 0:
+        return np.array([], dtype=float)
+    if not values:
+        return np.zeros(sample_count, dtype=float)
+    src = np.asarray(values, dtype=float)
+    if src.size == sample_count:
+        return src
+    if src.size > sample_count:
+        return src[:sample_count]
+    out = np.zeros(sample_count, dtype=float)
+    out[: src.size] = src
+    return out
 
 
 def _safe_float_iter(values: Iterable[object]) -> list[float]:
@@ -66,6 +88,33 @@ def _simulate_ecg(sample_rate_hz: int, sample_count: int) -> np.ndarray:
     return out
 
 
+def _ecg_physical_range(samples: np.ndarray) -> tuple[float, float]:
+    if samples.size == 0:
+        return -2.5, 2.5
+    finite = samples[np.isfinite(samples)]
+    if finite.size == 0:
+        return -2.5, 2.5
+    pmin = float(np.min(finite))
+    pmax = float(np.max(finite))
+    if not math.isfinite(pmin) or not math.isfinite(pmax):
+        return -2.5, 2.5
+    if abs(pmax - pmin) < 1e-6:
+        mid = pmin
+        return mid - 2.5, mid + 2.5
+    pad = max(0.05 * (pmax - pmin), 1e-3)
+    # EDF+ physical min/max fields are short; keep compact decimals.
+    return round(pmin - pad, 4), round(pmax + pad, 4)
+
+
+def _load_ecg_values(data: dict) -> list[float]:
+    stream_path = data.get("ecg_stream_path")
+    if stream_path:
+        streamed = read_ecg_stream_samples(Path(str(stream_path)))
+        if streamed:
+            return streamed
+    return _safe_float_iter(data.get("ecg_samples") or [])
+
+
 def export_session_edf_plus(
     path: str,
     data: dict,
@@ -95,21 +144,27 @@ def export_session_edf_plus(
     if not isinstance(session_end, datetime):
         session_end = datetime.now()
 
-    duration_seconds = max(1, int((session_end - session_start).total_seconds()))
-    sample_count = max(sample_rate_hz, duration_seconds * sample_rate_hz)
-
     hr_values = _safe_float_iter(data.get("hr_values") or [])
     rmssd_values = _safe_float_iter(data.get("rmssd_values") or [])
-    ecg_values = _safe_float_iter(data.get("ecg_samples") or [])
+    ecg_values = _load_ecg_values(data)
     ecg_rate_hz = int(data.get("ecg_sample_rate_hz") or 130)
     ecg_rate_hz = max(25, min(1000, ecg_rate_hz))
     ecg_is_simulated = bool(data.get("ecg_is_simulated", False))
 
+    wall_duration = max(1, int((session_end - session_start).total_seconds()))
+    if ecg_values:
+        ecg_duration = int(math.ceil(len(ecg_values) / float(ecg_rate_hz)))
+        duration_seconds = max(wall_duration, max(1, ecg_duration))
+    else:
+        duration_seconds = wall_duration
+
+    sample_count = max(sample_rate_hz, duration_seconds * sample_rate_hz)
     hr_samples = _resample_series(hr_values, sample_count)
     rmssd_samples = _resample_series(rmssd_values, sample_count)
     ecg_sample_count = max(ecg_rate_hz, duration_seconds * ecg_rate_hz)
     if ecg_values:
-        ecg_samples = _resample_series(ecg_values, ecg_sample_count)
+        ecg_samples = _fit_ecg_to_duration(ecg_values, sample_count=ecg_sample_count)
+        ecg_is_simulated = False
     else:
         ecg_samples = _simulate_ecg(ecg_rate_hz, ecg_sample_count)
         ecg_is_simulated = True
@@ -173,13 +228,14 @@ def export_session_edf_plus(
 
     ecg_label = "ECG_SIM" if ecg_is_simulated else "ECG"
     ecg_transducer = "Simulated ECG" if ecg_is_simulated else "ECG stream"
+    ecg_pmin, ecg_pmax = _ecg_physical_range(ecg_samples)
     channel_info.append(
         {
             "label": ecg_label,
             "dimension": "mV",
             "sample_frequency": ecg_rate_hz,
-            "physical_min": -2.5,
-            "physical_max": 2.5,
+            "physical_min": ecg_pmin,
+            "physical_max": ecg_pmax,
             "digital_min": -32768,
             "digital_max": 32767,
             "transducer": ecg_transducer,

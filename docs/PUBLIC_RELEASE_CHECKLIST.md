@@ -9,7 +9,7 @@ Use this checklist before publishing a public build.
 - [ ] Start a session with a real sensor and confirm live HR/RMSSD updates.
 - [ ] Stop a session (`Stop`) and confirm `session.csv` + `session_manifest.json` are present.
 - [ ] Finalize a session (`Stop & Save`) and confirm `session_report.docx` + `session_share.pdf` are generated.
-- [ ] Open `More -> History / Session Replay`, select a past session, and click `Generate report`.
+- [ ] Open `More -> Session History…`, select a past session, and click `Generate report`.
 - [ ] Confirm rebuilt report artifacts are written into that session folder without needing an active session.
 
 ## 2) Data Integrity and Regression (Must Pass)
