@@ -9672,6 +9672,7 @@ class View(QMainWindow):
                 getattr(self, "_disclaimer_link", None),
                 getattr(self, "_debug_mode_badge", None),
                 getattr(self, "_more_button", None),
+                getattr(self, "_settings_button", None),
             }
             and event.type() == QEvent.Type.MouseButtonPress
         ):
