@@ -1,13 +1,22 @@
 # Troubleshooting
 
-## Sensor connection issues
+## Phone Bridge connection issues
 
-If you have trouble connecting (or staying connected) to a supported chest strap:
+Hertz & Hearts connects to the sensor only through the **Android Phone Bridge** over Wi‑Fi (not a direct PC sensor link).
 
-- Turn Bluetooth off and on again.
-- Unpair and re-pair the sensor in OS Bluetooth settings.
-- Make sure no other app is already connected to the sensor.
-- Reset the sensor if needed: https://support.polar.com/en/support/how_to_reset_my_heart_rate_sensor
+If Scan/Connect fails, or the live stream drops:
+
+- Confirm the phone and PC are on the **same Wi‑Fi** network (guest/isolation networks often block device-to-device traffic).
+- On the phone, open the bridge app and confirm it is running and showing a sensor connection.
+- In Hertz & Hearts, click `Disconnect`, then `Scan` (or re-enter the phone IP and port, default `8765`), then `Connect`.
+- If Connect times out, fully close and reopen the bridge app on the phone (the phone may still be holding the previous PC session), then try again.
+- Optional: in the phone app `Connection settings`, enable `Keep bridge active in background`, and disable battery optimization for the bridge app.
+- Strap/electrode contact problems usually show up as noisy or missing data after Connect succeeds — reseat the strap or check electrodes on the phone side, then continue the session.
+
+If you need to reset a Polar strap hardware-side, Polar’s reset guide is here:  
+https://support.polar.com/en/support/how_to_reset_my_heart_rate_sensor
+
+For phone setup and message format detail, see `docs/PHONE_BRIDGE_QUICKSTART.md`.
 
 ## Launch/version mismatch
 

@@ -145,8 +145,12 @@ a = Analysis(
         # dev placeholder version, and the update check then treats every
         # published release — including the installed one — as an upgrade.
         ("pyproject.toml", "."),
-        # In-app Help → User Guide (rendered from markdown).
+        # In-app Help markdown docs (User Guide, Troubleshooting, ECG primer).
         ("docs/USER_GUIDE.md", "docs"),
+        ("docs/troubleshooting.md", "docs"),
+        ("docs/part-i-qrs-waveform-fundamentals.md", "docs"),
+        # Optional primer figures when present in the source tree.
+        ("docs/assets/cardiac-qrs", "docs/assets/cardiac-qrs"),
     ] + _app_metadata,
     hiddenimports=_hiddenimports,
     hookspath=[],

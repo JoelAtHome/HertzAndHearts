@@ -68,7 +68,12 @@ from hnh.settings import (
     profile_scoped_keys,
     setting_scope,
 )
-from hnh.help_content import install_f1_help, show_help, show_user_guide
+from hnh.help_content import (
+    install_f1_help,
+    show_help,
+    show_troubleshooting,
+    show_user_guide,
+)
 from hnh.report import (
     format_datetime_for_display,
     format_ecg_sensor_display_name,
@@ -7081,6 +7086,7 @@ class View(QMainWindow):
         self._help_menu = QMenu("Help", self._more_menu)
         self._help_menu.addAction("Quick Start Guide…\tF1", lambda: show_help(self, "main"))
         self._help_menu.addAction("User Guide…", self._show_user_guide)
+        self._help_menu.addAction("Troubleshooting…", self._show_troubleshooting)
         self._help_menu.addSeparator()
         self._help_menu.addAction("Check for Updates…", self._check_for_updates)
         self._more_menu.addMenu(self._help_menu)
@@ -9559,6 +9565,9 @@ class View(QMainWindow):
 
     def _show_user_guide(self) -> None:
         show_user_guide(self)
+
+    def _show_troubleshooting(self) -> None:
+        show_troubleshooting(self)
 
     def _update_poincare(self, data: NamedSignal):
         if data.name != "ibis":

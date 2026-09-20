@@ -4,7 +4,7 @@ This is the short practical guide for day-to-day use.
 
 ## 1) Connect a Sensor
 
-The desktop app always uses **Phone Bridge**: your Android phone connects to the strap over BLE and forwards live data to the PC over Wi-Fi. Direct `PC BLE` is not in the toolbar (the code is still in the repo, unused).
+The desktop app always uses **Phone Bridge**: your Android phone talks to the chest strap and forwards live data to the PC over Wi‑Fi.
 
 1. Open Hertz & Hearts.
 2. Click `Scan` to find the phone on Wi-Fi, or enter the phone's IP and port (default `8765`).
@@ -17,7 +17,7 @@ Current bridge protocol expected by HnH is newline-delimited JSON with `status`,
 
 If connection fails, try `Disconnect` then reconnect.
 
-For Android background reliability, disable battery optimization for the bridge app (OEM battery savers can still suspend networking/BLE despite foreground notifications).
+For Android background reliability, disable battery optimization for the bridge app (OEM battery savers can still suspend networking despite foreground notifications).
 
 ### Android bridge app options
 
@@ -91,9 +91,9 @@ For a stopped session without final report, generate from Session History.
 
 ## 8) Troubleshooting
 
-- See `docs/troubleshooting.md`
-- Windows is the current BLE test baseline. Linux/macOS comparison notes in `docs/BLE_PLATFORM_VALIDATION_MATRIX.md` are best-effort.
-- For phone-as-gateway setup and message format, use `docs/PHONE_BRIDGE_QUICKSTART.md`
+- See `docs/troubleshooting.md` (also available in-app under **More → Help → Troubleshooting…**).
+- Windows is the current development and test baseline; Linux/macOS builds are best-effort.
+- For phone-as-gateway setup and message format, use `docs/PHONE_BRIDGE_QUICKSTART.md`.
 
 ## 9) Important Safety/Scope Notes
 

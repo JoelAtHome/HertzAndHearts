@@ -1,7 +1,8 @@
 # Changelog
 
 ### Unreleased
-+ enhancement: Contextual Help — typed topic registry (`hnh/help_content.py`), F1 on main/ECG/QTc/Poincaré/PSD/Trends/History/Settings, More → Help → User Guide + Quick Start Guide, ECG `i` button; QTc/Poincaré/PSD info dialogs share the same topics.
++ docs: Help-facing User Guide and Troubleshooting copy no longer mentions Bluetooth/BLE; connection guidance is Phone Bridge / Wi‑Fi only.
++ enhancement: Contextual Help — typed topic registry (`hnh/help_content.py`), F1 on main/ECG/QTc/Poincaré/PSD/Trends/History/Settings, More → Help → User Guide + Quick Start Guide + Troubleshooting, ECG `i` / Waveform Primer, ECG primer markdown; QTc/Poincaré/PSD info dialogs share the same topics.
 + enhancement: Session reports (docx + one-page PDF) include **ECG Sensor** (typically `Feather ECG-Box` or `Polar H10`), taken from phone-bridge `source_device` / session manifest.
 + enhancement: Phone Bridge Feather lead-off — parse `use_leads_off` / `leads_off` on `status` NDJSON and show a sticky **Check electrodes** banner when both are true (clears on reconnect/clear status).
 + enhancement: Startup and Legal Disclaimer show a readable in-app scrollable text view (markdown source rendered; no raw `.md` / external file open).

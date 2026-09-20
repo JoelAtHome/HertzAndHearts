@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QDialog,
@@ -164,7 +164,10 @@ HELP_TOPICS: dict[str, HelpTopic] = {
             HelpBlock(
                 kind="paragraph",
                 title="Next action",
-                text="Freeze a clean segment, place A/B on landmarks, then Log Δt if needed.",
+                text=(
+                    "Freeze a clean segment, place A/B on landmarks, then Log Δt if needed. "
+                    "Use <b>Waveform Primer…</b> below for P/QRS/T landmarks (non-diagnostic)."
+                ),
             ),
         ),
     ),
@@ -442,6 +445,7 @@ class HelpTopicDialog(QDialog):
 
     def __init__(self, topic: HelpTopic, parent: QWidget | None = None):
         super().__init__(parent)
+        self._topic = topic
         self.setWindowTitle(topic.title)
         self.setMinimumSize(560, 420)
         self.setModal(True)
@@ -462,6 +466,13 @@ class HelpTopicDialog(QDialog):
         root.addWidget(browser, stretch=1)
 
         btn_row = QHBoxLayout()
+        if topic.id == "ecg":
+            primer_btn = QPushButton("Waveform Primer…")
+            primer_btn.setToolTip(
+                "Open a short P/QRS/T reference (research/educational; not diagnostic)."
+            )
+            primer_btn.clicked.connect(lambda: show_waveform_primer(self))
+            btn_row.addWidget(primer_btn)
         btn_row.addStretch()
         close_btn = QPushButton("Close")
         close_btn.setDefault(True)
@@ -470,12 +481,19 @@ class HelpTopicDialog(QDialog):
         root.addLayout(btn_row)
 
 
-class UserGuideDialog(QDialog):
-    """In-app viewer for docs/USER_GUIDE.md (markdown rendered)."""
+class MarkdownDocDialog(QDialog):
+    """In-app viewer for a packaged markdown doc."""
 
-    def __init__(self, markdown_text: str, parent: QWidget | None = None):
+    def __init__(
+        self,
+        title: str,
+        markdown_text: str,
+        parent: QWidget | None = None,
+        *,
+        base_dir: Path | None = None,
+    ):
         super().__init__(parent)
-        self.setWindowTitle("Hertz & Hearts — User Guide")
+        self.setWindowTitle(title)
         self.setMinimumSize(720, 560)
         self.setModal(True)
         _ensure_linux_window_decorations(self)
@@ -488,6 +506,10 @@ class UserGuideDialog(QDialog):
         browser.setOpenExternalLinks(True)
         browser.setReadOnly(True)
         browser.setFrameShape(QTextBrowser.Shape.NoFrame)
+        if base_dir is not None:
+            browser.document().setBaseUrl(
+                QUrl.fromLocalFile(str(base_dir.resolve()) + "/")
+            )
         browser.setMarkdown(markdown_text)
         browser.setStyleSheet(
             "QTextBrowser { background: white; color: #333; font-size: 14px; padding: 4px; }"
@@ -501,6 +523,10 @@ class UserGuideDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         root.addLayout(btn_row)
+
+
+# Back-compat alias used by older call sites / tests.
+UserGuideDialog = MarkdownDocDialog
 
 
 def show_help(parent: QWidget | None, topic_id: str) -> None:
@@ -529,16 +555,17 @@ def install_f1_help(widget: QWidget, topic_id: str) -> QShortcut:
     return shortcut
 
 
-def resolve_user_guide_path() -> Path | None:
-    """Locate packaged or source-tree User Guide markdown."""
+def resolve_docs_path(*relative_parts: str) -> Path | None:
+    """Locate a docs file from the source tree or frozen bundle."""
+    rel = Path(*relative_parts)
     candidates: list[Path] = []
     repo_root = Path(__file__).resolve().parents[1]
-    candidates.append(repo_root / "docs" / "USER_GUIDE.md")
+    candidates.append(repo_root / rel)
     if getattr(sys, "frozen", False):
         meipass = Path(getattr(sys, "_MEIPASS", repo_root))
-        candidates.append(meipass / "docs" / "USER_GUIDE.md")
+        candidates.append(meipass / rel)
         exe_dir = Path(sys.executable).resolve().parent
-        candidates.append(exe_dir / "docs" / "USER_GUIDE.md")
+        candidates.append(exe_dir / rel)
     seen: set[Path] = set()
     for path in candidates:
         try:
@@ -553,13 +580,26 @@ def resolve_user_guide_path() -> Path | None:
     return None
 
 
-def show_user_guide(parent: QWidget | None = None) -> None:
-    path = resolve_user_guide_path()
+def resolve_user_guide_path() -> Path | None:
+    """Locate packaged or source-tree User Guide markdown."""
+    return resolve_docs_path("docs", "USER_GUIDE.md")
+
+
+def show_markdown_doc(
+    parent: QWidget | None,
+    *,
+    title: str,
+    relative_parts: tuple[str, ...],
+    missing_label: str,
+    prepend: str = "",
+) -> None:
+    path = resolve_docs_path(*relative_parts)
     if path is None:
+        rel = "/".join(relative_parts)
         QMessageBox.warning(
             parent,
-            "User Guide",
-            "Could not find the User Guide file (docs/USER_GUIDE.md).",
+            missing_label,
+            f"Could not find {missing_label} ({rel}).",
         )
         return
     try:
@@ -567,11 +607,48 @@ def show_user_guide(parent: QWidget | None = None) -> None:
     except OSError as exc:
         QMessageBox.warning(
             parent,
-            "User Guide",
-            f"Could not read the User Guide:\n{exc}",
+            missing_label,
+            f"Could not read {missing_label}:\n{exc}",
         )
         return
     if not text:
-        QMessageBox.warning(parent, "User Guide", "User Guide file is empty.")
+        QMessageBox.warning(parent, missing_label, f"{missing_label} file is empty.")
         return
-    UserGuideDialog(text, parent).exec()
+    if prepend:
+        text = f"{prepend.rstrip()}\n\n{text}"
+    MarkdownDocDialog(title, text, parent, base_dir=path.parent).exec()
+
+
+def show_user_guide(parent: QWidget | None = None) -> None:
+    show_markdown_doc(
+        parent,
+        title="Hertz & Hearts — User Guide",
+        relative_parts=("docs", "USER_GUIDE.md"),
+        missing_label="User Guide",
+    )
+
+
+def show_troubleshooting(parent: QWidget | None = None) -> None:
+    show_markdown_doc(
+        parent,
+        title="Hertz & Hearts — Troubleshooting",
+        relative_parts=("docs", "troubleshooting.md"),
+        missing_label="Troubleshooting",
+    )
+
+
+_WAVEFORM_PRIMER_NOTE = (
+    "> **Research / educational reference only.** Waveform morphology "
+    "interpretation requires clinician judgment. This primer is not a "
+    "diagnostic tool.\n"
+)
+
+
+def show_waveform_primer(parent: QWidget | None = None) -> None:
+    show_markdown_doc(
+        parent,
+        title="Hertz & Hearts — ECG Waveform Primer",
+        relative_parts=("docs", "part-i-qrs-waveform-fundamentals.md"),
+        missing_label="Waveform Primer",
+        prepend=_WAVEFORM_PRIMER_NOTE,
+    )
