@@ -1,6 +1,14 @@
 # Changelog
 
 ### Unreleased
+
+### Version 1.0.0-beta.4 (September 19 2026)
++ release: Bumped pre-release version to `1.0.0b4` (public label: `1.0.0-beta.4`).
++ enhancement: Stream session ECG to `session_ecg.f32` during recording and write true-rate EDF+ (pad/truncate only — no stretch-resample of a short buffer).
++ enhancement: Session History **Delete selected…** (confirm → history + folder); **Replay selected** loads/cues Replay; shared Replay **time zoom/pan** with **Fit time**.
++ enhancement: More menu splits **Session History…** / **Session Replay…** (same tabbed window); Legal Disclaimer moved under More → Help.
++ enhancement: Session Integrity Audit lists labeled scan roots (incl. per-profile Session Save Path) and supports **Add folder to scan…**.
++ bugfix: Phone discovery status no longer urges Connect when already linked, and sticky Feather mismatch banners are not overwritten by scan status noise.
 + enhancement: ECG Log Δt saves capped plot snippets (`ecg_cursor_capture_*.png`, newest 5) into the session folder/manifest and embeds them in the Word report **ECG Cursor Captures** section.
 + enhancement: Toolbar end-state `More ▾` + Settings gear (⚙); About moved under Help; Settings removed from More (Ctrl+, unchanged).
 + enhancement: ECG/QTc Relock stays visible while frozen with dynamic tooltips (locked / manual / resume+relock).
