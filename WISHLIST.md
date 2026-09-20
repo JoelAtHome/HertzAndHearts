@@ -42,16 +42,16 @@ Raw ideas go here first.
 - Proposed approach: Define and implement a global F1 help standard so each major window and workflow surface provides contextual guidance (matching style, tone, and depth).
 - Effort: M
 - Impact: High
-- Status: idea
-- Notes: Start with QTc, ECG, Poincare, main dashboard, Settings, and History. Include keyboard shortcut behavior, help content template, and acceptance checks for consistency. Complexity guardrail: do not turn help into feature sprawl; use it to simplify defaults and improve discoverability.
+- Status: done
+- Notes: Shipped typed registry (`hnh/help_content.py`), F1 on main/ECG/QTc/Poincaré/PSD/Trends/History/Settings, More → Help (Quick Start Guide, User Guide, Troubleshooting), ECG `i` + Waveform Primer. Main title is **Quick Start Guide** (other screens keep `<Name> — Quick Guide`). Complexity guardrail held: no Help hub/search/app-map. Remaining polish is optional chrome (Help/Settings toolbar placement), not content sprawl.
 
 ### ECG info-page quick link (waveform primer)
 - Problem: Users reviewing ECG traces need a fast, in-app path to a reference that explains typical P/QRS/T morphology and interval landmarks.
 - Proposed approach: Add an explicit link/button in ECG window (and/or F1 help) that opens a curated info page on normal waveform components and common variants.
 - Effort: S
 - Impact: Med
-- Status: idea
-- Notes: Keep wording non-diagnostic and include a disclaimer that morphology interpretation requires clinician judgment.
+- Status: done
+- Notes: ECG F1 dialog includes **Waveform Primer…** opening `docs/part-i-qrs-waveform-fundamentals.md` with a non-diagnostic banner. Packaged in the frozen build when present.
 
 ### Linux PMD mode guidance in Help screens
 - Problem: Linux users may not know when to keep PMD mode off for stability versus turning it on for experimental ECG/QTc behavior.
@@ -59,23 +59,23 @@ Raw ideas go here first.
 - Effort: S
 - Impact: High
 - Status: deferred
-- Notes: Linux is best-effort; revisit only if Linux development resumes. Keep language practical: "OFF for stable HR/RR plotting, ON only when ECG/QTc PMD is needed and stable on this adapter."
+- Notes: Linux is best-effort; revisit only if Linux development resumes. Keep language practical: "OFF for stable HR/RR plotting, ON only when ECG/QTc PMD is needed and stable on this adapter." Avoid Bluetooth/BLE wording in Help copy if this returns — Phone Bridge is the supported path.
 
 ### Linux startup BLE prep behavior in Help screens
-- Problem: Linux users may not realize the app can run a startup Bluetooth reset/prep step before the main window appears, which can feel like a launch delay unless explained.
-- Proposed approach: Add a short Help/F1 note that explains the BLE prep popup, expected wait time, and why scan-first flow is recommended.
+- Problem: Users on Linux may see a startup prep/delay before the main window and not know why.
+- Proposed approach: Add a short Help/F1 note only if Linux development resumes and that prep path is still user-visible.
 - Effort: S
 - Impact: Med
 - Status: deferred
-- Notes: Linux is best-effort; revisit only if Linux development resumes. Include troubleshooting guidance for "scan sees device but connect fails" and clarify that this startup behavior is Linux-specific.
+- Notes: Deferred with Linux best-effort. Help-facing docs are Phone Bridge / Wi‑Fi oriented; do not revive PC-Bluetooth troubleshooting in Help.
 
 ### Data folder & dual-boot guidance in Help/F1 screens
 - Problem: Users on dual-boot/shared-drive setups can accidentally split session data across multiple paths without realizing it.
 - Proposed approach: Add a short help section (Settings + startup/user guide references) explaining default data paths per OS, `HNH_DATA_DIR`, and when to use `Move Data to Recommended Location…`.
 - Effort: S
 - Impact: High
-- Status: idea
-- Notes: Keep language practical and non-technical; include a one-minute verification checklist ("open Settings -> Data", confirm active path, restart after migration).
+- Status: done
+- Notes: Covered in Settings F1 topic and User Guide § Data Location. Optional follow-up: one-minute checklist callout on first Settings open (not required for Help completeness).
 
 ### Dynamic Relock tooltip for QTc trend window
 - Problem: The QTc trend `Relock` button tooltip is static, so users may miss that behavior changes by state (locked vs manual vs frozen/resume path).
@@ -102,7 +102,7 @@ Raw ideas go here first.
 - Notes: Medium priority. Main risk is regression from auto-range logic fighting manual viewport changes, especially around `Freeze Two Main Plots`, `Freeze All`, baseline reset, reconnect, and long-session pruning. Keep implementation event-driven/throttled to avoid redraw churn. Acceptance checks: (1) no jitter/snap-back while manually zoomed, (2) relock restores current auto behavior, (3) no measurable UI slowdown in long sessions, (4) no behavior change when users never interact with zoom/pan.
 
 Help content template (per screen):
-- Title: `<Screen Name> — Quick Guide`
+- Title: `<Screen Name> — Quick Guide` (exception: main window = **Quick Start Guide**)
 - Purpose (1 line): What this screen is for.
 - How to read/use (3-5 bullets): Core controls/visuals and their meaning.
 - Guardrails (1-3 bullets): Key caveats or non-diagnostic warnings where relevant.
