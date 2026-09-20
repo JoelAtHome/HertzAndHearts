@@ -13,6 +13,7 @@ from typing import Any
 
 from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
 from hnh.profile_store import ProfileStore
+from hnh.report import format_ecg_sensor_display_name
 
 
 def _compute_rmssd_from_ibis(ibis_ms: list[float]) -> list[float]:
@@ -522,6 +523,7 @@ def import_saved_hrv_package(
         "sensor": {
             "selected_device": "phone_bridge",
             "source_device": source,
+            "ecg_sensor_name": format_ecg_sensor_display_name(source),
             "phone_bridge_session_id": phone_sid,
             "transfer_reason": reason,
         },

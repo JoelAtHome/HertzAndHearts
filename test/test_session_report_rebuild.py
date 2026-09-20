@@ -49,6 +49,11 @@ class SessionReportRebuildTests(unittest.TestCase):
             "disclaimer": {"warning": "RESEARCH USE ONLY"},
             "artifacts": {"csv": {"path": "session.csv", "exists": True}},
             "settings_snapshot": {"SETTLING_DURATION": 15},
+            "sensor": {
+                "selected_device": "phone_bridge",
+                "source_device": "FEATHER",
+                "ecg_sensor_name": "Feather ECG-Box",
+            },
         }
         (session_dir / "session_manifest.json").write_text(
             json.dumps(manifest, indent=2),
@@ -62,6 +67,7 @@ class SessionReportRebuildTests(unittest.TestCase):
             self._write_session_files(session_dir)
             data = build_report_data_from_session_dir(session_dir, profile_name="Admin")
             self.assertEqual(data["profile_id"], "Admin")
+            self.assertEqual(data["ecg_sensor_name"], "Feather ECG-Box")
             self.assertGreater(len(data["hr_values"]), 0)
             self.assertGreaterEqual(len(data["rmssd_values"]), 1)
             self.assertGreaterEqual(len(data["annotations"]), 1)

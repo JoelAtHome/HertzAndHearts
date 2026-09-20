@@ -73,6 +73,24 @@ def is_feather_profile_status_message(message: str) -> bool:
     return text.startswith("feather profile ") or text.startswith("no feather profile ")
 
 
+def format_feather_profile_status_message(message: str) -> str:
+    """PC display copy for Feather soft-match status lines (rewrite implications when useful)."""
+    text = str(message or "").strip()
+    if not text:
+        return text
+    prefix = "no feather profile for "
+    folded = text.casefold()
+    if folded.startswith(prefix):
+        name = text[len(prefix) :].strip() or "this user"
+        return (
+            f"Phone Feather profile for {name} is nonexistent/deselected. "
+            "Streaming uses phone’s current Feather "
+            "ECG tuning coefficients. To align profiles, Switch User here, "
+            "or select/create/rename matching Feather patient on phone."
+        )
+    return text
+
+
 def _coerce_json_bool(raw: object) -> bool | None:
     if isinstance(raw, bool):
         return raw
@@ -566,6 +584,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._last_source_device: str = ""
         self._drain_scheduled = False
         self._saved_hrv_assembly: SavedHrvAssembly | None = None
         self._acked_hrv_session_ids: OrderedDict[str, None] = OrderedDict()
@@ -596,6 +615,17 @@ class PhoneBridgeClient(QObject):
             return sock.state() == QAbstractSocket.ConnectedState
         except Exception:
             return False
+
+    def last_source_device(self) -> str:
+        """Latest PROTOCOL ``source_device`` (e.g. POLAR_H10 / FEATHER), or empty."""
+        return str(getattr(self, "_last_source_device", "") or "").strip()
+
+    def _note_source_device(self, payload: object) -> None:
+        if not isinstance(payload, dict):
+            return
+        raw = str(payload.get("source_device", "")).strip()
+        if raw:
+            self._last_source_device = raw
 
     def is_link_up(self) -> bool:
         return self.is_connected()
@@ -751,6 +781,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_announced = False
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
+        self._last_source_device = ""
         self._saved_hrv_assembly = None
         if self._saved_hrv_ecg_grace.isActive():
             self._saved_hrv_ecg_grace.stop()
@@ -972,6 +1003,7 @@ class PhoneBridgeClient(QObject):
     def _handle_bridge_message(self, payload: object) -> None:
         if not isinstance(payload, dict):
             return
+        self._note_source_device(payload)
         msg_type = str(payload.get("type", "")).strip().lower()
         if msg_type == "status":
             text = str(payload.get("message", "")).strip()

@@ -6,7 +6,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from hnh.report import generate_session_report, generate_session_share_pdf
+from hnh.report import (
+    format_ecg_sensor_display_name,
+    generate_session_report,
+    generate_session_share_pdf,
+)
 from hnh.session_artifacts import default_qtc_payload
 
 
@@ -202,12 +206,27 @@ def build_report_data_from_session_dir(
         if settle is not None:
             settling_duration = int(settle)
 
+    sensor = manifest.get("sensor") if isinstance(manifest, dict) else {}
+    source_device = None
+    selected_device = None
+    if isinstance(sensor, dict):
+        source_device = sensor.get("source_device")
+        selected_device = sensor.get("selected_device")
+        stored_name = str(sensor.get("ecg_sensor_name") or "").strip()
+    else:
+        stored_name = ""
+    ecg_sensor_name = stored_name or format_ecg_sensor_display_name(
+        str(source_device or "").strip() or None,
+        selected_device=str(selected_device or "").strip() or None,
+    )
+
     return {
         "session_id": str(manifest.get("session_id") or session_dir.name),
         "profile_id": profile_id,
         "session_type": "General Monitoring",
         "session_start": started_at,
         "session_end": ended_at,
+        "ecg_sensor_name": ecg_sensor_name,
         "baseline_hr": baseline_hr,
         "baseline_rmssd": baseline_rmssd,
         "last_hr": last_hr,

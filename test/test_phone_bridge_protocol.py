@@ -10,6 +10,7 @@ from hnh.sensor import (
     build_phone_bridge_client_info,
     build_ritual_ack,
     finalize_saved_hrv_package,
+    format_feather_profile_status_message,
     is_feather_profile_status_message,
     parse_phone_bridge_discover_reply,
     parse_phone_bridge_leads_off_status,
@@ -51,6 +52,21 @@ class FeatherProfileStatusMessageTests(unittest.TestCase):
         self.assertFalse(is_feather_profile_status_message("Connected to Phone Bridge."))
         self.assertFalse(is_feather_profile_status_message(""))
         self.assertFalse(is_feather_profile_status_message("Receiving saved HRV…"))
+
+    def test_no_match_appends_implications(self):
+        text = format_feather_profile_status_message("No Feather profile for Admin")
+        self.assertTrue(
+            text.startswith("Phone Feather profile for Admin is nonexistent/deselected.")
+        )
+        self.assertIn("Streaming uses phone", text)
+        self.assertIn("ECG tuning coefficients", text)
+        self.assertIn("Switch User", text)
+        self.assertIn("select/create/rename", text.casefold())
+        self.assertNotIn("No Feather profile", text)
+
+    def test_other_feather_lines_unchanged(self):
+        msg = "Feather profile switched: Payton"
+        self.assertEqual(format_feather_profile_status_message(msg), msg)
 
 
 class PhoneBridgeLeadsOffParseTests(unittest.TestCase):
@@ -314,6 +330,31 @@ class PhoneBridgeRequestSavedHrvTests(unittest.TestCase):
         client.is_connected = lambda: True  # type: ignore[method-assign]
         self.assertTrue(client.request_saved_hrv())
         self.assertEqual(sent, [{"type": "ritual_request", "session_id": None}])
+
+
+class PhoneBridgeSourceDeviceTrackingTests(unittest.TestCase):
+    def test_status_updates_last_source_device(self):
+        client = PhoneBridgeClient()
+        self.assertEqual(client.last_source_device(), "")
+        client._handle_bridge_message(
+            {
+                "type": "status",
+                "message": "streaming",
+                "source_device": "FEATHER",
+                "connected": True,
+            }
+        )
+        self.assertEqual(client.last_source_device(), "FEATHER")
+        client._handle_bridge_message(
+            {
+                "type": "session_state",
+                "session_id": "x",
+                "mode": "stream",
+                "state": "streaming",
+                "source_device": "POLAR_H10",
+            }
+        )
+        self.assertEqual(client.last_source_device(), "POLAR_H10")
 
 
 class PhoneBridgeSavedHrvAssembleTests(unittest.TestCase):

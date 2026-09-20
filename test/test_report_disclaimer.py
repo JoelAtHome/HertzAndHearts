@@ -29,6 +29,7 @@ class ReportDisclaimerTests(unittest.TestCase):
                 "session_type": "General Monitoring",
                 "session_start": datetime(2026, 2, 25, 9, 0, 0),
                 "session_end": datetime(2026, 2, 25, 9, 15, 0),
+                "ecg_sensor_name": "Polar H10",
                 "baseline_hr": 72.0,
                 "baseline_rmssd": 28.5,
                 "last_hr": 68.0,
@@ -62,6 +63,9 @@ class ReportDisclaimerTests(unittest.TestCase):
             )
             self.assertIn("Saved Disclaimer Text", all_text)
             self.assertIn("Sample disclaimer body.", all_text)
+            table_text = self._doc_table_text(doc)
+            self.assertIn("ECG Sensor", table_text)
+            self.assertIn("Polar H10", table_text)
 
     def test_report_includes_annotation_associations_section_when_present(self):
         with TemporaryDirectory() as tmp:
@@ -72,6 +76,7 @@ class ReportDisclaimerTests(unittest.TestCase):
                 "session_type": "General Monitoring",
                 "session_start": datetime(2026, 2, 25, 9, 0, 0),
                 "session_end": datetime(2026, 2, 25, 9, 15, 0),
+                "ecg_sensor_name": "Polar H10",
                 "baseline_hr": 72.0,
                 "baseline_rmssd": 28.5,
                 "last_hr": 68.0,

@@ -78,6 +78,8 @@ REGISTRY = OrderedDict([
         "tooltip": (
             "Folder where finalized sessions (CSV, report, EDF+) are written. "
             "Leave empty to use the app data folder's Sessions/{profile} location. "
+            "Sessions are always stored in subfolders under this path as "
+            "YYYY/YYYY-MM-DD/YYYYMMDD-HHMMSS/ (not directly in the folder you choose). "
             "Stored when you confirm Save & Close; the next Stop & Save uses this path "
             "(no app restart)."
         ),

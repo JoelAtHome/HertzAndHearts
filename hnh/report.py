@@ -29,6 +29,34 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 _REPORT_RMSSD_HRV_STABILIZE_SECONDS = 60.0
 
 
+def format_ecg_sensor_display_name(
+    source_device: str | None = None,
+    *,
+    selected_device: str | None = None,
+) -> str:
+    """Map protocol / BLE labels to report-friendly ECG sensor names.
+
+    Typical outputs: ``Feather ECG-Box``, ``Polar H10``. Falls back to a cleaned
+    ``selected_device`` string, or ``--`` when unknown.
+    """
+    raw = str(source_device or "").strip()
+    if not raw:
+        raw = str(selected_device or "").strip()
+    if not raw:
+        return "--"
+    # BLE menu entries look like "Polar H10, AA:BB:CC:DD:EE:FF".
+    if "," in raw:
+        raw = raw.split(",", 1)[0].strip() or raw
+    key = raw.casefold().replace(" ", "_").replace("-", "_")
+    if key in {"feather", "feather_ecg_box", "ecg_box", "ecgbox"} or "feather" in key:
+        return "Feather ECG-Box"
+    if key in {"polar_h10", "polar", "h10"} or "polar" in key:
+        return "Polar H10"
+    if key in {"other", "phone_bridge", "imported", "--"}:
+        return "--"
+    return raw
+
+
 def _add_heading(doc: Document, text: str, level: int = 2, *, compact: bool = False):
     h = doc.add_heading(text, level=level)
     for run in h.runs:
@@ -682,6 +710,12 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     )
 
     profile_name = str(data.get("profile_id", "--"))
+    ecg_sensor = str(data.get("ecg_sensor_name") or "").strip()
+    if not ecg_sensor:
+        ecg_sensor = format_ecg_sensor_display_name(
+            str(data.get("source_device") or "").strip() or None,
+            selected_device=str(data.get("selected_device") or "").strip() or None,
+        )
     prefix_story = [
         Paragraph(f"Hertz & Hearts - One-Page Session Report: {profile_name}", title_style),
         Paragraph(f"Report generated: {format_datetime_for_display(session_end)}", generated_style),
@@ -692,6 +726,7 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
             body_style,
         ),
         Paragraph(f"Session Type: {data.get('session_type', 'General Monitoring')}", body_style),
+        Paragraph(f"ECG Sensor: {ecg_sensor}", body_style),
         Paragraph(f"Duration: {duration_text}", body_style),
         Paragraph(
             f"Report Stage: {'Data collected so far' if str(data.get('report_stage', 'final')).strip().lower() == 'draft' else 'Final'}",
@@ -824,6 +859,7 @@ def generate_session_report(path: str, data: dict) -> None:
         hr_time_seconds, rmssd_time_seconds, hrv_time_seconds, stress_ratio_time_seconds -- timeline arrays
         notes  -- str from user
         disclaimer -- dict with warning/text/source/hash/ack metadata
+        ecg_sensor_name -- optional display name (Feather ECG-Box / Polar H10)
     """
     output = Path(path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -901,12 +937,19 @@ def generate_session_report(path: str, data: dict) -> None:
     session_type = data.get("session_type", "General Monitoring")
     report_stage = data.get("report_stage", "final").strip().lower()
     report_label = "Data collected so far" if report_stage == "draft" else "Final"
+    ecg_sensor = str(data.get("ecg_sensor_name") or "").strip()
+    if not ecg_sensor:
+        ecg_sensor = format_ecg_sensor_display_name(
+            str(data.get("source_device") or "").strip() or None,
+            selected_device=str(data.get("selected_device") or "").strip() or None,
+        )
     _add_key_value_table(doc, [
         (
             "Session Start Date & Time",
             format_datetime_for_display(start),
         ),
         ("Session Type", session_type),
+        ("ECG Sensor", ecg_sensor),
         ("Report Stage", report_label),
         ("Total Duration", f"{duration_min} minutes"),
     ], label_width_in=1.92, value_width_in=3.04, compact=True)

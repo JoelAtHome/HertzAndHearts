@@ -1347,8 +1347,26 @@ class ProfileStore:
         duplicate_disk_groups: list[dict[str, Any]] = []
         for sid in sorted(entries_by_sid.keys()):
             entries = entries_by_sid[sid]
+            # Collapse accidental re-scans of the same folder (overlapping scan roots).
+            unique_entries: list[dict[str, Any]] = []
+            seen_dirs: set[str] = set()
+            for e in entries:
+                raw_dir = str(e.get("session_dir") or "").strip()
+                if not raw_dir:
+                    continue
+                try:
+                    dir_key = str(Path(raw_dir).resolve()).casefold()
+                except OSError:
+                    dir_key = raw_dir.casefold()
+                if dir_key in seen_dirs:
+                    continue
+                seen_dirs.add(dir_key)
+                unique_entries.append(e)
+            entries = unique_entries
             if len(entries) == 1:
                 disk_by_id[sid] = self._disk_record_strip_meta(entries[0])
+                continue
+            if len(entries) < 2:
                 continue
             sorted_by_time = sorted(entries, key=lambda e: float(e.get("manifest_mtime") or 0.0))
             duplicate_disk_groups.append(

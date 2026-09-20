@@ -45,6 +45,7 @@ from hnh.sensor import (
     SensorClient,
     SensorScanner,
     discover_phone_bridge_hosts,
+    format_feather_profile_status_message,
     is_feather_profile_status_message,
 )
 from hnh.linux_ble_prep import LinuxBlePrepWorker
@@ -69,6 +70,7 @@ from hnh.settings import (
 )
 from hnh.report import (
     format_datetime_for_display,
+    format_ecg_sensor_display_name,
     generate_session_report,
     generate_session_share_pdf,
     get_date_display_format_for_qt,
@@ -3029,16 +3031,35 @@ class SessionReassignDialog(QDialog):
 class DuplicateSessionResolveDialog(QDialog):
     """Explorer-style resolution for duplicate session folders sharing one session ID."""
 
-    def __init__(self, session_id: str, locations: list[dict], parent=None):
+    def __init__(
+        self,
+        session_id: str,
+        locations: list[dict],
+        parent=None,
+        *,
+        progress_done: int = 0,
+        progress_total: int = 0,
+    ):
         super().__init__(parent)
         self.setWindowTitle(f"Duplicate session — {session_id}")
-        self.resize(900, 420)
+        self.resize(900, 460)
         self._session_id = session_id
         self._locations = list(locations)
         self._result_kind: str = "skip"  # older | newer | path | skip_one
         self._apply_all_same_rule = False
 
         root = QVBoxLayout(self)
+        done = max(0, int(progress_done))
+        total = max(0, int(progress_total))
+        if total > 0:
+            self._progress_label = QLabel(f"{done} of {total} complete")
+            self._progress_label.setStyleSheet("font-weight: bold;")
+            root.addWidget(self._progress_label)
+            self._progress = QProgressBar()
+            self._progress.setRange(0, total)
+            self._progress.setValue(min(done, total))
+            self._progress.setTextVisible(False)
+            root.addWidget(self._progress)
         intro = QLabel(
             f"Multiple folders claim session ID <b>{session_id}</b>. "
             "Choose which folder to keep; other locations will be deleted from disk."
@@ -3221,6 +3242,7 @@ class SessionIntegrityDialog(QDialog):
             self._fill_trends_cb,
         ):
             cb.stateChanged.connect(self._update_apply_enabled)
+        self._remove_missing_db_cb.stateChanged.connect(self._refresh_audit_report_text)
 
         self._report = QTextEdit()
         self._report.setReadOnly(True)
@@ -3336,7 +3358,10 @@ class SessionIntegrityDialog(QDialog):
             "",
         ]
         if missing_on_disk:
-            lines.append("Sample missing on disk:")
+            if self._remove_missing_db_cb.isChecked():
+                lines.append("Sample missing on disk. Repair will remove these from DB:")
+            else:
+                lines.append("Sample missing on disk:")
             lines.extend(self._sample_lines(missing_on_disk, "session_dir"))
             lines.append("")
         if missing_in_db:
@@ -3358,6 +3383,11 @@ class SessionIntegrityDialog(QDialog):
             )
         return "\n".join(lines)
 
+    def _refresh_audit_report_text(self) -> None:
+        if self._last_audit is None:
+            return
+        self._report.setPlainText(self._render_audit_report(self._last_audit))
+
     def _clear_dup_grid(self) -> None:
         while self._dup_grid.count():
             item = self._dup_grid.takeAt(0)
@@ -3378,8 +3408,7 @@ class SessionIntegrityDialog(QDialog):
             lbl.setWordWrap(False)
             self._dup_grid.addWidget(lbl, i // ncols, i % ncols)
         self._dup_header.setText(
-            f"Duplicate session IDs (folders) on disk ({len(dup_ids)} total) — "
-            'click an ID, then right-click: "Select entire folder name (Ctrl+A)" or drag to select part.'
+            f"Duplicate session IDs (folders) on disk ({len(dup_ids)} total)"
         )
         self._dup_wrap.show()
 
@@ -3428,64 +3457,107 @@ class SessionIntegrityDialog(QDialog):
         removed_folders = 0
         upserted = 0
         errors: list[str] = []
+        work = [
+            group
+            for group in groups
+            if str(group.get("session_id") or "").strip()
+            and len(list(group.get("locations") or [])) >= 2
+        ]
+        total = len(work)
+        completed = 0
+        progress: QProgressDialog | None = None
 
-        for group in groups:
-            sid = str(group.get("session_id") or "").strip()
-            locs = list(group.get("locations") or [])
-            if not sid or len(locs) < 2:
-                continue
+        def _show_bulk_progress(done: int) -> bool:
+            nonlocal progress
+            if progress is None:
+                progress = QProgressDialog(self)
+                progress.setWindowTitle("Resolving duplicate folders")
+                progress.setCancelButtonText("Stop")
+                progress.setMinimumDuration(0)
+                progress.setWindowModality(Qt.WindowModality.WindowModal)
+                progress.setRange(0, max(1, total))
+                progress.setAutoClose(True)
+                progress.setAutoReset(False)
+                progress.setMinimumWidth(360)
+            progress.setLabelText(f"{done} of {total} complete")
+            progress.setValue(min(done, total))
+            QApplication.processEvents()
+            return bool(progress.wasCanceled())
 
-            kind = "skip"
-            apply_all = False
-            selected_idx = 0
+        try:
+            for group in work:
+                sid = str(group.get("session_id") or "").strip()
+                locs = list(group.get("locations") or [])
 
-            if bulk_rule in ("older", "newer"):
-                kind = bulk_rule
+                kind = "skip"
                 apply_all = False
                 selected_idx = 0
-            else:
-                dlg = DuplicateSessionResolveDialog(sid, locs, parent=self)
-                if dlg.exec() != QDialog.Accepted:
-                    break
-                kind = dlg.result_kind
-                apply_all = dlg.apply_all_same_rule
-                selected_idx = dlg.selected_location_index()
 
-            if kind == "skip_one":
-                continue
+                if bulk_rule in ("older", "newer"):
+                    if _show_bulk_progress(completed):
+                        break
+                    kind = bulk_rule
+                    apply_all = False
+                    selected_idx = 0
+                else:
+                    dlg = DuplicateSessionResolveDialog(
+                        sid,
+                        locs,
+                        parent=self,
+                        progress_done=completed,
+                        progress_total=total,
+                    )
+                    if dlg.exec() != QDialog.Accepted:
+                        break
+                    kind = dlg.result_kind
+                    apply_all = dlg.apply_all_same_rule
+                    selected_idx = dlg.selected_location_index()
 
-            if kind in ("older", "newer") and apply_all and bulk_rule is None:
-                bulk_rule = kind
+                if kind == "skip_one":
+                    completed += 1
+                    continue
 
-            if kind == "older":
-                keep_dir = self._pick_keep_dir_for_rule(locs, "older")
-            elif kind == "newer":
-                keep_dir = self._pick_keep_dir_for_rule(locs, "newer")
-            elif kind == "path":
-                idx = max(0, min(selected_idx, len(locs) - 1))
-                keep_dir = str(locs[idx].get("session_dir") or "").strip()
-            else:
-                continue
+                if kind in ("older", "newer") and apply_all and bulk_rule is None:
+                    bulk_rule = kind
+                    _show_bulk_progress(completed)
 
-            if not keep_dir:
-                errors.append(f"{sid}: could not determine folder to keep.")
-                continue
+                if kind == "older":
+                    keep_dir = self._pick_keep_dir_for_rule(locs, "older")
+                elif kind == "newer":
+                    keep_dir = self._pick_keep_dir_for_rule(locs, "newer")
+                elif kind == "path":
+                    idx = max(0, min(selected_idx, len(locs) - 1))
+                    keep_dir = str(locs[idx].get("session_dir") or "").strip()
+                else:
+                    continue
 
-            remove_dirs = [
-                str(loc.get("session_dir") or "").strip()
-                for loc in locs
-                if str(loc.get("session_dir") or "").strip()
-                and str(loc.get("session_dir") or "").strip().casefold() != keep_dir.casefold()
-            ]
-            try:
-                result = self._store.resolve_disk_duplicate_session(
-                    keep_session_dir=keep_dir,
-                    remove_session_dirs=remove_dirs,
-                )
-                removed_folders += int(result.get("removed_folders") or 0)
-                upserted += int(result.get("upserted_rows") or 0)
-            except Exception as exc:
-                errors.append(f"{sid}: {exc}")
+                if not keep_dir:
+                    errors.append(f"{sid}: could not determine folder to keep.")
+                    completed += 1
+                    continue
+
+                remove_dirs = [
+                    str(loc.get("session_dir") or "").strip()
+                    for loc in locs
+                    if str(loc.get("session_dir") or "").strip()
+                    and str(loc.get("session_dir") or "").strip().casefold() != keep_dir.casefold()
+                ]
+                try:
+                    result = self._store.resolve_disk_duplicate_session(
+                        keep_session_dir=keep_dir,
+                        remove_session_dirs=remove_dirs,
+                    )
+                    removed_folders += int(result.get("removed_folders") or 0)
+                    upserted += int(result.get("upserted_rows") or 0)
+                except Exception as exc:
+                    errors.append(f"{sid}: {exc}")
+                completed += 1
+                if bulk_rule in ("older", "newer"):
+                    if _show_bulk_progress(completed):
+                        break
+        finally:
+            if progress is not None:
+                progress.close()
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
@@ -6987,23 +7059,33 @@ class View(QMainWindow):
         )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
+        self._more_menu.setToolTipsVisible(True)
         self._more_menu.addAction("History / Session Replay", self._open_history)
         self._more_menu.addAction("Trend / Compare / Insight", self._open_trends)
-        self._more_menu.addAction("Manage Profiles", self._open_profile_manager)
-        self._more_menu.addAction("Reassign Session(s)…", self._open_session_reassign_utility)
-        self._more_menu.addAction("Session Integrity Audit…", self._open_session_integrity_utility)
+        self._more_profiles_action = self._more_menu.addAction(
+            "Manage Profiles", self._open_profile_manager
+        )
+        self._more_reassign_action = self._more_menu.addAction(
+            "Reassign Session(s)…", self._open_session_reassign_utility
+        )
+        self._more_integrity_action = self._more_menu.addAction(
+            "Session Integrity Audit…", self._open_session_integrity_utility
+        )
         self._more_menu.addAction("Switch User", self._on_logout_clicked)
         self._more_menu.addAction("Settings…", self._open_settings)
         self._more_menu.addAction("Support Development…", self._open_support_options)
         self._more_menu.addSeparator()
-        self._import_action = self._more_menu.addAction("Import Session to History", self._on_import_session)
+        self._import_action = self._more_menu.addAction(
+            "Import Session to History", self._on_import_session
+        )
         self._request_saved_hrv_action = self._more_menu.addAction(
             "Request saved HRV", self._on_request_saved_hrv
         )
-        self._request_saved_hrv_action.setToolTip(
+        self._request_saved_hrv_tooltip = (
             "Ask the connected phone for its latest saved HRV recording "
             "(same as Tech Send HRV). Adds to Session History when new."
         )
+        self._request_saved_hrv_action.setToolTip(self._request_saved_hrv_tooltip)
         self._more_menu.aboutToShow.connect(self._refresh_more_menu_actions)
         self._more_menu.addSeparator()
         self._help_menu = QMenu("Help", self._more_menu)
@@ -7011,6 +7093,7 @@ class View(QMainWindow):
         self._more_menu.addMenu(self._help_menu)
         self._more_menu.addAction("About Hertz && Hearts…", self._show_about_dialog)
         self._more_button.setMenu(self._more_menu)
+        self._refresh_more_menu_actions()
 
         # History, Trends, Profiles moved to More menu
 
@@ -8553,6 +8636,7 @@ class View(QMainWindow):
         if getattr(self, "_morning_baseline_cb", None):
             self._morning_baseline_cb.setEnabled(True)
         self._import_action.setEnabled(not is_recording)
+        self._refresh_more_menu_actions()
         self.annotation.setEnabled(annotation_available)
         self.annotation_button.setEnabled(annotation_available)
         annotation_placeholder = (
@@ -8613,6 +8697,25 @@ class View(QMainWindow):
         if not text:
             return "--"
         return text
+
+    def _current_ecg_sensor_name(self) -> str:
+        """Friendly ECG sensor name for manifests/reports (Feather ECG-Box / Polar H10)."""
+        source = ""
+        bridge = getattr(self, "phone_bridge", None)
+        if bridge is not None and hasattr(bridge, "last_source_device"):
+            try:
+                source = str(bridge.last_source_device() or "").strip()
+            except Exception:
+                source = ""
+        if not source:
+            ble = getattr(self, "ble_sensor", None) or getattr(self, "sensor", None)
+            ble_name = str(getattr(ble, "_connected_device_name", "") or "").strip()
+            if ble_name:
+                source = ble_name
+        return format_ecg_sensor_display_name(
+            source or None,
+            selected_device=self._current_sensor_label(),
+        )
 
     def get_default_session_save_path(self) -> str:
         """Return the default session save path (Sessions/{profile}) for display in Settings."""
@@ -8754,6 +8857,7 @@ class View(QMainWindow):
             "session_type": "General Monitoring",
             "session_start": session_start,
             "session_end": session_end,
+            "ecg_sensor_name": self._current_ecg_sensor_name(),
             "baseline_hr": self.baseline_hr,
             "baseline_rmssd": self.baseline_rmssd,
             "last_hr": last_hr,
@@ -8824,7 +8928,13 @@ class View(QMainWindow):
             "profile_id": bundle.profile_id,
             "state": state,
             "report_stage": report_stage or ("draft" if state == "recording" else "final"),
-            "sensor": {"selected_device": self._current_sensor_label()},
+            "sensor": {
+                "selected_device": self._current_sensor_label(),
+                "source_device": (
+                    str(self.phone_bridge.last_source_device() or "").strip() or None
+                ),
+                "ecg_sensor_name": self._current_ecg_sensor_name(),
+            },
             "timing": {
                 "started_at": bundle.started_at.isoformat(),
                 "first_data_at": (
@@ -10398,6 +10508,18 @@ class View(QMainWindow):
         except OSError:
             return
 
+    @staticmethod
+    def _path_is_under(child: Path, parent: Path) -> bool:
+        try:
+            child.resolve().relative_to(parent.resolve())
+            return True
+        except (OSError, ValueError):
+            try:
+                child.expanduser().relative_to(parent.expanduser())
+                return True
+            except ValueError:
+                return False
+
     def _session_integrity_scan_roots(self) -> list[Path]:
         roots: list[Path] = []
         roots.append(self._session_root / "Sessions")
@@ -10410,14 +10532,23 @@ class View(QMainWindow):
         current_path = str(getattr(self.settings, "SESSION_SAVE_PATH", "") or "").strip()
         if current_path:
             roots.append(Path(current_path))
-        deduped: list[Path] = []
+        # Exact-path dedupe first.
+        exact: list[Path] = []
         seen: set[str] = set()
         for p in roots:
             key = str(Path(p)).strip().casefold()
             if not key or key in seen:
                 continue
             seen.add(key)
-            deduped.append(Path(p))
+            exact.append(Path(p))
+        # Drop nested save paths (e.g. Sessions/Guest under Sessions) so the same
+        # manifest is not discovered twice via overlapping rglob scans.
+        exact.sort(key=lambda p: len(str(p)))
+        deduped: list[Path] = []
+        for p in exact:
+            if any(self._path_is_under(p, parent) for parent in deduped):
+                continue
+            deduped.append(p)
         return deduped
 
     def _open_session_integrity_utility(self):
@@ -10622,11 +10753,62 @@ class View(QMainWindow):
             )
 
     def _refresh_more_menu_actions(self) -> None:
-        action = getattr(self, "_request_saved_hrv_action", None)
-        if action is None:
-            return
-        linked = isinstance(self.sensor, PhoneBridgeClient) and self.sensor.is_connected()
-        action.setEnabled(linked)
+        is_recording = self._session_state == "recording"
+        recording_tip = "Unavailable during session recording"
+        is_admin = False
+        try:
+            store = getattr(self, "_profile_store", None)
+            if store is not None:
+                is_admin = bool(store.profile_is_admin(self._session_profile_id))
+        except Exception:
+            is_admin = False
+
+        profiles = getattr(self, "_more_profiles_action", None)
+        if profiles is not None:
+            profiles.setEnabled(not is_recording)
+            profiles.setToolTip(recording_tip if is_recording else "")
+
+        reassign = getattr(self, "_more_reassign_action", None)
+        if reassign is not None:
+            if is_recording:
+                reassign.setEnabled(False)
+                reassign.setToolTip(recording_tip)
+            elif not is_admin:
+                reassign.setEnabled(False)
+                reassign.setToolTip("Available to Admin profiles only")
+            else:
+                reassign.setEnabled(True)
+                reassign.setToolTip("")
+
+        integrity = getattr(self, "_more_integrity_action", None)
+        if integrity is not None:
+            if is_recording:
+                integrity.setEnabled(False)
+                integrity.setToolTip(recording_tip)
+            elif not is_admin:
+                integrity.setEnabled(False)
+                integrity.setToolTip("Available to Admin profiles only")
+            else:
+                integrity.setEnabled(True)
+                integrity.setToolTip("")
+
+        import_action = getattr(self, "_import_action", None)
+        if import_action is not None:
+            import_action.setEnabled(not is_recording)
+            import_action.setToolTip(recording_tip if is_recording else "")
+
+        hrv_action = getattr(self, "_request_saved_hrv_action", None)
+        if hrv_action is not None:
+            linked = isinstance(self.sensor, PhoneBridgeClient) and self.sensor.is_connected()
+            hrv_action.setEnabled(linked)
+            if linked:
+                hrv_action.setToolTip(
+                    getattr(self, "_request_saved_hrv_tooltip", "") or ""
+                )
+            else:
+                hrv_action.setToolTip(
+                    "Unavailable until connected to Phone Bridge"
+                )
 
     def _on_request_saved_hrv(self) -> None:
         if not isinstance(self.sensor, PhoneBridgeClient):
@@ -11665,7 +11847,8 @@ class View(QMainWindow):
         display_status = status
         feather_status = is_feather_profile_status_message(status)
         if feather_status:
-            self._show_feather_profile_banner(status)
+            display_status = format_feather_profile_status_message(status)
+            self._show_feather_profile_banner(display_status)
         if status.startswith("Scanning for BLE sensors..."):
             self._on_scan_state_changed(True)
         elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
