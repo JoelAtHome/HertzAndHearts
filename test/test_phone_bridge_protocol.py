@@ -363,6 +363,23 @@ class PhoneBridgeSourceDeviceTrackingTests(unittest.TestCase):
         )
         self.assertEqual(client.last_source_device(), "POLAR_H10")
 
+    def test_rr_and_ecg_note_source_device(self):
+        client = PhoneBridgeClient()
+        client._handle_bridge_message(
+            {"type": "rr", "rr_ms": 812, "source_device": "FEATHER"}
+        )
+        client._handle_bridge_message(
+            {
+                "type": "ecg",
+                "source_device": "FEATHER",
+                "sample_rate_hz": 130,
+                "samples_mv": [0.1],
+            }
+        )
+        self.assertEqual(client.last_source_device(), "FEATHER")
+        client._drop_socket(emit_status=False)
+        self.assertEqual(client.last_source_device(), "")
+
 
 class PhoneBridgeSavedHrvAssembleTests(unittest.TestCase):
     def _summary(self, **overrides):

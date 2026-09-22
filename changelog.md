@@ -1,6 +1,9 @@
 # Changelog
 
 ### Unreleased
++ bugfix: Session Overview keeps the last ECG sensor (`Feather ECG-Box` or `Polar H10`) after the phone link drops. The name is frozen on the open session the first time `source_device` arrives, including on live `rr` / `ecg` lines.
++ bugfix: Phone Bridge Scan no longer opens a second TCP connection to the phone you are already linked to (that was closing Hertz & Hearts with “remote closed connection”).
++ bugfix: Phone Bridge link sends a small ping every 10s so an idle Wi-Fi path does not drop the session after about a minute.
 
 ### Version 1.0.0-beta.4 (September 19 2026)
 + release: Bumped pre-release version to `1.0.0b4` (public label: `1.0.0-beta.4`).

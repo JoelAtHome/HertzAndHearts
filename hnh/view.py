@@ -294,11 +294,13 @@ class PhoneBridgeFindWorker(QThread):
         hint_hosts: list[str] | None = None,
         tcp_port: int | None = None,
         timeout_s: float = 2.5,
+        exclude_hosts: list[str] | None = None,
     ):
         super().__init__(parent)
         self._hint_hosts = list(hint_hosts or [])
         self._tcp_port = tcp_port
         self._timeout_s = float(timeout_s)
+        self._exclude_hosts = list(exclude_hosts or [])
 
     def run(self) -> None:
         try:
@@ -306,6 +308,7 @@ class PhoneBridgeFindWorker(QThread):
                 self._timeout_s,
                 hint_hosts=self._hint_hosts,
                 tcp_port=self._tcp_port,
+                exclude_hosts=self._exclude_hosts,
             )
             self.finished_ok.emit(phones)
         except Exception as exc:
@@ -7068,6 +7071,9 @@ class View(QMainWindow):
         self._last_qtc_diag_logged: tuple = ()  # (method, qrs_source) for DEBUG throttle
         self._session_state = "idle"
         self._session_bundle: SessionBundle | None = None
+        # Frozen for the open session so a phone disconnect cannot blank the report.
+        self._session_ecg_source_device: str = ""
+        self._pending_ecg_source_device: str = ""
         self._ecg_stream: EcgSampleStream | None = None
         self._disclaimer_acknowledged_at: str | None = None
         self._disclaimer_ack_mode = "not_recorded"
@@ -8536,6 +8542,9 @@ class View(QMainWindow):
         lod = getattr(sensor_client, "feather_leads_off_update", None)
         if lod is not None:
             lod.connect(self._on_feather_leads_off_update)
+        source_device = getattr(sensor_client, "source_device_update", None)
+        if source_device is not None:
+            source_device.connect(self._on_bridge_source_device)
 
     def _unbind_sensor_signals(self, sensor_client) -> None:
         try:
@@ -8582,6 +8591,12 @@ class View(QMainWindow):
         if lod is not None:
             try:
                 lod.disconnect(self._on_feather_leads_off_update)
+            except Exception:
+                pass
+        source_device = getattr(sensor_client, "source_device_update", None)
+        if source_device is not None:
+            try:
+                source_device.disconnect(self._on_bridge_source_device)
             except Exception:
                 pass
 
@@ -8745,11 +8760,19 @@ class View(QMainWindow):
             h = str(saved.get("host", "")).strip()
             if h and h not in hints:
                 hints.append(h)
+        # Do not TCP-probe the phone we are already linked to. That second
+        # connection replaces the live socket and HnH shows remote-closed.
+        exclude: list[str] = []
+        if isinstance(self.sensor, PhoneBridgeClient) and self.sensor.is_connected():
+            linked = self._phone_bridge_host_value().strip()
+            if linked:
+                exclude.append(linked)
         self._phone_find_worker = PhoneBridgeFindWorker(
             self,
             hint_hosts=hints,
             tcp_port=int(self.bridge_port_spin.value()),
             timeout_s=2.5,
+            exclude_hosts=exclude,
         )
         self._phone_find_worker.finished_ok.connect(self._on_phone_find_finished)
         self._phone_find_worker.finished_err.connect(self._on_phone_find_failed)
@@ -8839,6 +8862,15 @@ class View(QMainWindow):
         if n == 0:
             candidate = current.strip()
             port = int(self.bridge_port_spin.value())
+            if (
+                candidate
+                and isinstance(self.sensor, PhoneBridgeClient)
+                and self.sensor.is_connected()
+            ):
+                self.show_status(
+                    "No broadcast discovery replies (still connected)."
+                )
+                return
             if candidate:
                 try:
                     with socket.create_connection((candidate, port), timeout=1.2):
@@ -9082,11 +9114,39 @@ class View(QMainWindow):
             return "--"
         return text
 
+    def _on_bridge_source_device(self, source: str) -> None:
+        """Remember the sensor for this session before a later disconnect clears the socket."""
+        text = str(source or "").strip()
+        if not text:
+            return
+        self._pending_ecg_source_device = text
+        if self._session_state != "recording":
+            return
+        if text == self._session_ecg_source_device:
+            return
+        self._session_ecg_source_device = text
+        self._persist_manifest(state="recording", report_stage="draft")
+
+    def _freeze_session_ecg_source_device(self) -> None:
+        live = ""
+        bridge = getattr(self, "phone_bridge", None)
+        if bridge is not None and hasattr(bridge, "last_source_device"):
+            try:
+                live = str(bridge.last_source_device() or "").strip()
+            except Exception:
+                live = ""
+        pending = str(getattr(self, "_pending_ecg_source_device", "") or "").strip()
+        self._session_ecg_source_device = live or pending
+
     def _current_ecg_sensor_name(self) -> str:
         """Friendly ECG sensor name for manifests/reports (Feather ECG-Box / Polar H10)."""
         source = ""
+        if self._session_bundle is not None:
+            source = str(getattr(self, "_session_ecg_source_device", "") or "").strip()
+        if not source:
+            source = str(getattr(self, "_pending_ecg_source_device", "") or "").strip()
         bridge = getattr(self, "phone_bridge", None)
-        if bridge is not None and hasattr(bridge, "last_source_device"):
+        if not source and bridge is not None and hasattr(bridge, "last_source_device"):
             try:
                 source = str(bridge.last_source_device() or "").strip()
             except Exception:
@@ -9366,7 +9426,9 @@ class View(QMainWindow):
             "sensor": {
                 "selected_device": self._current_sensor_label(),
                 "source_device": (
-                    str(self.phone_bridge.last_source_device() or "").strip() or None
+                    str(getattr(self, "_session_ecg_source_device", "") or "").strip()
+                    or str(self.phone_bridge.last_source_device() or "").strip()
+                    or None
                 ),
                 "ecg_sensor_name": self._current_ecg_sensor_name(),
             },
@@ -9514,6 +9576,7 @@ class View(QMainWindow):
             self.signals.annotation.emit(
                 NamedSignal("DisclaimerAckAt", disclaimer["acknowledged_at"])
             )
+        self._freeze_session_ecg_source_device()
         self._set_session_state("recording")
         self._persist_manifest(state="recording", report_stage="draft")
         if auto:

@@ -574,6 +574,7 @@ class PhoneBridgeClient(QObject):
     bridge_rmssd_update = Signal(object)
     feather_leads_off_update = Signal(object)
     saved_hrv_package_ready = Signal(object)
+    source_device_update = Signal(str)
     verity_limited_support = Signal()
     diagnostic_logged = Signal(object)
 
@@ -602,6 +603,7 @@ class PhoneBridgeClient(QObject):
         self._link_watch = QTimer(self)
         self._link_watch.setInterval(2000)
         self._link_watch.timeout.connect(self._poll_link_alive)
+        self._last_link_ping_monotonic = 0.0
 
     def set_client_profile_name(self, profile_name: str) -> None:
         """Update subject name for client_info; re-send when linked (PROTOCOL §8.2)."""
@@ -630,8 +632,10 @@ class PhoneBridgeClient(QObject):
         if not isinstance(payload, dict):
             return
         raw = str(payload.get("source_device", "")).strip()
-        if raw:
-            self._last_source_device = raw
+        if not raw or raw == self._last_source_device:
+            return
+        self._last_source_device = raw
+        self.source_device_update.emit(raw)
 
     def is_link_up(self) -> bool:
         return self.is_connected()
@@ -708,6 +712,12 @@ class PhoneBridgeClient(QObject):
                 sock.flush()
         except Exception:
             self._drop_socket(emit_status=True)
+            return
+        # Payload keeps Wi-Fi/NAT from idle-dropping a quiet link. Phone ignores type ping.
+        now = time.monotonic()
+        if now - float(getattr(self, "_last_link_ping_monotonic", 0.0)) >= 10.0:
+            self._last_link_ping_monotonic = now
+            self._send_ndjson({"type": "ping", "role": "pc"})
 
     def _configure_tcp_keepalive(self, sock: QTcpSocket) -> None:
         try:
@@ -833,6 +843,7 @@ class PhoneBridgeClient(QObject):
         if sock is not None:
             self._configure_tcp_keepalive(sock)
         self._start_link_watch()
+        self._last_link_ping_monotonic = time.monotonic()
         self.status_update.emit(f"Connected to Phone Bridge ({self._host}:{self._port}).")
         self.battery_update.emit(-1)
         self._send_client_info()
@@ -1309,7 +1320,12 @@ def _tcp_probe_phone_bridge_hosts(
     port: int,
     timeout_s: float = 0.35,
     max_workers: int = 32,
+    exclude_hosts: set[str] | None = None,
 ) -> list[dict[str, object]]:
+    # A live Phone Bridge session is one TCP client. Probing that IP would
+    # replace (and drop) Hertz & Hearts on bridge builds before the probe-ignore fix.
+    skipped = exclude_hosts or set()
+    hosts = [ip for ip in hosts if ip not in skipped]
     found: dict[str, dict[str, object]] = {}
 
     def _probe(ip: str) -> tuple[str, bool]:
@@ -1342,6 +1358,7 @@ def discover_phone_bridge_hosts(
     *,
     hint_hosts: list[str] | None = None,
     tcp_port: int | None = None,
+    exclude_hosts: list[str] | None = None,
 ) -> list[dict[str, object]]:
     """
     Discover Android phone-bridge instances on the LAN. Returns rows like:
@@ -1355,12 +1372,14 @@ def discover_phone_bridge_hosts(
     if port < 1 or port > 65535:
         port = int(PHONE_BRIDGE_PORT_DEFAULT)
     hints = _normalize_hint_hosts(hint_hosts)
+    excluded = set(_normalize_hint_hosts(exclude_hosts))
+    hints = [h for h in hints if h not in excluded]
     found: dict[str, dict[str, object]] = {}
 
     # Recent / typed IPs first (parallel; refused connects are fast).
     if hints:
         for row in _tcp_probe_phone_bridge_hosts(
-            hints, port=port, timeout_s=0.45, max_workers=8
+            hints, port=port, timeout_s=0.45, max_workers=8, exclude_hosts=excluded
         ):
             ip = str(row.get("ip", "")).strip()
             if ip:
@@ -1428,9 +1447,9 @@ def discover_phone_bridge_hosts(
     if not found:
         tcp_hosts = _lan_ipv4_hosts_for_probe(max_hosts=1024)
         hint_set = set(hints)
-        tcp_hosts = [h for h in tcp_hosts if h not in hint_set]
+        tcp_hosts = [h for h in tcp_hosts if h not in hint_set and h not in excluded]
         for row in _tcp_probe_phone_bridge_hosts(
-            tcp_hosts, port=port, timeout_s=0.30, max_workers=48
+            tcp_hosts, port=port, timeout_s=0.30, max_workers=48, exclude_hosts=excluded
         ):
             ip = str(row.get("ip", "")).strip()
             if not ip:
