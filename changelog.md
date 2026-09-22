@@ -1,6 +1,11 @@
 # Changelog
 
 ### Unreleased
+
+### Version 1.0.0-beta.5 (September 21 2026)
++ release: Bumped pre-release version to `1.0.0b5` (public label: `1.0.0-beta.5`).
++ bugfix: Feather lead-off no longer looks like a dropped phone link. While electrodes are off, Hertz & Hearts keeps the Check electrodes banner and the phone socket instead of declaring “No data” and resetting the stream.
++ bugfix: A quiet phone link is not closed after ~15s with no Feather samples. While the phone socket is still connected, Hertz & Hearts keeps the session (same as VNS-TA during lead-off) instead of treating the pause as “No data” or a dropped link. Phone `ping` lines also refresh that clock.
 + bugfix: Session Overview keeps the last ECG sensor (`Feather ECG-Box` or `Polar H10`) after the phone link drops. The name is frozen on the open session the first time `source_device` arrives, including on live `rr` / `ecg` lines.
 + bugfix: Phone Bridge Scan no longer opens a second TCP connection to the phone you are already linked to (that was closing Hertz & Hearts with “remote closed connection”).
 + bugfix: Phone Bridge link sends a small ping every 10s so an idle Wi-Fi path does not drop the session after about a minute.

@@ -6991,6 +6991,7 @@ class View(QMainWindow):
         self._plot_start_delay_seconds = float(MAIN_PLOT_START_SECONDS)
         self.is_phase_active = False
         self._fault_active = False
+        self._feather_leads_off_active = False
         self._consecutive_good = 0
         self._hr_ewma = None
         self._hr_ewma_post_warmup = False
@@ -8545,6 +8546,9 @@ class View(QMainWindow):
         source_device = getattr(sensor_client, "source_device_update", None)
         if source_device is not None:
             source_device.connect(self._on_bridge_source_device)
+        link_ping = getattr(sensor_client, "link_ping", None)
+        if link_ping is not None:
+            link_ping.connect(self._on_phone_bridge_link_ping)
 
     def _unbind_sensor_signals(self, sensor_client) -> None:
         try:
@@ -8597,6 +8601,12 @@ class View(QMainWindow):
         if source_device is not None:
             try:
                 source_device.disconnect(self._on_bridge_source_device)
+            except Exception:
+                pass
+        link_ping = getattr(sensor_client, "link_ping", None)
+        if link_ping is not None:
+            try:
+                link_ping.disconnect(self._on_phone_bridge_link_ping)
             except Exception:
                 pass
 
@@ -10427,16 +10437,30 @@ class View(QMainWindow):
         """Sticky check-electrodes cue when Phone Bridge reports Feather LOD."""
         banner = getattr(self, "_feather_leads_off_banner", None)
         label = getattr(self, "_feather_leads_off_banner_label", None)
+        active = isinstance(payload, dict) and bool(payload.get("active"))
+        was = bool(getattr(self, "_feather_leads_off_active", False))
+        self._feather_leads_off_active = active
+        # MCU holds IBI and the phone holds ECG while leads are open. That
+        # quiet stretch is not a dropped phone link — restart the data clock.
+        if active or was:
+            self._last_data_time = time.time()
         if banner is None or label is None:
             return
-        if not isinstance(payload, dict) or not payload.get("active"):
+        if not active:
             banner.setVisible(False)
+            if was and self._is_sensor_connected() and not self._fault_active:
+                self._set_signal_indicator("Connected (waiting for beats)", "#2196F3")
             return
         msg = str(payload.get("message") or "").strip()
         if not msg:
             msg = "Feather lead-off"
         label.setText(f"Check electrodes — {msg}")
         banner.setVisible(True)
+        self._set_signal_indicator("Check electrodes", "#F9A825")
+
+    def _on_phone_bridge_link_ping(self) -> None:
+        """Phone ping: TCP is up even when Feather RR/ECG are paused."""
+        self._last_data_time = time.time()
 
     def _on_update_banner_download(self) -> None:
         rel = self._update_banner_release
@@ -12687,6 +12711,10 @@ class View(QMainWindow):
                     self.sensor.disconnect_client()
                     self.show_status("Phone Bridge disconnected (remote closed connection).")
                     return
+                # Socket is still up. No RR/ECG (lead-off, or any quiet gap)
+                # is not a dropped phone link and must not reset the stream.
+                self._last_data_time = time.time()
+                return
             self._fault_active = True
             self._consecutive_good = 0
             self._record_disconnect_start("No data (timeout)")
@@ -13002,6 +13030,9 @@ class View(QMainWindow):
             self._last_data_time = time.time()
             if not self._data_watchdog.isActive():
                 self._data_watchdog.start()
+            # A trailing gap beat after lead-off must not trip dropout/noise.
+            if getattr(self, "_feather_leads_off_active", False):
+                return
             if len(data.value[1]) > 0:
                 last_ibi_ms = data.value[1][-1]
 

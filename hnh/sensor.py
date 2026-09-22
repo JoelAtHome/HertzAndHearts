@@ -575,6 +575,7 @@ class PhoneBridgeClient(QObject):
     feather_leads_off_update = Signal(object)
     saved_hrv_package_ready = Signal(object)
     source_device_update = Signal(str)
+    link_ping = Signal()
     verity_limited_support = Signal()
     diagnostic_logged = Signal(object)
 
@@ -1104,6 +1105,10 @@ class PhoneBridgeClient(QObject):
                     "source_device": str(payload.get("source_device", "")).strip() or None,
                     "emitted_at": str(payload.get("emitted_at", "")).strip() or None,
                 }
+            return
+        if msg_type == "ping":
+            # Phone (or our own echo path) — link is up even when RR/ECG are gated.
+            self.link_ping.emit()
             return
         # Forward-compatible: ignore unknown types.
 
