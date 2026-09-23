@@ -61,6 +61,20 @@ class ModelQtcWorkerTests(unittest.TestCase):
         self.assertAlmostEqual(trend["t_sec"], 650.0 / float(ECG_SAMPLE_RATE))
         self.assertTrue(trend["is_low_quality"])
 
+    def test_sample_rate_scales_qtc_timeline(self):
+        model = self._make_model()
+        model.set_ecg_sample_rate(250)
+        model._qtc_active_seq = 3
+        model._qtc_latest_request_seq = 3
+        received: list[NamedSignal] = []
+        model.qtc_update.connect(received.append)
+        model._on_qtc_compute_done(
+            seq=3,
+            total_samples=500,
+            payload={"trend_point": {}, "quality": {"is_valid": False}},
+        )
+        self.assertAlmostEqual(received[0].value["trend_point"]["t_sec"], 2.0)
+
 
 if __name__ == "__main__":
     unittest.main()

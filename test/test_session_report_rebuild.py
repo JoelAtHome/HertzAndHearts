@@ -9,6 +9,8 @@ import unittest
 from hnh.session_report_rebuild import (
     build_report_data_from_session_dir,
     generate_reports_for_session_dir,
+    qtc_config_for_rate,
+    recompute_qtc_from_samples,
 )
 
 
@@ -72,6 +74,27 @@ class SessionReportRebuildTests(unittest.TestCase):
             self.assertGreaterEqual(len(data["rmssd_values"]), 1)
             self.assertGreaterEqual(len(data["annotations"]), 1)
             self.assertIn("method_suggestion", data["qtc"])
+            self.assertEqual(data["ecg_sample_rate_hz"], 250)
+            self.assertEqual(data["ecg_samples"], [])
+
+    def test_feather_session_without_stored_rate_uses_250_hz(self):
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp) / "session-feather"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            self._write_session_files(session_dir)
+            import numpy as np
+
+            samples = np.asarray([0.0, 1.0, -1.0, 0.5], dtype="<f4")
+            (session_dir / "session_ecg.f32").write_bytes(samples.tobytes())
+            data = build_report_data_from_session_dir(session_dir)
+            self.assertEqual(data["ecg_sample_rate_hz"], 250)
+            self.assertEqual(len(data["ecg_samples"]), 4)
+
+    def test_qtc_recompute_skips_traces_shorter_than_five_seconds(self):
+        cfg = qtc_config_for_rate(250, {"QTC_MIN_VALID_BEATS": 8})
+        self.assertEqual(cfg.sampling_rate, 250)
+        self.assertEqual(cfg.min_valid_beats, 8)
+        self.assertIsNone(recompute_qtc_from_samples([0.0] * 100, 250))
 
     def test_generate_reports_for_session_dir_writes_docx_and_pdf(self):
         with TemporaryDirectory() as tmp:

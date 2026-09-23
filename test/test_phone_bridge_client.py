@@ -110,6 +110,41 @@ class PhoneBridgeClientReconnectTests(unittest.TestCase):
         client = PhoneBridgeClient()
         self.assertFalse(client.is_link_up())
 
+    def test_ecg_sample_rate_is_announced_before_samples(self):
+        _ensure_app()
+        client = PhoneBridgeClient()
+        events: list[tuple] = []
+        client.ecg_sample_rate_update.connect(lambda hz: events.append(("rate", int(hz))))
+        client.ecg_update.connect(lambda samples: events.append(("samples", list(samples))))
+        client._handle_bridge_message(
+            {
+                "type": "ecg",
+                "source_device": "FEATHER",
+                "sample_rate_hz": 250,
+                "samples_mv": [0.1, 0.2],
+            }
+        )
+        client._handle_bridge_message(
+            {
+                "type": "ecg",
+                "sample_rate_hz": 250,
+                "samples_mv": [0.3],
+            }
+        )
+        self.assertEqual(
+            events,
+            [("rate", 250), ("samples", [0.1, 0.2]), ("samples", [0.3])],
+        )
+        self.assertEqual(client.last_ecg_sample_rate_hz(), 250)
+
+    def test_ecg_without_sample_rate_defaults_to_polar(self):
+        _ensure_app()
+        client = PhoneBridgeClient()
+        rates: list[int] = []
+        client.ecg_sample_rate_update.connect(rates.append)
+        client._handle_bridge_message({"type": "ecg", "samples_mv": [0.1]})
+        self.assertEqual(rates, [130])
+
 
 if __name__ == "__main__":
     unittest.main()

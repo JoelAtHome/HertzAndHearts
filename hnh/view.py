@@ -4701,7 +4701,9 @@ class EcgWindow(QMainWindow):
         # Keep a larger rolling history so zoom-out works immediately.
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
-        buf_size = ECG_SAMPLE_RATE * self._history_sec
+        self._sample_rate_hz = int(ECG_SAMPLE_RATE)
+        self._raw_time_sec = 0.0
+        buf_size = self._sample_rate_hz * self._history_sec
 
         self._times = deque(maxlen=buf_size)
         self._values = deque(maxlen=buf_size)
@@ -4710,7 +4712,7 @@ class EcgWindow(QMainWindow):
         self._pending = deque()
         self._got_first_data = False
         self._drain_rate = max(1, int(
-            ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+            self._sample_rate_hz * (self._settings.ECG_REFRESH_MS / 1000.0)
         ))
 
         self._y_min_smooth = 0.0
@@ -4932,11 +4934,11 @@ class EcgWindow(QMainWindow):
         self._apply_interaction_mode()
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
-        buf_size = ECG_SAMPLE_RATE * self._history_sec
+        buf_size = self._sample_rate_hz * self._history_sec
         self._times = deque(maxlen=buf_size)
         self._values = deque(maxlen=buf_size)
         self._drain_rate = max(1, int(
-            ECG_SAMPLE_RATE * (self._settings.ECG_REFRESH_MS / 1000.0)
+            self._sample_rate_hz * (self._settings.ECG_REFRESH_MS / 1000.0)
         ))
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
@@ -4946,14 +4948,8 @@ class EcgWindow(QMainWindow):
             drop = len(self._pending) - buf_size
             for _ in range(drop):
                 self._pending.popleft()
-        inv_rate = 1.0 / ECG_SAMPLE_RATE
         while self._pending:
-            val = self._pending.popleft()
-            self._times.append(
-                (self._sample_count * inv_rate) + self._timeline_offset_sec
-            )
-            self._values.append(val)
-            self._sample_count += 1
+            self._stamp_sample(self._pending.popleft())
         self._got_first_data = len(self._times) > 0
         self._last_x_range = None
         self._last_y_range = None
@@ -4976,6 +4972,7 @@ class EcgWindow(QMainWindow):
         self._values.clear()
         self._pending.clear()
         self._sample_count = 0
+        self._raw_time_sec = 0.0
         self._timeline_offset_sec = 0.0
         self._synced_xrange = None
         self._follow_main_xrange = True
@@ -5141,8 +5138,8 @@ class EcgWindow(QMainWindow):
         idxs = np.where(mask)[0]
         if idxs.size < 12:
             return None
-        dt = float(np.median(np.diff(t_arr[idxs]))) if idxs.size > 1 else (1.0 / ECG_SAMPLE_RATE)
-        dt = max(dt, 1.0 / (3.0 * ECG_SAMPLE_RATE))
+        dt = float(np.median(np.diff(t_arr[idxs]))) if idxs.size > 1 else (1.0 / self._sample_rate_hz)
+        dt = max(dt, 1.0 / (3.0 * self._sample_rate_hz))
         baseline = float(np.median(y_arr[idxs]))
         z = np.abs(y_arr - baseline)
         thresh = float(np.percentile(z[idxs], 75))
@@ -5600,7 +5597,7 @@ class EcgWindow(QMainWindow):
     def append_samples(self, samples: list):
         added = len(samples)
         self._pending.extend(samples)
-        max_pending = ECG_SAMPLE_RATE * 10
+        max_pending = self._sample_rate_hz * 10
         dropped = 0
         while len(self._pending) > max_pending:
             self._pending.popleft()
@@ -5621,7 +5618,7 @@ class EcgWindow(QMainWindow):
         if self._frozen and event.key() in (Qt.Key_Left, Qt.Key_Right):
             bounds = self._cursor_time_bounds()
             if bounds is not None and self._cursor_a_line.isVisible() and self._cursor_b_line.isVisible():
-                step = 1.0 / float(ECG_SAMPLE_RATE)
+                step = 1.0 / float(self._sample_rate_hz)
                 if event.modifiers() & Qt.ShiftModifier:
                     step *= 5.0
                 delta = -step if event.key() == Qt.Key_Left else step
@@ -5636,9 +5633,29 @@ class EcgWindow(QMainWindow):
                 return
         super().keyPressEvent(event)
 
+    def set_sample_rate(self, sample_rate_hz: int) -> None:
+        """Use the sensor's sample rate for the horizontal time base."""
+        try:
+            rate = int(sample_rate_hz)
+        except (TypeError, ValueError):
+            return
+        if rate < 1 or rate > 2000 or rate == self._sample_rate_hz:
+            return
+        self._sample_rate_hz = rate
+        self._drain_rate = max(1, int(rate * (self._settings.ECG_REFRESH_MS / 1000.0)))
+        buf_size = max(1, rate * int(self._history_sec))
+        if self._times.maxlen != buf_size:
+            self._times = deque(self._times, maxlen=buf_size)
+            self._values = deque(self._values, maxlen=buf_size)
+
+    def _stamp_sample(self, val) -> None:
+        self._times.append(self._raw_time_sec + self._timeline_offset_sec)
+        self._values.append(val)
+        self._raw_time_sec += 1.0 / float(self._sample_rate_hz)
+        self._sample_count += 1
+
     def sync_timeline_to_main(self, main_plot_delay_sec: float):
-        inv_rate = 1.0 / ECG_SAMPLE_RATE
-        current_raw_t = self._sample_count * inv_rate
+        current_raw_t = self._raw_time_sec
         new_offset = -float(main_plot_delay_sec) - current_raw_t
         delta = new_offset - self._timeline_offset_sec
         if delta != 0.0 and self._times:
@@ -5742,21 +5759,16 @@ class EcgWindow(QMainWindow):
             drain = min(self._drain_rate + 2, n_pending)
         redraw_start_ns = time.perf_counter_ns()
 
-        inv_rate = 1.0 / ECG_SAMPLE_RATE
         drained_min = float("inf")
         drained_max = float("-inf")
         for _ in range(drain):
             val = self._pending.popleft()
-            self._times.append(
-                (self._sample_count * inv_rate) + self._timeline_offset_sec
-            )
-            self._values.append(val)
+            self._stamp_sample(val)
             fval = float(val)
             if fval < drained_min:
                 drained_min = fval
             if fval > drained_max:
                 drained_max = fval
-            self._sample_count += 1
 
         try:
             self._paint_live_trace(
@@ -7075,6 +7087,7 @@ class View(QMainWindow):
         # Frozen for the open session so a phone disconnect cannot blank the report.
         self._session_ecg_source_device: str = ""
         self._pending_ecg_source_device: str = ""
+        self._session_ecg_sample_rate_hz: int = int(ECG_SAMPLE_RATE)
         self._ecg_stream: EcgSampleStream | None = None
         self._disclaimer_acknowledged_at: str | None = None
         self._disclaimer_ack_mode = "not_recorded"
@@ -8531,6 +8544,9 @@ class View(QMainWindow):
         sensor_client.verity_limited_support.connect(self._on_verity_limited_support)
         sensor_client.ecg_update.connect(self.model.update_ecg_samples)
         sensor_client.ecg_update.connect(self._append_ecg_stream)
+        rate_update = getattr(sensor_client, "ecg_sample_rate_update", None)
+        if rate_update is not None:
+            rate_update.connect(self._on_ecg_sample_rate)
         sensor_client.status_update.connect(self.show_status)
         sensor_client.battery_update.connect(self._update_battery_display)
         sensor_client.diagnostic_logged.connect(self._on_ble_diagnostic_logged)
@@ -8567,6 +8583,12 @@ class View(QMainWindow):
             sensor_client.ecg_update.disconnect(self._append_ecg_stream)
         except Exception:
             pass
+        rate_update = getattr(sensor_client, "ecg_sample_rate_update", None)
+        if rate_update is not None:
+            try:
+                rate_update.disconnect(self._on_ecg_sample_rate)
+            except Exception:
+                pass
         try:
             sensor_client.status_update.disconnect(self.show_status)
         except Exception:
@@ -9124,6 +9146,25 @@ class View(QMainWindow):
             return "--"
         return text
 
+    def _on_ecg_sample_rate(self, sample_rate_hz: int) -> None:
+        """Apply the phone-bridge ECG sample rate to the trace, QTc, and report."""
+        try:
+            rate = int(sample_rate_hz)
+        except (TypeError, ValueError):
+            return
+        if rate < 1 or rate > 2000:
+            return
+        self._session_ecg_sample_rate_hz = rate
+        window = getattr(self, "ecg_window", None)
+        if window is not None:
+            window.set_sample_rate(rate)
+        model = getattr(self, "model", None)
+        if model is not None:
+            model.set_ecg_sample_rate(rate)
+        stream = getattr(self, "_ecg_stream", None)
+        if stream is not None:
+            stream.sample_rate_hz = rate
+
     def _on_bridge_source_device(self, source: str) -> None:
         """Remember the sensor for this session before a later disconnect clears the socket."""
         text = str(source or "").strip()
@@ -9346,7 +9387,7 @@ class View(QMainWindow):
             "snr_values": list(self._session_snr_values),
             "ecg_samples": ecg_samples,
             "ecg_stream_path": ecg_stream_path,
-            "ecg_sample_rate_hz": ECG_SAMPLE_RATE,
+            "ecg_sample_rate_hz": int(self._session_ecg_sample_rate_hz),
             "ecg_is_simulated": False,
             "notes": "",
             "csv_path": csv_path,
@@ -9379,7 +9420,7 @@ class View(QMainWindow):
         try:
             self._ecg_stream = EcgSampleStream.open_write(
                 bundle.ecg_stream_path,
-                sample_rate_hz=ECG_SAMPLE_RATE,
+                sample_rate_hz=int(self._session_ecg_sample_rate_hz),
             )
         except OSError as exc:
             self._ecg_stream = None
@@ -9441,6 +9482,7 @@ class View(QMainWindow):
                     or None
                 ),
                 "ecg_sensor_name": self._current_ecg_sensor_name(),
+                "ecg_sample_rate_hz": int(self._session_ecg_sample_rate_hz),
             },
             "timing": {
                 "started_at": bundle.started_at.isoformat(),

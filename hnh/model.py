@@ -73,7 +73,8 @@ class Model(QObject):
         self.rr_intervals = deque(maxlen=IBI_BUFFER_SIZE)
         self.rmssd = 0.0
         self.update_counter = 0
-        self._ecg_buffer: deque[float] = deque(maxlen=ECG_SAMPLE_RATE * 120)
+        self._ecg_sample_rate_hz = int(ECG_SAMPLE_RATE)
+        self._ecg_buffer: deque[float] = deque(maxlen=self._ecg_sample_rate_hz * 120)
         self._ecg_samples_since_qtc = 0
         self._ecg_total_samples = 0
         self.latest_qtc_payload: dict = default_qtc_payload()
@@ -134,6 +135,19 @@ class Model(QObject):
             "delta": int(self.ibi_beats_received_count - self.ibi_buffer_updates_count),
         }
 
+    def set_ecg_sample_rate(self, sample_rate_hz: int) -> None:
+        """Match QTc and the ECG buffer to the live sensor sample rate."""
+        try:
+            rate = int(sample_rate_hz)
+        except (TypeError, ValueError):
+            return
+        if rate < 1 or rate > 2000 or rate == self._ecg_sample_rate_hz:
+            return
+        self._ecg_sample_rate_hz = rate
+        maxlen = rate * 120
+        if self._ecg_buffer.maxlen != maxlen:
+            self._ecg_buffer = deque(self._ecg_buffer, maxlen=maxlen)
+
     @Slot(object)
     def update_ecg_samples(self, samples):
         if not samples:
@@ -150,7 +164,7 @@ class Model(QObject):
         self._ecg_total_samples += len(samples)
         self._ecg_samples_since_qtc += len(samples)
         # Recompute every ~2 seconds of incoming ECG.
-        if self._ecg_samples_since_qtc >= ECG_SAMPLE_RATE * 2:
+        if self._ecg_samples_since_qtc >= self._ecg_sample_rate_hz * 2:
             self._ecg_samples_since_qtc = 0
             self._schedule_qtc_compute()
 
@@ -302,7 +316,7 @@ class Model(QObject):
 
     def _build_qtc_config(self) -> QtcConfig:
         return QtcConfig(
-            sampling_rate=ECG_SAMPLE_RATE,
+            sampling_rate=self._ecg_sample_rate_hz,
             summary_window_seconds=int(self._settings.QTC_SUMMARY_WINDOW_SECONDS),
             min_valid_beats=int(self._settings.QTC_MIN_VALID_BEATS),
             fridericia_hr_low_threshold=int(self._settings.QTC_FRIDERICIA_HR_LOW_THRESHOLD),
@@ -314,7 +328,7 @@ class Model(QObject):
         )
 
     def _schedule_qtc_compute(self):
-        if len(self._ecg_buffer) < ECG_SAMPLE_RATE * 5:
+        if len(self._ecg_buffer) < self._ecg_sample_rate_hz * 5:
             return
 
         self._qtc_latest_request_seq += 1
@@ -369,7 +383,7 @@ class Model(QObject):
     def _publish_qtc_payload(self, payload: dict, total_samples: int):
         trend_point = payload.get("trend_point")
         if isinstance(trend_point, dict):
-            trend_point["t_sec"] = float(total_samples) / float(ECG_SAMPLE_RATE)
+            trend_point["t_sec"] = float(total_samples) / float(self._ecg_sample_rate_hz)
             if not payload.get("quality", {}).get("is_valid", False):
                 trend_point["is_low_quality"] = True
         self.latest_qtc_payload = payload

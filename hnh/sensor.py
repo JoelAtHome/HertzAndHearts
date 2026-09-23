@@ -32,7 +32,7 @@ from PySide6.QtNetwork import (
 from math import ceil
 from typing import Final, Union
 from hnh.utils import get_sensor_address, get_sensor_remote_address
-from hnh.config import COMPATIBLE_SENSORS, DEBUG, PHONE_BRIDGE_PORT_DEFAULT
+from hnh.config import COMPATIBLE_SENSORS, DEBUG, ECG_SAMPLE_RATE, PHONE_BRIDGE_PORT_DEFAULT
 from hnh.perf_probe import get_perf_probe
 from hnh.ble_diagnostics import append_ble_diagnostic
 
@@ -547,6 +547,17 @@ class SensorScanner(QObject):
             print(error)
 
 
+def coerce_ecg_sample_rate_hz(value: object, *, default: int = ECG_SAMPLE_RATE) -> int:
+    """Normalize a phone-bridge ``sample_rate_hz`` to a positive integer."""
+    try:
+        rate = int(round(float(value)))  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return int(default)
+    if rate < 1 or rate > 2000:
+        return int(default)
+    return rate
+
+
 class PhoneBridgeClient(QObject):
     """
     Connect to a phone bridge over Wi-Fi/TCP.
@@ -568,6 +579,8 @@ class PhoneBridgeClient(QObject):
 
     ibi_update = Signal(object)
     ecg_update = Signal(object)
+    # Fired when live ECG sample_rate_hz changes, before the matching samples.
+    ecg_sample_rate_update = Signal(int)
     ecg_ready = Signal()
     status_update = Signal(str)
     battery_update = Signal(int)
@@ -590,6 +603,7 @@ class PhoneBridgeClient(QObject):
         self._port = 0
         self._client_profile_name = "Admin"
         self._ecg_announced = False
+        self._ecg_sample_rate_hz: int | None = None
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
         self._last_source_device: str = ""
@@ -628,6 +642,11 @@ class PhoneBridgeClient(QObject):
     def last_source_device(self) -> str:
         """Latest PROTOCOL ``source_device`` (e.g. POLAR_H10 / FEATHER), or empty."""
         return str(getattr(self, "_last_source_device", "") or "").strip()
+
+    def last_ecg_sample_rate_hz(self) -> int | None:
+        """Latest live ECG ``sample_rate_hz``, or None before the first frame."""
+        rate = getattr(self, "_ecg_sample_rate_hz", None)
+        return int(rate) if isinstance(rate, int) else None
 
     def _note_source_device(self, payload: object) -> None:
         if not isinstance(payload, dict):
@@ -796,6 +815,7 @@ class PhoneBridgeClient(QObject):
         self._drain_scheduled = False
         self._buffer.clear()
         self._ecg_announced = False
+        self._ecg_sample_rate_hz = None
         self._rr_frames_seen = 0
         self._ecg_frames_seen = 0
         self._last_source_device = ""
@@ -1061,6 +1081,10 @@ class PhoneBridgeClient(QObject):
                     continue
             if not out:
                 return
+            rate = coerce_ecg_sample_rate_hz(payload.get("sample_rate_hz"))
+            if rate != self._ecg_sample_rate_hz:
+                self._ecg_sample_rate_hz = rate
+                self.ecg_sample_rate_update.emit(rate)
             self._ecg_frames_seen += 1
             if DEBUG and (
                 self._ecg_frames_seen == 1 or (self._ecg_frames_seen % 50 == 0)

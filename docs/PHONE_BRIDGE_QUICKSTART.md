@@ -93,7 +93,7 @@ Notes:
 
 - `type=status`: optional `battery` (0-100) is supported.
 - `type=rr`: `rr_ms` (or `ibi_ms`) is consumed by HnH.
-- `type=ecg`: `samples_mv` (or `samples`) list is consumed by HnH.
+- `type=ecg`: `samples_mv` (or `samples`) is consumed by HnH. `sample_rate_hz` sets the ECG time base (Polar 130 Hz, Feather 250 Hz). Missing rate falls back to 130 Hz.
 - On connect, HnH sends `client_info` with `pc_user`, `client_app: "hertz_and_hearts"`, and `client_version`.
 - HnH also re-sends `client_info` on every Switch User / active profile change while linked (`pc_user` = subject profile name). Phone β.59+ may soft-match that to a Feather patient and show Tech Keep/Switch on the phone; HnH shows those `status` lines as a non-blocking banner (no second confirm on PC).
 - Discovery uses UDP probe prefix `HnH_PHONE_BRIDGE_DISCOVER_V1` on port **45124**. Scan also TCP-probes the typed host and the last 4 successful IPs first (`~/.hnh_last_phone_bridge.json`).

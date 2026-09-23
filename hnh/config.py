@@ -131,8 +131,10 @@ HR_EWMA_WEIGHT: Final[float] = 0.33
 # ──────────────────────────────────────────────────────────────────────
 #  ECG MONITOR (Floating Window)
 # ──────────────────────────────────────────────────────────────────────
-# Polar H10 PMD ECG stream sample rate.
+# Polar H10 PMD ECG stream sample rate. Phone Bridge frames carry their own
+# sample_rate_hz (Feather ECG-Box is 250 Hz); this is the fallback.
 ECG_SAMPLE_RATE: Final[int] = 130  # Hz
+FEATHER_ECG_SAMPLE_RATE: Final[int] = 250  # Hz
 
 # How many seconds of ECG waveform are visible at once.
 ECG_DISPLAY_SECONDS: Final[int] = 5
