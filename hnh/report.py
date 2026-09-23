@@ -29,6 +29,29 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 
 _REPORT_RMSSD_HRV_STABILIZE_SECONDS = 60.0
 
+# Research context shown beside core metrics. Heart rate, RMSSD, and SDNN
+# stay on the personal baseline (see docs/cardiac-compendium.md). LF/HF uses
+# the P1 session zones. QTc matches the in-app shade above 470 ms. QRS matches
+# the compendium typical duration (80–100 ms) and wide threshold (>120 ms).
+_CORE_METRIC_REFERENCE_RANGES: dict[str, str] = {
+    "hr": "Personal baseline",
+    "rmssd": "Personal baseline",
+    "sdnn": "Personal baseline (duration-dependent)",
+    "lf_hf": "Mid-range zone 1.0–3.0",
+    "qtc": "Elevated above 470 ms",
+    "qrs": "Typical 80–100 ms; wide above 120 ms",
+}
+_CORE_METRIC_RANGE_NOTE = (
+    "Reference ranges are research context, not a diagnosis. "
+    "Heart rate, RMSSD, and HRV(SDNN) are read against your personal baseline, "
+    "not a population cutoff."
+)
+
+
+def core_metric_reference_text(metric: str) -> str:
+    """Return the report reference-range label for a core metric key."""
+    return _CORE_METRIC_REFERENCE_RANGES.get(str(metric or "").strip().lower(), "—")
+
 
 def normalize_ecg_cursor_interval_label(raw: object) -> str:
     """Return an optional interval label, or '' when unspecified / placeholder."""
@@ -230,6 +253,48 @@ def _add_key_value_table(
                 run.bold = True
                 if font_pt:
                     run.font.size = font_pt
+    if compact:
+        spacer = doc.add_paragraph()
+        spacer.paragraph_format.space_after = Pt(2)
+    else:
+        doc.add_paragraph("")
+
+
+def _add_core_metrics_table(
+    doc: Document,
+    rows: list[tuple[str, str, str]],
+    *,
+    compact: bool = True,
+):
+    """Three-column table: metric | value | reference range."""
+    headers = ("Metric", "Value", "Reference range")
+    widths = (Inches(1.75), Inches(1.65), Inches(2.55))
+    table = doc.add_table(rows=1 + len(rows), cols=3)
+    table.style = "Table Grid"
+    table.alignment = WD_TABLE_ALIGNMENT.CENTER
+    table.autofit = False
+    font_pt = Pt(9) if compact else Pt(10)
+    header_color = RGBColor(0x1A, 0x52, 0x76)
+
+    def _write(cell, text: str, *, bold: bool = False, color=None) -> None:
+        cell.text = text
+        for paragraph in cell.paragraphs:
+            for run in paragraph.runs:
+                run.bold = bold
+                run.font.size = font_pt
+                if color is not None:
+                    run.font.color.rgb = color
+
+    for col, header in enumerate(headers):
+        cell = table.rows[0].cells[col]
+        cell.width = widths[col]
+        _write(cell, header, bold=True, color=header_color)
+    for row_index, (metric, value, reference) in enumerate(rows, start=1):
+        values = (metric, value, reference)
+        for col, text in enumerate(values):
+            cell = table.rows[row_index].cells[col]
+            cell.width = widths[col]
+            _write(cell, text, bold=(col == 1))
     if compact:
         spacer = doc.add_paragraph()
         spacer.paragraph_format.space_after = Pt(2)
@@ -765,27 +830,50 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     )
     lf_hf_avg = f"{sum(stress_vals)/len(stress_vals):.2f}" if stress_vals else "--"
     metrics_rows = [
-        [_cell("Metric", header=True), _cell("Value", header=True)],
+        [
+            _cell("Metric", header=True),
+            _cell("Value", header=True),
+            _cell("Reference range", header=True),
+        ],
         [
             _cell("HR (baseline/latest)"),
             _cell(f"{_fmt(data.get('baseline_hr'), 'bpm', 0)} / {_fmt(data.get('last_hr'), 'bpm', 0)}"),
+            _cell(core_metric_reference_text("hr")),
         ],
         [
             _cell("RMSSD (baseline/latest)"),
             _cell(f"{_fmt(data.get('baseline_rmssd'), 'ms')} / {_fmt(data.get('last_rmssd'), 'ms')}"),
+            _cell(core_metric_reference_text("rmssd")),
         ],
         [
             _cell("HRV(SDNN) (session avg / \u0394)"),
             _cell(f"{hrv_avg} / {delta_hrv}"),
+            _cell(core_metric_reference_text("sdnn")),
         ],
-        [_cell("LF/HF (session avg)"), _cell(lf_hf_avg)],
-        [_cell("QTc (session median)"), _cell(_fmt_qtc_session_value(qtc_data))],
-        [_cell("QRS (session average)"), _cell(_fmt_qrs_session_value(qtc_data))],
-        [_cell("QTc method guidance"), _cell(_fmt_qtc_method_suggestion(qtc_data))],
+        [
+            _cell("LF/HF (session avg)"),
+            _cell(lf_hf_avg),
+            _cell(core_metric_reference_text("lf_hf")),
+        ],
+        [
+            _cell("QTc (session median)"),
+            _cell(_fmt_qtc_session_value(qtc_data)),
+            _cell(core_metric_reference_text("qtc")),
+        ],
+        [
+            _cell("QRS (session average)"),
+            _cell(_fmt_qrs_session_value(qtc_data)),
+            _cell(core_metric_reference_text("qrs")),
+        ],
+        [
+            _cell("QTc method guidance"),
+            _cell(_fmt_qtc_method_suggestion(qtc_data)),
+            _cell("—"),
+        ],
     ]
     metrics_table = Table(
         metrics_rows,
-        colWidths=[58 * mm, 122 * mm],
+        colWidths=[52 * mm, 58 * mm, 70 * mm],
         repeatRows=1,
         hAlign="LEFT",
     )
@@ -837,6 +925,8 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
         Spacer(1, 3 * mm),
         Paragraph("Core Metrics", heading_style),
         metrics_table,
+        Spacer(1, 2 * mm),
+        Paragraph(_CORE_METRIC_RANGE_NOTE, muted_style),
     ]
     has_qtc = qtc_data.get("session_value_ms") is not None
     has_qrs = qtc_data.get("session_qrs_avg_ms") is not None
@@ -1062,15 +1152,24 @@ def generate_session_report(path: str, data: dict) -> None:
     last_hrv = hrv_vals_settled[-1] if hrv_vals_settled else None
     stress_vals = stress_vals_settled
     last_lf_hf = stress_vals[-1] if stress_vals else None
-    _add_key_value_table(doc, [
-        ("Heart Rate (latest)", _fmt(data.get("last_hr"), "bpm", 0)),
-        ("RMSSD (latest)", _fmt(data.get("last_rmssd"), "ms")),
-        ("HRV(SDNN) (latest)", _fmt(last_hrv, "ms")),
-        ("LF/HF (latest)", _fmt(last_lf_hf, "", 2) if last_lf_hf is not None else _fmt(None, "", 0)),
-        ("QTc (session median)", _fmt_qtc_session_value(qtc_data)),
-        ("QRS (session average)", _fmt_qrs_session_value(qtc_data)),
-        ("QTc method guidance", _fmt_qtc_method_suggestion(qtc_data)),
-    ], label_width_in=1.92, value_width_in=3.04, compact=True)
+    _add_core_metrics_table(doc, [
+        ("Heart Rate (latest)", _fmt(data.get("last_hr"), "bpm", 0), core_metric_reference_text("hr")),
+        ("RMSSD (latest)", _fmt(data.get("last_rmssd"), "ms"), core_metric_reference_text("rmssd")),
+        ("HRV(SDNN) (latest)", _fmt(last_hrv, "ms"), core_metric_reference_text("sdnn")),
+        (
+            "LF/HF (latest)",
+            _fmt(last_lf_hf, "", 2) if last_lf_hf is not None else _fmt(None, "", 0),
+            core_metric_reference_text("lf_hf"),
+        ),
+        ("QTc (session median)", _fmt_qtc_session_value(qtc_data), core_metric_reference_text("qtc")),
+        ("QRS (session average)", _fmt_qrs_session_value(qtc_data), core_metric_reference_text("qrs")),
+        ("QTc method guidance", _fmt_qtc_method_suggestion(qtc_data), "—"),
+    ], compact=True)
+    range_note = doc.add_paragraph(_CORE_METRIC_RANGE_NOTE)
+    range_note.paragraph_format.space_after = Pt(4)
+    for run in range_note.runs:
+        run.font.size = Pt(8)
+        run.font.color.rgb = RGBColor(0x6B, 0x72, 0x80)
     qtc_trend = qtc_data.get("trend", {})
     if qtc_trend.get("enabled"):
         trend_label = qtc_trend.get(
