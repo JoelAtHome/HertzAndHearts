@@ -32,7 +32,25 @@ If using the desktop shortcut, ensure `Run-HnH.bat` points to this repository.
 
 ## Linux notes
 
-Linux is a **best-effort** platform: builds remain available, but Linux-specific issues may not be fixed. For GUI/runtime dependency requirements, see Qt docs:
+Linux is a **best-effort** platform: builds remain available, but Linux-specific issues may not be fixed.
+
+### Linux AppImage
+
+`Hertz-and-Hearts-Linux.AppImage` is the generic Linux binary (x86_64), built on **Ubuntu 22.04**.
+
+```
+chmod +x Hertz-and-Hearts-Linux.AppImage
+./Hertz-and-Hearts-Linux.AppImage
+```
+
+The AppImage needs host glibc **≥ 2.35** (Ubuntu 22.04+, Debian 12, and most current desktops). If it fails with a FUSE message, install `libfuse2` (Ubuntu 22.04 / Debian 12) or `libfuse2t64` (Ubuntu 24.04+). You can also extract and run without FUSE:
+
+```
+./Hertz-and-Hearts-Linux.AppImage --appimage-extract
+./squashfs-root/AppRun
+```
+
+For GUI/runtime dependency requirements, see Qt docs:
 
 - https://doc.qt.io/qt-6/linux-requirements.html
 - https://doc.qt.io/qt-6/linux.html

@@ -21,7 +21,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04
+          # Ubuntu 22.04 (glibc 2.35) keeps the AppImage runnable on Debian 12
+          # and other light desktops; 24.04 would raise the glibc floor.
+          - os: ubuntu-22.04
             artifact_name: Hertz-and-Hearts-linux-x64
             artifact_path: dist/Hertz-and-Hearts
           - os: windows-2022
@@ -79,12 +81,62 @@ jobs:
         run: |
           pyinstaller Hertz-and-Hearts.spec --clean --noconfirm
 
+      - name: Install Linux AppImage dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          # libfuse2: run nested AppImages if extract-and-run is unavailable
+          sudo apt-get install -y libfuse2
+
       - name: Package Linux artifact
         if: runner.os == 'Linux'
         run: |
           PACKAGE_NAME="Hertz-and-Hearts-${{ steps.version.outputs.label }}-linux-x64.tar.gz"
           tar -C dist -czf "dist/${PACKAGE_NAME}" Hertz-and-Hearts
           echo "PACKAGE_NAME=${PACKAGE_NAME}" >> "$GITHUB_ENV"
+
+      - name: Create Linux AppImage
+        if: runner.os == 'Linux'
+        env:
+          # CI runners lack usable FUSE for nested AppImages (appimagetool).
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          # Use appimagetool directly (not linuxdeploy): PyInstaller already
+          # bundles libs beside the binary; linuxdeploy rewrites rpaths and
+          # rejects non-standard icon sizes.
+          wget -q https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x appimagetool-x86_64.AppImage
+
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/share/applications
+
+          cp -r dist/Hertz-and-Hearts/* AppDir/usr/bin/
+
+          cp docs/hertz-and-hearts-256.png AppDir/usr/share/icons/hicolor/256x256/apps/hertz-and-hearts.png
+          cp docs/hertz-and-hearts-256.png AppDir/hertz-and-hearts.png
+
+          cat > AppDir/usr/share/applications/hertz-and-hearts.desktop << 'DESKTOP'
+          [Desktop Entry]
+          Name=Hertz & Hearts
+          Exec=Hertz-and-Hearts
+          Icon=hertz-and-hearts
+          Type=Application
+          Categories=Science;Education;
+          Comment=Hertz & Hearts - HRV biofeedback and session reporting
+          DESKTOP
+          cp AppDir/usr/share/applications/hertz-and-hearts.desktop AppDir/hertz-and-hearts.desktop
+
+          cat > AppDir/AppRun << 'APPRUN'
+          #!/bin/bash
+          HERE="$(dirname "$(readlink -f "${0}")")"
+          exec "${HERE}/usr/bin/Hertz-and-Hearts" "$@"
+          APPRUN
+          chmod +x AppDir/AppRun
+
+          ARCH=x86_64 ./appimagetool-x86_64.AppImage AppDir Hertz-and-Hearts-Linux.AppImage
+          test -f Hertz-and-Hearts-Linux.AppImage
+          ls -lh Hertz-and-Hearts-Linux.AppImage
 
       - name: Package macOS artifact
         if: runner.os == 'macOS'
@@ -124,6 +176,13 @@ jobs:
           name: Hertz-and-Hearts-Windows-Setup-${{ steps.version.outputs.label }}
           path: installer_output/*.exe
 
+      - name: Upload Linux AppImage artifact
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: Hertz-and-Hearts-Linux
+          path: Hertz-and-Hearts-Linux.AppImage
+
       - name: Upload artifacts to GitHub release
         if: github.event_name == 'release' || (github.event_name == 'workflow_dispatch' && github.event.inputs.upload_to_release_tag != '')
         env:
@@ -133,4 +192,7 @@ jobs:
           gh release upload "${{ steps.release_tag.outputs.tag }}" "dist/${PACKAGE_NAME}" --clobber
           if [ "${{ runner.os }}" = "Windows" ]; then
             gh release upload "${{ steps.release_tag.outputs.tag }}" installer_output/*.exe --clobber
+          fi
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            gh release upload "${{ steps.release_tag.outputs.tag }}" Hertz-and-Hearts-Linux.AppImage --clobber
           fi

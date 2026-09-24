@@ -14,7 +14,8 @@ CI still produces Windows, macOS, and Linux artifacts. **Windows** is the platfo
 
 - Windows: `dist/Hertz-and-Hearts-<version>-windows-x64.zip`
 - macOS: `dist/Hertz-and-Hearts-<version>-macos.zip`
-- Linux: `dist/Hertz-and-Hearts-<version>-linux-x64.tar.gz`
+- Linux tarball: `dist/Hertz-and-Hearts-<version>-linux-x64.tar.gz`
+- Linux AppImage: `Hertz-and-Hearts-Linux.AppImage` (CI artifact; also attached to a release when one is published)
 - Windows installer: `installer_output/Hertz-and-Hearts-Windows-Setup-<version>.exe`
 
 ## Windows
@@ -44,7 +45,7 @@ bash packaging/linux/build_linux_package.sh
 
 The GitHub Actions workflow `.github/workflows/build.yml` builds packages on:
 
-- Ubuntu 24.04
+- Ubuntu 22.04 (glibc 2.35, so the AppImage runs on Debian 12 and similar desktops)
 - Windows 2022
 - macOS 14
 

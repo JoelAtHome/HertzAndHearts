@@ -42,6 +42,7 @@ Cardiac theory notes (QRS + HRV compendium, Markdown):
 
 - Prebuilt artifacts are published in GitHub Releases:
   - https://github.com/JoelAtHome/HertzAndHearts/releases
+- Linux (x86_64): `Hertz-and-Hearts-Linux.AppImage` from the [build workflow](https://github.com/JoelAtHome/HertzAndHearts/actions/workflows/build.yml) artifacts, or from a release when one is cut. Make it executable (`chmod +x`) and run it. Built on Ubuntu 22.04 (glibc 2.35). See `docs/troubleshooting.md` if it does not start.
 
 ## Phone Bridge (Android)
 
