@@ -139,7 +139,9 @@ _SPEC_DIR = (
     if _spec_src
     else Path.cwd().resolve()
 )
-_runtime_hooks = []
+_runtime_hooks = [
+    str(_SPEC_DIR / "packaging" / "pyinstaller_rth_docx_templates.py"),
+]
 if IS_WIN:
     _runtime_hooks.append(
         str(_SPEC_DIR / "packaging" / "pyinstaller_rth_win_sklearn_dlls.py")
