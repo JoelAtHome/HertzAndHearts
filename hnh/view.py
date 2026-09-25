@@ -8401,10 +8401,9 @@ class View(QMainWindow):
 
     def _show_main_window_fullscreen(self):
         """Show main window filling available screen (used after startup flow)."""
-        # On Windows, use true maximized state so the user sees the expected
-        # "maximized" window behavior (previously we used setGeometry only).
-        # We still keep the existing on-screen safety net in showEvent().
-        if platform.system() == "Windows":
+        # Let the window manager maximize. Manual setGeometry on Openbox/LXQt
+        # covers the title bar, so there is no minimize, maximize, or close.
+        if platform.system() in ("Windows", "Linux"):
             self._maximized_once = True
             self.showMaximized()
             return
@@ -8464,6 +8463,9 @@ class View(QMainWindow):
     def _ensure_window_on_screen(self):
         """Clamp window to visible screen area. Safety net for off-screen recovery."""
         if not self.isVisible():
+            return
+        # setGeometry clears maximized state and can push the title bar off-screen.
+        if self.isMaximized() or self.isFullScreen():
             return
         screen = self.screen()
         if screen is None:
