@@ -7,7 +7,12 @@ import re
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_dynamic_libs, collect_submodules, copy_metadata
+from PyInstaller.utils.hooks import (
+    collect_data_files,
+    collect_dynamic_libs,
+    collect_submodules,
+    copy_metadata,
+)
 
 # PyInstaller accepts POSIX-style destinations; avoids flaky handling of "\\.libs".
 _SKLEARN_LIBS_DEST = (Path("sklearn") / ".libs").as_posix()
@@ -106,6 +111,11 @@ _hiddenimports += collect_submodules("reportlab")
 _hiddenimports += collect_submodules("neurokit2")
 _hiddenimports += collect_submodules("sklearn")
 
+# python-docx loads default-footer.xml (and the other templates) from the
+# package directory when a section footer is written. PyInstaller does not
+# ship those XML files unless they are collected here.
+_docx_datas = collect_data_files("docx")
+
 # hook-sklearn only collects data files. collect_dynamic_libs("sklearn") is empty on
 # some runners → _internal/sklearn/.libs never appears; glob site-packages explicitly.
 _sklearn_dlls = collect_dynamic_libs("sklearn")
@@ -151,7 +161,7 @@ a = Analysis(
         ("docs/part-i-qrs-waveform-fundamentals.md", "docs"),
         # Optional primer figures when present in the source tree.
         ("docs/assets/cardiac-qrs", "docs/assets/cardiac-qrs"),
-    ] + _app_metadata,
+    ] + _app_metadata + _docx_datas,
     hiddenimports=_hiddenimports,
     hookspath=[],
     hooksconfig={},
