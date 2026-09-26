@@ -29,7 +29,7 @@ Think of GitHub as a **shared filing cabinet** and your PC as **your desk**.
 | **Fetch** | Look at GitHub’s new snapshots without applying them yet. |
 | **Rebase / merge** | Replay or combine your snapshots with someone else’s when both of you changed `main`. |
 | **Release / tag** | A **named download** (installer, zip, APK). Not the same as “I committed.” |
-| **Version number** | The label on a Release (`1.0.0-beta.5`). Bump it when you **publish a download**, not on every commit. |
+| **Version number** | The label on a Release (`1.0.0-beta.6`). Bump it when you **publish a download**, not on every commit. |
 
 ```mermaid
 flowchart LR
@@ -56,7 +56,7 @@ Push is **rejected** when GitHub already has commits you do not. That is normal,
 | You want… | Do this |
 | --- | --- |
 | Save work and share source | Commit + push in the matching repo |
-| Testers get a **new desktop build** | Bump version in HertzAndHearts, changelog, GitHub **Release** (tag like `v1.0.0-beta.5`). CI uploads the zip/installer. |
+| Testers get a **new desktop build** | Bump version in HertzAndHearts, changelog, GitHub **Release** (tag like `v1.0.0-beta.6`). CI uploads the zip/installer. |
 | Testers get a **new phone app** | Commit + Release (or Actions APK) in **ECG-Phone-Bridge**. Sideload that APK. |
 | Fix live charts / Connect in HnH | HertzAndHearts only |
 | Phone accepts a new PC after a stuck session | ECG-Phone-Bridge APK (replace-on-new-connect) **and** the matching HnH desktop if you also changed HnH |

@@ -3,7 +3,7 @@
 # Hertz & Hearts
 
 Desktop HRV biofeedback app for ECG chest straps.
-Current beta: **1.0.0-beta.5**.
+Current beta: **1.0.0-beta.6**.
 
 **Research use only. Not for clinical diagnosis or treatment.**
 

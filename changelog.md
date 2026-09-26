@@ -2,8 +2,17 @@
 
 ### Unreleased
 
+### Version 1.0.0-beta.6 (September 26 2026)
++ release: Bumped pre-release version to `1.0.0b6` (public label: `1.0.0-beta.6`).
 + enhancement: **More → Saved Phone Recordings…** lists the phone's stored HRV recordings (time, RMSSD, duration, patient, sent/pending) and imports the one you pick. A recording deleted on the phone is dropped and the list refreshes. Phones that do not advertise `ritual_list` still use **Request saved HRV**. Connect still pulls the newest unacked package.
 + bugfix: Deleting a phone recording from Session History clears its import link, so picking it again from **Saved Phone Recordings** adds a new history row.
++ enhancement: The Select Session User dialog gives the profile name more room.
++ bugfix: Imported phone recordings store the PC's local time instead of the UTC clock that was shown in Session History.
++ enhancement: Session reports show research reference ranges beside the core metrics.
++ bugfix: ECG and QTc use the phone sample rate so Feather and Polar H10 stay on the correct time base.
++ enhancement: CI publishes a Linux AppImage built on Ubuntu 22.04.
++ bugfix: Frozen Linux builds can save the Word session report. python-docx templates are bundled, and the frozen app can open them.
++ bugfix: The Linux main window keeps its title-bar buttons when it opens maximized.
 
 ### Version 1.0.0-beta.5 (September 21 2026)
 + release: Bumped pre-release version to `1.0.0b5` (public label: `1.0.0-beta.5`).
