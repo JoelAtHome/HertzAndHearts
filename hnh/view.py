@@ -815,8 +815,8 @@ class ProfileSelectionDialog(QDialog):
         form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self._combo = QComboBox()
         self._combo.setEditable(False)
-        self._combo.setMinimumWidth(195)
-        self._combo.setMaximumWidth(195)
+        self._combo.setMinimumWidth(293)
+        self._combo.setMaximumWidth(293)
         unique_profiles: list[str] = []
         seen: set[str] = set()
         for profile in profiles:
