@@ -12,7 +12,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any
 
-from hnh.session_artifacts import SessionBundle, canonicalize_disk_profile_label
+from hnh.session_artifacts import SessionBundle, canonicalize_disk_profile_label, write_manifest
 
 
 def _float_or_none(value) -> float | None:
@@ -29,6 +29,7 @@ class ProfileStore:
     _LEGACY_MIGRATION_KEY = "legacy_session_migration_v1"
     _DEFAULT_TO_ADMIN_MIGRATION_KEY = "default_to_admin_migration_v1"
     _TRENDS_BACKFILL_KEY = "session_trends_backfill_v1"
+    _PHONE_BRIDGE_ZULU_LOCAL_KEY = "phone_bridge_zulu_to_local_v1"
     _LEGACY_PROFILE_NAME = "Legacy User"
 
     def __init__(self, root: Path):
@@ -39,6 +40,7 @@ class ProfileStore:
         self.migrate_legacy_sessions()
         self.migrate_default_to_admin()
         self._backfill_session_trends()
+        self._repair_phone_bridge_zulu_clocks()
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(str(self._db_path))
@@ -1045,6 +1047,116 @@ class ProfileStore:
                 migrated += 1
         self._set_app_state(self._TRENDS_BACKFILL_KEY, "done")
         return migrated
+
+    def _repair_phone_bridge_zulu_clocks(self) -> int:
+        """Rewrite imported sessions that stored a Zulu clock as if it were local.
+
+        Phone ``emitted_at`` is UTC. Older imports dropped the ``Z`` without
+        converting, so Session History showed the UTC hour. Rows whose
+        ``started_at`` still matches that Zulu wall time are shifted to the
+        PC's local time. Already-local rows are left alone.
+        """
+        if self._get_app_state(self._PHONE_BRIDGE_ZULU_LOCAL_KEY) == "done":
+            return 0
+        from hnh.report import naive_local_from_iso
+
+        fixed = 0
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT session_id, started_at, ended_at, session_dir
+                FROM session_history
+                WHERE state = 'imported'
+                """
+            ).fetchall()
+        for row in rows:
+            session_id = str(row["session_id"])
+            manifest_path = Path(str(row["session_dir"] or "")) / "session_manifest.json"
+            if not manifest_path.is_file():
+                continue
+            try:
+                payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            timing = payload.get("timing")
+            if not isinstance(timing, dict):
+                continue
+            emitted_raw = str(timing.get("emitted_at") or "").strip()
+            if not emitted_raw:
+                continue
+            try:
+                aware = datetime.fromisoformat(emitted_raw.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if aware.tzinfo is None:
+                continue
+            local_wall = naive_local_from_iso(emitted_raw)
+            if local_wall is None:
+                continue
+            zulu_wall = aware.replace(tzinfo=None)
+            offset = local_wall - zulu_wall
+            if offset == timedelta(0):
+                continue
+            try:
+                started = datetime.fromisoformat(str(row["started_at"] or "").replace("Z", "+00:00"))
+            except ValueError:
+                continue
+            if started.tzinfo is not None:
+                started = started.replace(tzinfo=None)
+            if abs((started - zulu_wall).total_seconds()) > 2:
+                continue
+            new_started = (started + offset).isoformat()
+            new_ended: str | None = None
+            old_ended: datetime | None = None
+            ended_raw = str(row["ended_at"] or "")
+            if ended_raw:
+                try:
+                    old_ended = datetime.fromisoformat(ended_raw.replace("Z", "+00:00"))
+                    if old_ended.tzinfo is not None:
+                        old_ended = old_ended.replace(tzinfo=None)
+                    new_ended = (old_ended + offset).isoformat()
+                except ValueError:
+                    new_ended = None
+                    old_ended = None
+            timing["started_at"] = new_started
+            first_raw = str(timing.get("first_data_at") or "").strip()
+            if first_raw:
+                try:
+                    first = datetime.fromisoformat(first_raw.replace("Z", "+00:00"))
+                    if first.tzinfo is not None:
+                        first = first.replace(tzinfo=None)
+                    if abs((first - zulu_wall).total_seconds()) <= 2:
+                        timing["first_data_at"] = new_started
+                except ValueError:
+                    pass
+            if new_ended:
+                timing["ended_at"] = new_ended
+            payload["updated_at"] = datetime.now().isoformat()
+            try:
+                write_manifest(manifest_path, payload)
+            except Exception:
+                continue
+            with self._db() as conn:
+                conn.execute(
+                    """
+                    UPDATE session_history
+                    SET started_at = ?, ended_at = COALESCE(?, ended_at)
+                    WHERE session_id = ?
+                    """,
+                    (new_started, new_ended, session_id),
+                )
+                if old_ended is not None and new_ended:
+                    conn.execute(
+                        """
+                        UPDATE session_trends
+                        SET ended_at = ?
+                        WHERE session_id = ? AND (ended_at = ? OR ended_at = ?)
+                        """,
+                        (new_ended, session_id, ended_raw, old_ended.isoformat()),
+                    )
+            fixed += 1
+        self._set_app_state(self._PHONE_BRIDGE_ZULU_LOCAL_KEY, "done")
+        return fixed
 
     def list_sessions(
         self,

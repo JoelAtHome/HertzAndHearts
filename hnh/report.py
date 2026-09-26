@@ -155,19 +155,43 @@ def _uses_24_hour_time() -> bool:
     return loc in verified_24h
 
 
-def format_datetime_for_display(value: datetime | str | None) -> str:
+def naive_local_from_iso(value: datetime | str | None) -> datetime | None:
+    """Parse an ISO timestamp into naive local wall time.
+
+    Phone-bridge ``emitted_at`` is Zulu (``...Z``). Live sessions store
+    ``datetime.now()`` with no timezone, and history prints that clock as-is,
+    so a zoned instant is converted to the PC's local time and then stripped.
+    Naive values are left unchanged.
+    """
     if isinstance(value, datetime):
         dt = value
     elif isinstance(value, str):
         text = value.strip()
         if not text:
-            return "--"
+            return None
         try:
             dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
         except ValueError:
+            return None
+    else:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
+def format_datetime_for_display(value: datetime | str | None) -> str:
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return "--"
+        dt = naive_local_from_iso(text)
+        if dt is None:
             return text
     else:
-        return "--"
+        dt = naive_local_from_iso(value)
+        if dt is None:
+            return "--"
     if _uses_24_hour_time():
         time_str = dt.strftime("%H:%M")
     else:

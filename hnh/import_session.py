@@ -13,7 +13,7 @@ from typing import Any
 
 from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
 from hnh.profile_store import ProfileStore
-from hnh.report import format_ecg_sensor_display_name
+from hnh.report import format_ecg_sensor_display_name, naive_local_from_iso
 
 
 def _compute_rmssd_from_ibis(ibis_ms: list[float]) -> list[float]:
@@ -451,24 +451,15 @@ def import_saved_hrv_package(
     if duration_f != duration_f or duration_f < 0:
         duration_f = 0.0
 
-    ended_at = emitted_at or datetime.now().isoformat()
-    started_at = bundle.started_at.isoformat()
     start_dt = bundle.started_at
-    # Prefer phone emit time for history when parseable.
+    # Phone emit time is Zulu. History stores naive local clocks, same as live sessions.
     if emitted_at:
-        try:
-            start_dt = datetime.fromisoformat(emitted_at.replace("Z", "+00:00"))
-            if start_dt.tzinfo is not None:
-                start_dt = start_dt.replace(tzinfo=None)
-            started_at = start_dt.isoformat()
-            end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
-            ended_at = end_dt.isoformat()
-        except Exception:
-            end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
-            ended_at = end_dt.isoformat()
-    else:
-        end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
-        ended_at = end_dt.isoformat()
+        parsed_emit = naive_local_from_iso(emitted_at)
+        if parsed_emit is not None:
+            start_dt = parsed_emit
+    end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
+    started_at = start_dt.isoformat()
+    ended_at = end_dt.isoformat()
 
     edf_ok = False
     if ecg_samples:
@@ -570,17 +561,10 @@ def import_saved_hrv_package(
             ),
         )
 
-    try:
-        ended_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00"))
-        if ended_dt.tzinfo is not None:
-            ended_dt = ended_dt.replace(tzinfo=None)
-    except Exception:
-        ended_dt = datetime.now()
-
     profile_store.record_session_trend(
         profile_name=profile_id,
         session_id=bundle.session_id,
-        ended_at=ended_dt,
+        ended_at=end_dt,
         avg_hr=last_hr,
         avg_rmssd=last_rmssd,
     )

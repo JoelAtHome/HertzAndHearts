@@ -77,6 +77,7 @@ from hnh.help_content import (
 )
 from hnh.report import (
     format_datetime_for_display,
+    naive_local_from_iso,
     format_ecg_cursor_dt_ms,
     format_ecg_sensor_display_name,
     generate_session_report,
@@ -1245,11 +1246,10 @@ class SessionHistoryDialog(QDialog):
         raw = str(value).strip()
         if not raw:
             return "--"
-        try:
-            dt = datetime.fromisoformat(raw)
-            return dt.strftime("%Y-%m-%d %H:%M:%S")
-        except ValueError:
+        dt = naive_local_from_iso(raw)
+        if dt is None:
             return raw
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
 
     def populate(
         self,
@@ -2430,11 +2430,10 @@ class TrendsWindow(QMainWindow):
         x = []
         hr_y, rmssd_y, sdnn_y, qtc_y = [], [], [], []
         for r in rows:
-            try:
-                dt = datetime.fromisoformat(str(r["ended_at"]))
-                x.append(dt.timestamp())
-            except (ValueError, TypeError):
+            dt = naive_local_from_iso(str(r.get("ended_at") or ""))
+            if dt is None:
                 continue
+            x.append(dt.timestamp())
             hr_y.append(r.get("avg_hr") if r.get("avg_hr") is not None else float("nan"))
             rmssd_y.append(r.get("avg_rmssd") if r.get("avg_rmssd") is not None else float("nan"))
             sdnn_y.append(r.get("avg_sdnn") if r.get("avg_sdnn") is not None else float("nan"))
@@ -2742,14 +2741,8 @@ class TrendsWindow(QMainWindow):
             ended_at = s.get("ended_at")
             started_at = s.get("started_at")
             session_id = s.get("session_id", "")
-            try:
-                end_dt = datetime.fromisoformat(ended_at.replace("Z", "+00:00")) if ended_at else None
-            except (ValueError, TypeError):
-                end_dt = None
-            try:
-                start_dt = datetime.fromisoformat(started_at.replace("Z", "+00:00")) if started_at else None
-            except (ValueError, TypeError):
-                start_dt = None
+            end_dt = naive_local_from_iso(ended_at) if ended_at else None
+            start_dt = naive_local_from_iso(started_at) if started_at else None
             if end_dt:
                 date_str = end_dt.strftime("%b %d, %Y  %H:%M")
             else:
@@ -2797,11 +2790,8 @@ class TrendsWindow(QMainWindow):
         for sid in session_ids:
             row = lookup.get(sid, {})
             ended = row.get("ended_at")
-            try:
-                dt = datetime.fromisoformat(str(ended).replace("Z", "+00:00")) if ended else None
-                col_labels.append(dt.strftime("%b %d %H:%M") if dt else sid[:12])
-            except (ValueError, TypeError):
-                col_labels.append(sid[:12] if sid else "—")
+            dt = naive_local_from_iso(str(ended)) if ended else None
+            col_labels.append(dt.strftime("%b %d %H:%M") if dt else (sid[:12] if sid else "—"))
         for i in range(len(session_ids) - 1):
             col_labels.append(f"Δ ({i + 1}→{i + 2})")
 

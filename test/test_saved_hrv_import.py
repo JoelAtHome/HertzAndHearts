@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import base64
+import json
 import struct
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from hnh.import_session import (
@@ -12,6 +14,7 @@ from hnh.import_session import (
     replay_data_from_ibi_ms,
 )
 from hnh.profile_store import ProfileStore
+from hnh.report import naive_local_from_iso
 
 
 class SavedHrvImportTests(unittest.TestCase):
@@ -72,6 +75,94 @@ class SavedHrvImportTests(unittest.TestCase):
             self.assertIsNone(again)
             sessions2 = store.list_sessions(profile_name="Admin", include_hidden=True, limit=10)
             self.assertEqual(len(sessions2), len(sessions))
+
+            manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
+            expected_start = naive_local_from_iso("2026-09-15T12:03:00Z")
+            self.assertIsNotNone(expected_start)
+            assert expected_start is not None
+            self.assertEqual(manifest["timing"]["started_at"], expected_start.isoformat())
+            self.assertEqual(
+                manifest["timing"]["ended_at"],
+                (expected_start + timedelta(seconds=120)).isoformat(),
+            )
+            self.assertEqual(manifest["timing"]["emitted_at"], "2026-09-15T12:03:00Z")
+            stored = datetime.fromisoformat(manifest["timing"]["started_at"])
+            local_tz = datetime.now().astimezone().tzinfo
+            as_utc = stored.replace(tzinfo=local_tz).astimezone(timezone.utc)
+            self.assertEqual(as_utc, datetime(2026, 9, 15, 12, 3, tzinfo=timezone.utc))
+            matched = next(s for s in sessions if s.get("session_id") == bundle.session_id)
+            self.assertEqual(matched.get("started_at"), expected_start.isoformat())
+
+    def test_repair_shifts_stored_zulu_wall_clock_to_local(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            session_dir = root / "sessions" / "old-import"
+            session_dir.mkdir(parents=True)
+            zulu_start = "2026-09-15T12:03:00"
+            zulu_end = "2026-09-15T12:05:00"
+            manifest = {
+                "timing": {
+                    "started_at": zulu_start,
+                    "first_data_at": zulu_start,
+                    "ended_at": zulu_end,
+                    "emitted_at": "2026-09-15T12:03:00Z",
+                }
+            }
+            (session_dir / "session_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            with store._db() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO session_history (
+                        session_id, profile_name, started_at, ended_at, state, session_dir, csv_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "old-import",
+                        "Admin",
+                        zulu_start,
+                        zulu_end,
+                        "imported",
+                        str(session_dir),
+                        str(session_dir / "session.csv"),
+                    ),
+                )
+                conn.execute(
+                    """
+                    INSERT INTO session_trends (session_id, profile_name, ended_at)
+                    VALUES (?, ?, ?)
+                    """,
+                    ("old-import", "Admin", zulu_end),
+                )
+            store._set_app_state(store._PHONE_BRIDGE_ZULU_LOCAL_KEY, "")
+            fixed = store._repair_phone_bridge_zulu_clocks()
+            expected_start = naive_local_from_iso("2026-09-15T12:03:00Z")
+            assert expected_start is not None
+            expected_end = expected_start + timedelta(seconds=120)
+            if expected_start.isoformat() == zulu_start:
+                self.assertEqual(fixed, 0)
+            else:
+                self.assertEqual(fixed, 1)
+            sessions = store.list_sessions(profile_name="Admin", include_hidden=True, limit=10)
+            row = next(s for s in sessions if s.get("session_id") == "old-import")
+            self.assertEqual(row.get("started_at"), expected_start.isoformat())
+            self.assertEqual(row.get("ended_at"), expected_end.isoformat())
+            repaired = json.loads((session_dir / "session_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(repaired["timing"]["started_at"], expected_start.isoformat())
+            self.assertEqual(repaired["timing"]["emitted_at"], "2026-09-15T12:03:00Z")
+            with store._db() as conn:
+                trend = conn.execute(
+                    "SELECT ended_at FROM session_trends WHERE session_id = ?",
+                    ("old-import",),
+                ).fetchone()
+            self.assertEqual(str(trend["ended_at"]), expected_end.isoformat())
+            store._set_app_state(store._PHONE_BRIDGE_ZULU_LOCAL_KEY, "")
+            self.assertEqual(store._repair_phone_bridge_zulu_clocks(), 0)
+            sessions_again = store.list_sessions(profile_name="Admin", include_hidden=True, limit=10)
+            row_again = next(s for s in sessions_again if s.get("session_id") == "old-import")
+            self.assertEqual(row_again.get("started_at"), expected_start.isoformat())
 
     def test_import_with_ecg_writes_edf(self):
         with tempfile.TemporaryDirectory() as tmp:
