@@ -673,6 +673,43 @@ class PhoneBridgeSavedHrvClientTests(unittest.TestCase):
             ],
         )
 
+    def test_named_request_emits_an_already_acked_package(self):
+        client = PhoneBridgeClient()
+        packages: list[dict] = []
+        client._send_ndjson = lambda payload: None  # type: ignore[method-assign]
+        client.is_connected = lambda: True  # type: ignore[method-assign]
+        client.saved_hrv_package_ready.connect(lambda p: packages.append(dict(p)))
+
+        def _deliver() -> None:
+            client._handle_bridge_message(
+                {
+                    "type": "session_summary",
+                    "session_id": "sid-1",
+                    "mode": "record",
+                    "has_ecg": False,
+                    "transfer_reason": "manual_send",
+                }
+            )
+            client._handle_bridge_message(
+                {
+                    "type": "ritual_chunk",
+                    "session_id": "sid-1",
+                    "seq": 1,
+                    "of": 1,
+                    "content": "ibi",
+                    "samples": [800],
+                }
+            )
+
+        _deliver()
+        self.assertEqual(len(packages), 1)
+        # A later no-id retry stays quiet.
+        _deliver()
+        self.assertEqual(len(packages), 1)
+        self.assertTrue(client.request_saved_hrv("sid-1"))
+        _deliver()
+        self.assertEqual(len(packages), 2)
+
     def test_live_rr_continues_during_assembly(self):
         client = PhoneBridgeClient()
         ibis: list[int] = []

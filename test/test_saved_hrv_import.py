@@ -121,6 +121,53 @@ class SavedHrvImportTests(unittest.TestCase):
             csv_text = bundle.csv_path.read_text(encoding="utf-8")
             self.assertIn("Joel", csv_text)
 
+    def test_deleted_history_row_can_be_imported_again(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            package = {
+                "session_id": "20260915T150000Z-again",
+                "mode": "record",
+                "kind": "ritual",
+                "transfer_reason": "manual_send",
+                "source_device": "FEATHER",
+                "emitted_at": "2026-09-15T15:00:00Z",
+                "duration_s": 60.0,
+                "rmssd_ms": 40.0,
+                "ibi_ms": [800, 810, 790],
+                "ecg_chunks": [],
+            }
+            first = import_saved_hrv_package(package, root, "Admin", store)
+            self.assertIsNotNone(first)
+            assert first is not None
+            # History delete that left the phone-import map behind.
+            with store._db() as conn:
+                conn.execute(
+                    "DELETE FROM session_history WHERE session_id = ?",
+                    (first.session_id,),
+                )
+            self.assertIsNone(
+                store.get_phone_bridge_imported_session_id(
+                    "Admin", "20260915T150000Z-again"
+                )
+            )
+            second = import_saved_hrv_package(package, root, "Admin", store)
+            self.assertIsNotNone(second)
+            assert second is not None
+            self.assertNotEqual(second.session_id, first.session_id)
+            self.assertEqual(
+                store.get_phone_bridge_imported_session_id(
+                    "Admin", "20260915T150000Z-again"
+                ),
+                second.session_id,
+            )
+            store.delete_sessions_by_ids([second.session_id])
+            self.assertIsNone(
+                store.get_phone_bridge_imported_session_id(
+                    "Admin", "20260915T150000Z-again"
+                )
+            )
+
     def test_repair_shifts_stored_zulu_wall_clock_to_local(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

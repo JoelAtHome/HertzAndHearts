@@ -1002,14 +1002,14 @@ class SavedRecordingsDialog(QDialog):
         super().__init__(parent)
         self.setModal(False)
         self.setWindowModality(Qt.WindowModality.NonModal)
-        self.setWindowTitle("Saved recordings")
+        self.setWindowTitle("Saved Phone Recordings")
         self.resize(720, 380)
         self._rows: list[dict] = []
         self._got_list = False
         self._allow_latest_fallback = bool(allow_latest_fallback)
 
         root = QVBoxLayout(self)
-        self._status = QLabel("Asking the phone for saved recordings…")
+        self._status = QLabel("Asking the phone for saved phone recordings…")
         self._status.setWordWrap(True)
         root.addWidget(self._status)
 
@@ -1057,7 +1057,7 @@ class SavedRecordingsDialog(QDialog):
     def start_wait(self) -> None:
         self._got_list = False
         self._latest_btn.setVisible(False)
-        self._status.setText("Asking the phone for saved recordings…")
+        self._status.setText("Asking the phone for saved phone recordings…")
         self._wait_timer.start(4000)
 
     def show_recordings(self, rows: object) -> None:
@@ -1102,7 +1102,7 @@ class SavedRecordingsDialog(QDialog):
                 self._table.setItem(index, col, item)
         self._table.setColumnHidden(3, not any_patient)
         if not self._rows:
-            self._status.setText("No saved recordings on the phone.")
+            self._status.setText("No saved phone recordings on the phone.")
         else:
             self._status.setText(
                 "Choose a recording. Sent means the phone already queued it to a PC."
@@ -1133,7 +1133,7 @@ class SavedRecordingsDialog(QDialog):
 
     def show_link_down(self) -> None:
         self._wait_timer.stop()
-        self._status.setText("Connect to Phone Bridge before requesting saved recordings.")
+        self._status.setText("Connect to Phone Bridge before requesting saved phone recordings.")
         self._add_btn.setEnabled(False)
         self._latest_btn.setVisible(False)
 
@@ -7631,7 +7631,7 @@ class View(QMainWindow):
             "Import Session to History", self._on_import_session
         )
         self._request_saved_hrv_action = self._more_menu.addAction(
-            "Saved recordings…", self._on_request_saved_hrv
+            "Saved Phone Recordings…", self._on_request_saved_hrv
         )
         self._saved_recordings_tooltip = (
             "List HRV recordings stored on the connected phone and add one to Session History."
@@ -11592,7 +11592,9 @@ class View(QMainWindow):
         if hrv_action is not None:
             linked = isinstance(self.sensor, PhoneBridgeClient) and self.sensor.is_connected()
             use_list = self._phone_bridge_has_ritual_list() is not False
-            hrv_action.setText("Saved recordings…" if use_list else "Request saved HRV")
+            hrv_action.setText(
+                "Saved Phone Recordings…" if use_list else "Request saved HRV"
+            )
             hrv_action.setEnabled(linked)
             if not linked:
                 hrv_action.setToolTip(
@@ -11634,7 +11636,7 @@ class View(QMainWindow):
 
     def _on_request_saved_hrv(self) -> None:
         if not isinstance(self.sensor, PhoneBridgeClient):
-            self.show_status("Saved recordings need Phone Bridge.")
+            self.show_status("Saved Phone Recordings needs Phone Bridge.")
             return
         if not self.sensor.is_connected():
             self.show_status("Connect to Phone Bridge before requesting saved HRV.")
@@ -11691,7 +11693,9 @@ class View(QMainWindow):
         if not isinstance(self.sensor, PhoneBridgeClient) or not self.sensor.request_saved_hrv_list():
             if dlg is not None:
                 dlg.show_link_down()
-            self.show_status("Connect to Phone Bridge before requesting saved recordings.")
+            self.show_status(
+                "Connect to Phone Bridge before requesting saved phone recordings."
+            )
 
     def _on_saved_recording_chosen(self, session_id: str) -> None:
         sid = str(session_id or "").strip()

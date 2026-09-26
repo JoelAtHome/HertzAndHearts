@@ -987,13 +987,17 @@ class PhoneBridgeClient(QObject):
         """Ask the phone for a persisted saved-HRV package (PROTOCOL §7).
 
         Returns True if the request was queued on the TCP socket.
-        A named id arms `ritual_unavailable` handling for that id only.
+        A named id arms `ritual_unavailable` handling for that id only, and
+        is delivered again even if this process already acked it. Import
+        still skips the save while that history row exists.
         """
         if not self.is_connected():
             return False
         payload = build_ritual_request(session_id)
         sid = payload.get("session_id")
         self._named_hrv_request_id = sid if isinstance(sid, str) and sid else None
+        if isinstance(sid, str) and sid:
+            self._acked_hrv_session_ids.pop(sid, None)
         self._send_ndjson(payload)
         return True
 

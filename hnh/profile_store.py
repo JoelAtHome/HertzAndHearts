@@ -202,24 +202,79 @@ class ProfileStore:
     def _phone_bridge_import_key(self, profile_name: str) -> str:
         return f"phone_bridge_hrv_imports:{self._normalize_profile(profile_name)}"
 
+    def _load_phone_bridge_import_map(self, key: str) -> dict:
+        raw = self._get_app_state(key)
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _save_phone_bridge_import_map(self, key: str, mapping: dict) -> None:
+        if not mapping:
+            with self._db() as conn:
+                conn.execute("DELETE FROM app_state WHERE key = ?", (key,))
+            return
+        self._set_app_state(key, json.dumps(mapping, ensure_ascii=False))
+
+    def _session_row_exists(self, session_id: str) -> bool:
+        sid = str(session_id or "").strip()
+        if not sid:
+            return False
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM session_history WHERE session_id = ? LIMIT 1",
+                (sid,),
+            ).fetchone()
+        return row is not None
+
     def get_phone_bridge_imported_session_id(
         self, profile_name: str, phone_session_id: str
     ) -> str | None:
-        """Return HnH session_id if this phone package was already imported, else None."""
+        """Return HnH session_id if this phone package is still in history, else None.
+
+        A mapping whose history row was deleted is dropped so the phone
+        recording can be imported again.
+        """
         phone_sid = str(phone_session_id or "").strip()
         if not phone_sid:
             return None
-        raw = self._get_app_state(self._phone_bridge_import_key(profile_name))
-        if not raw:
-            return None
-        try:
-            mapping = json.loads(raw)
-        except Exception:
-            return None
-        if not isinstance(mapping, dict):
-            return None
+        key = self._phone_bridge_import_key(profile_name)
+        mapping = self._load_phone_bridge_import_map(key)
         existing = mapping.get(phone_sid)
-        return str(existing).strip() or None if existing is not None else None
+        if existing is None:
+            return None
+        hnh_sid = str(existing).strip()
+        if hnh_sid and self._session_row_exists(hnh_sid):
+            return hnh_sid
+        mapping.pop(phone_sid, None)
+        self._save_phone_bridge_import_map(key, mapping)
+        return None
+
+    def forget_phone_bridge_imports_targeting(self, session_ids: list[str]) -> None:
+        """Drop phone-import links that point at these history session ids."""
+        targets = {str(raw or "").strip() for raw in session_ids if str(raw or "").strip()}
+        if not targets:
+            return
+        with self._db() as conn:
+            rows = conn.execute(
+                "SELECT key FROM app_state WHERE key LIKE ?",
+                ("phone_bridge_hrv_imports:%",),
+            ).fetchall()
+        for row in rows:
+            key = str(row["key"] or "").strip()
+            if not key:
+                continue
+            mapping = self._load_phone_bridge_import_map(key)
+            kept = {
+                phone_sid: hnh_sid
+                for phone_sid, hnh_sid in mapping.items()
+                if str(hnh_sid).strip() not in targets
+            }
+            if len(kept) != len(mapping):
+                self._save_phone_bridge_import_map(key, kept)
 
     def remember_phone_bridge_import(
         self, profile_name: str, phone_session_id: str, hnh_session_id: str
@@ -230,20 +285,12 @@ class ProfileStore:
         if not phone_sid or not hnh_sid:
             return
         key = self._phone_bridge_import_key(profile_name)
-        raw = self._get_app_state(key)
-        mapping: dict = {}
-        if raw:
-            try:
-                parsed = json.loads(raw)
-                if isinstance(parsed, dict):
-                    mapping = parsed
-            except Exception:
-                mapping = {}
+        mapping = self._load_phone_bridge_import_map(key)
         mapping[phone_sid] = hnh_sid
         # Cap growth: keep newest ~100 entries by re-insert order (dict preserves).
         while len(mapping) > 100:
             mapping.pop(next(iter(mapping)))
-        self._set_app_state(key, json.dumps(mapping, ensure_ascii=False))
+        self._save_phone_bridge_import_map(key, mapping)
 
     @staticmethod
     def _safe_started_at(session_id: str, fallback: datetime) -> str:
@@ -1706,6 +1753,7 @@ class ProfileStore:
         if not cleaned:
             return {"removed_rows": 0, "removed_trends": 0}
 
+        self.forget_phone_bridge_imports_targeting(cleaned)
         qmarks = ",".join(["?"] * len(cleaned))
         removed_rows = 0
         removed_trends = 0

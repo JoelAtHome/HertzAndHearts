@@ -99,7 +99,7 @@ HELP_TOPICS: dict[str, HelpTopic] = {
                     "<b>Start New</b>: begin recording for the active profile.",
                     "<b>Stop / Stop &amp; Save</b>: end the session; Save finalizes reports.",
                     "<b>ECG / QTc / Poincare / PSD</b>: open popup analysis windows.",
-                    "<b>More</b>: History, Trends, Profiles, Import, Saved recordings, Help (incl. About).",
+                    "<b>More</b>: History, Trends, Profiles, Import, Saved Phone Recordings, Help (incl. About).",
                     "<b>Settings (gear)</b>: preferences and data folder (also Ctrl+,).",
                 ),
             ),
