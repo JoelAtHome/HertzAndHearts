@@ -9,7 +9,12 @@ from hnh.sensor import (
     apply_ritual_chunk,
     build_phone_bridge_client_info,
     build_ritual_ack,
+    build_ritual_list,
+    build_ritual_request,
     finalize_saved_hrv_package,
+    format_saved_hrv_duration,
+    parse_ritual_list,
+    parse_ritual_unavailable,
     format_feather_profile_status_message,
     is_feather_profile_status_message,
     parse_phone_bridge_discover_reply,
@@ -289,6 +294,27 @@ class PhoneBridgeSavedHrvParseTests(unittest.TestCase):
         self.assertEqual(row["transfer_reason"], "delayed_push")
         self.assertEqual(row["has_ecg"], False)
         self.assertEqual(row["rmssd_ms"], 52.0)
+        self.assertNotIn("profile_display_name", row)
+
+    def test_parse_session_summary_keeps_patient_when_present(self):
+        row = parse_phone_bridge_session_summary(
+            {
+                "type": "session_summary",
+                "session_id": "sid-patient",
+                "mode": "record",
+                "transfer_reason": "live_stop",
+                "profile_id": "patient-2",
+                "profile_display_name": " Joel ",
+            }
+        )
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(row["profile_id"], "patient-2")
+        self.assertEqual(row["profile_display_name"], "Joel")
+        assembly = SavedHrvAssembly(session_id="sid-patient", summary=row)
+        package = finalize_saved_hrv_package(assembly)
+        self.assertEqual(package["profile_display_name"], "Joel")
+        self.assertEqual(package["profile_id"], "patient-2")
 
     def test_rejects_stream_summary(self):
         self.assertIsNone(
@@ -310,8 +336,6 @@ class PhoneBridgeSavedHrvParseTests(unittest.TestCase):
         self.assertIsNone(build_ritual_ack("  "))
 
     def test_build_ritual_request(self):
-        from hnh.sensor import build_ritual_request
-
         self.assertEqual(
             build_ritual_request(None),
             {"type": "ritual_request", "session_id": None},
@@ -319,6 +343,61 @@ class PhoneBridgeSavedHrvParseTests(unittest.TestCase):
         self.assertEqual(
             build_ritual_request("sid-9"),
             {"type": "ritual_request", "session_id": "sid-9"},
+        )
+
+    def test_parse_ritual_list_keeps_phone_order_and_omits_blank_patient(self):
+        rows = parse_ritual_list(
+            {
+                "type": "ritual_list",
+                "recordings": [
+                    {
+                        "session_id": "new",
+                        "emitted_at": "2026-09-15T12:03:00Z",
+                        "duration_s": 180.5,
+                        "rmssd_ms": 52.0,
+                        "profile_id": "patient-2",
+                        "profile_display_name": "Joel",
+                        "acked": False,
+                    },
+                    {
+                        "session_id": "old",
+                        "emitted_at": "2026-09-14T12:03:00Z",
+                        "acked": True,
+                        "profile_display_name": "  ",
+                    },
+                    {"session_id": ""},
+                    "not-a-row",
+                ],
+            }
+        )
+        self.assertIsNotNone(rows)
+        assert rows is not None
+        self.assertEqual([row["session_id"] for row in rows], ["new", "old"])
+        self.assertEqual(rows[0]["profile_display_name"], "Joel")
+        self.assertNotIn("profile_display_name", rows[1])
+        self.assertFalse(rows[0]["acked"])
+        self.assertTrue(rows[1]["acked"])
+        self.assertEqual(format_saved_hrv_duration(180.5), "3 min")
+        self.assertEqual(format_saved_hrv_duration(45), "45 s")
+        self.assertEqual(build_ritual_list(), {"type": "ritual_list"})
+        self.assertIsNone(parse_ritual_list({"type": "status"}))
+        self.assertEqual(parse_ritual_list({"type": "ritual_list"}), [])
+
+    def test_parse_ritual_unavailable(self):
+        self.assertEqual(
+            parse_ritual_unavailable(
+                {
+                    "type": "ritual_unavailable",
+                    "session_id": "sid-9",
+                    "reason": "not_found",
+                }
+            ),
+            {"session_id": "sid-9", "reason": "not_found"},
+        )
+        self.assertIsNone(
+            parse_ritual_unavailable(
+                {"type": "ritual_unavailable", "reason": "not_found"}
+            )
         )
 
 
@@ -337,6 +416,53 @@ class PhoneBridgeRequestSavedHrvTests(unittest.TestCase):
         client.is_connected = lambda: True  # type: ignore[method-assign]
         self.assertTrue(client.request_saved_hrv())
         self.assertEqual(sent, [{"type": "ritual_request", "session_id": None}])
+
+    def test_request_saved_hrv_list_when_connected(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        client.is_connected = lambda: True  # type: ignore[method-assign]
+        self.assertTrue(client.request_saved_hrv_list())
+        self.assertEqual(sent, [{"type": "ritual_list"}])
+
+    def test_named_request_arms_unavailable_and_no_id_does_not(self):
+        client = PhoneBridgeClient()
+        sent: list[dict] = []
+        missed: list[dict] = []
+        client._send_ndjson = lambda payload: sent.append(dict(payload))  # type: ignore[method-assign]
+        client.is_connected = lambda: True  # type: ignore[method-assign]
+        client.saved_hrv_unavailable.connect(lambda payload: missed.append(dict(payload)))
+        unavailable = {
+            "type": "ritual_unavailable",
+            "session_id": "sid-9",
+            "reason": "not_found",
+        }
+        client._handle_bridge_message(unavailable)
+        self.assertEqual(missed, [])
+        self.assertTrue(client.request_saved_hrv(None))
+        client._handle_bridge_message(unavailable)
+        self.assertEqual(missed, [])
+        self.assertTrue(client.request_saved_hrv("sid-9"))
+        self.assertEqual(sent[-1], {"type": "ritual_request", "session_id": "sid-9"})
+        client._handle_bridge_message(unavailable)
+        self.assertEqual(missed, [{"session_id": "sid-9", "reason": "not_found"}])
+        client._handle_bridge_message(unavailable)
+        self.assertEqual(len(missed), 1)
+
+    def test_ritual_list_message_emits_rows(self):
+        client = PhoneBridgeClient()
+        lists: list[list] = []
+        client.saved_hrv_list_ready.connect(lambda rows: lists.append(list(rows)))
+        client._handle_bridge_message(
+            {
+                "type": "ritual_list",
+                "recordings": [
+                    {"session_id": "a", "acked": False, "rmssd_ms": 12},
+                ],
+            }
+        )
+        self.assertEqual(len(lists), 1)
+        self.assertEqual(lists[0][0]["session_id"], "a")
 
 
 class PhoneBridgeSourceDeviceTrackingTests(unittest.TestCase):

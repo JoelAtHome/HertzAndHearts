@@ -170,12 +170,105 @@ def build_ritual_request(session_id: str | None = None) -> dict[str, object]:
     """PC → phone pull of a persisted saved-HRV package (PROTOCOL §7).
 
     `session_id` None/omit = latest unacked, else latest package. A specific id
-    re-sends even if already acked.
+    re-sends even if already acked. Keep the no-id meaning until every host
+    shows the recording list.
     """
     if session_id is None:
         return {"type": "ritual_request", "session_id": None}
     sid = str(session_id).strip()
     return {"type": "ritual_request", "session_id": sid or None}
+
+
+def build_ritual_list() -> dict[str, object]:
+    """PC → phone catalog of stored Record sessions (PROTOCOL §7.3)."""
+    return {"type": "ritual_list"}
+
+
+def format_saved_hrv_duration(seconds: object) -> str:
+    """Compact duration for a saved-HRV list row. Empty when unusable."""
+    try:
+        value = float(seconds)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return ""
+    if value != value or value < 0:
+        return ""
+    if value < 90:
+        return f"{int(round(value))} s"
+    minutes = value / 60.0
+    rounded = round(minutes)
+    if abs(minutes - rounded) < 0.05:
+        return f"{int(rounded)} min"
+    return f"{minutes:.1f} min"
+
+
+def _optional_saved_hrv_text(payload: dict, key: str) -> str | None:
+    text = str(payload.get(key) or "").strip()
+    return text or None
+
+
+def _optional_saved_hrv_float(payload: dict, key: str) -> float | None:
+    try:
+        value = float(payload.get(key))
+    except (TypeError, ValueError):
+        return None
+    if value != value:  # NaN
+        return None
+    return value
+
+
+def parse_ritual_list(payload: object) -> list[dict[str, object]] | None:
+    """Normalize a phone→PC `ritual_list`, or None if this is not that message.
+
+    Recordings stay in phone order (newest first). Patient name is omitted
+    when the phone did not send it. An empty `recordings` array is valid.
+    """
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("type", "")).strip().lower() != "ritual_list":
+        return None
+    raw = payload.get("recordings")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    rows: list[dict[str, object]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        session_id = str(item.get("session_id") or "").strip()
+        if not session_id:
+            continue
+        row: dict[str, object] = {"session_id": session_id}
+        emitted_at = _optional_saved_hrv_text(item, "emitted_at")
+        if emitted_at:
+            row["emitted_at"] = emitted_at
+        duration_s = _optional_saved_hrv_float(item, "duration_s")
+        if duration_s is not None and duration_s >= 0:
+            row["duration_s"] = duration_s
+        rmssd_ms = _optional_saved_hrv_float(item, "rmssd_ms")
+        if rmssd_ms is not None and rmssd_ms >= 0:
+            row["rmssd_ms"] = rmssd_ms
+        for key in ("profile_id", "profile_display_name"):
+            text = _optional_saved_hrv_text(item, key)
+            if text:
+                row[key] = text
+        if isinstance(item.get("acked"), bool):
+            row["acked"] = bool(item.get("acked"))
+        rows.append(row)
+    return rows
+
+
+def parse_ritual_unavailable(payload: object) -> dict[str, str] | None:
+    """Normalize phone→PC `ritual_unavailable` for a named request that missed."""
+    if not isinstance(payload, dict):
+        return None
+    if str(payload.get("type", "")).strip().lower() != "ritual_unavailable":
+        return None
+    session_id = str(payload.get("session_id") or "").strip()
+    if not session_id:
+        return None
+    reason = str(payload.get("reason") or "").strip() or "not_found"
+    return {"session_id": session_id, "reason": reason}
 
 
 def parse_phone_bridge_session_summary(payload: object) -> dict[str, object] | None:
@@ -229,6 +322,11 @@ def parse_phone_bridge_session_summary(payload: object) -> dict[str, object] | N
         row["ecg_truncated"] = bool(payload.get("ecg_truncated"))
     else:
         row["ecg_truncated"] = None
+    # Feather patient active at Record Stop. Omitted on older packages.
+    for key in ("profile_id", "profile_display_name"):
+        text = _optional_saved_hrv_text(payload, key)
+        if text:
+            row[key] = text
     return row
 
 
@@ -367,7 +465,7 @@ def finalize_saved_hrv_package(assembly: SavedHrvAssembly) -> dict[str, object]:
         rmssd_ms = rmssd.get("rmssd_ms")
     elif summary.get("rmssd_ms") is not None:
         rmssd_ms = summary.get("rmssd_ms")
-    return {
+    package: dict[str, object] = {
         "session_id": assembly.session_id,
         "mode": summary.get("mode") or "record",
         "kind": summary.get("kind") or "ritual",
@@ -383,6 +481,11 @@ def finalize_saved_hrv_package(assembly: SavedHrvAssembly) -> dict[str, object]:
         "ibi_ms": ibi,
         "ecg_chunks": ecg_chunks,
     }
+    for key in ("profile_id", "profile_display_name"):
+        text = summary.get(key)
+        if isinstance(text, str) and text.strip():
+            package[key] = text.strip()
+    return package
 
 
 def ble_adapter_blocked_message() -> str | None:
@@ -587,6 +690,10 @@ class PhoneBridgeClient(QObject):
     bridge_rmssd_update = Signal(object)
     feather_leads_off_update = Signal(object)
     saved_hrv_package_ready = Signal(object)
+    # Catalog from `ritual_list`: list of recording dicts, newest first.
+    saved_hrv_list_ready = Signal(object)
+    # Named `ritual_request` missed: {"session_id", "reason"}.
+    saved_hrv_unavailable = Signal(object)
     source_device_update = Signal(str)
     link_ping = Signal()
     verity_limited_support = Signal()
@@ -610,6 +717,9 @@ class PhoneBridgeClient(QObject):
         self._drain_scheduled = False
         self._saved_hrv_assembly: SavedHrvAssembly | None = None
         self._acked_hrv_session_ids: OrderedDict[str, None] = OrderedDict()
+        # Set only for a ritual_request that names a session_id. ritual_unavailable
+        # is ignored until then (a no-id request never receives that reply).
+        self._named_hrv_request_id: str | None = None
         self._saved_hrv_ecg_grace = QTimer(self)
         self._saved_hrv_ecg_grace.setSingleShot(True)
         self._saved_hrv_ecg_grace.timeout.connect(
@@ -820,6 +930,7 @@ class PhoneBridgeClient(QObject):
         self._ecg_frames_seen = 0
         self._last_source_device = ""
         self._saved_hrv_assembly = None
+        self._named_hrv_request_id = None
         if self._saved_hrv_ecg_grace.isActive():
             self._saved_hrv_ecg_grace.stop()
         self.bridge_rmssd_update.emit(None)
@@ -876,10 +987,24 @@ class PhoneBridgeClient(QObject):
         """Ask the phone for a persisted saved-HRV package (PROTOCOL §7).
 
         Returns True if the request was queued on the TCP socket.
+        A named id arms `ritual_unavailable` handling for that id only.
         """
         if not self.is_connected():
             return False
-        self._send_ndjson(build_ritual_request(session_id))
+        payload = build_ritual_request(session_id)
+        sid = payload.get("session_id")
+        self._named_hrv_request_id = sid if isinstance(sid, str) and sid else None
+        self._send_ndjson(payload)
+        return True
+
+    def request_saved_hrv_list(self) -> bool:
+        """Ask the phone for its stored Record catalog (PROTOCOL §7.3).
+
+        Returns True if `ritual_list` was queued on the TCP socket.
+        """
+        if not self.is_connected():
+            return False
+        self._send_ndjson(build_ritual_list())
         return True
 
     def _send_ndjson(self, payload: dict[str, object]) -> None:
@@ -948,6 +1073,8 @@ class PhoneBridgeClient(QObject):
         if summary is None:
             return
         session_id = str(summary["session_id"])
+        if session_id and session_id == self._named_hrv_request_id:
+            self._named_hrv_request_id = None
         if session_id in self._acked_hrv_session_ids:
             # Re-ack duplicates (phone may retry delayed_push); do not re-emit.
             self._send_ritual_ack(session_id)
@@ -970,6 +1097,16 @@ class PhoneBridgeClient(QObject):
             return
         apply_ritual_chunk(assembly, payload)
         self._maybe_finalize_saved_hrv()
+
+    def _on_ritual_unavailable(self, payload: dict) -> None:
+        parsed = parse_ritual_unavailable(payload)
+        if parsed is None:
+            return
+        expected = str(self._named_hrv_request_id or "").strip()
+        if not expected or expected != parsed["session_id"]:
+            return
+        self._named_hrv_request_id = None
+        self.saved_hrv_unavailable.emit(parsed)
 
     def _on_disconnected(self) -> None:
         had_client = self.client is not None
@@ -1114,6 +1251,14 @@ class PhoneBridgeClient(QObject):
             return
         if msg_type == "ritual_chunk":
             self._on_ritual_chunk(payload)
+            return
+        if msg_type == "ritual_list":
+            rows = parse_ritual_list(payload)
+            if rows is not None:
+                self.saved_hrv_list_ready.emit(rows)
+            return
+        if msg_type == "ritual_unavailable":
+            self._on_ritual_unavailable(payload)
             return
         if msg_type == "session_state":
             assembly = self._saved_hrv_assembly

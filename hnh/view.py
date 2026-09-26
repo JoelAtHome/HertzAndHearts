@@ -46,6 +46,7 @@ from hnh.sensor import (
     SensorScanner,
     discover_phone_bridge_hosts,
     format_feather_profile_status_message,
+    format_saved_hrv_duration,
     is_feather_profile_status_message,
 )
 from hnh.linux_ble_prep import LinuxBlePrepWorker
@@ -988,6 +989,184 @@ class ProfileSelectionDialog(QDialog):
     def _accept_guest(self):
         self.selected_profile = "Guest"
         self.accept()
+
+
+class SavedRecordingsDialog(QDialog):
+    """Phone Record catalog. The user picks a row; they never type a session id."""
+
+    recording_chosen = Signal(str)
+    refresh_requested = Signal()
+    latest_requested = Signal()
+
+    def __init__(self, parent=None, *, allow_latest_fallback: bool = True):
+        super().__init__(parent)
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowTitle("Saved recordings")
+        self.resize(720, 380)
+        self._rows: list[dict] = []
+        self._got_list = False
+        self._allow_latest_fallback = bool(allow_latest_fallback)
+
+        root = QVBoxLayout(self)
+        self._status = QLabel("Asking the phone for saved recordings…")
+        self._status.setWordWrap(True)
+        root.addWidget(self._status)
+
+        self._table = QTableWidget(0, 5)
+        self._table.setHorizontalHeaderLabels(
+            ["When", "RMSSD", "Duration", "Patient", "Status"]
+        )
+        self._table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self._table.setSelectionBehavior(QAbstractItemView.SelectRows)
+        self._table.setSelectionMode(QAbstractItemView.SingleSelection)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setAlternatingRowColors(True)
+        header = self._table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        self._table.itemDoubleClicked.connect(lambda _item: self._choose_current())
+        self._table.itemSelectionChanged.connect(self._sync_add_enabled)
+        root.addWidget(self._table)
+
+        buttons = QHBoxLayout()
+        self._add_btn = QPushButton("Add to Session History")
+        self._add_btn.setEnabled(False)
+        self._add_btn.clicked.connect(self._choose_current)
+        self._refresh_btn = QPushButton("Refresh")
+        self._refresh_btn.clicked.connect(self._on_refresh)
+        self._latest_btn = QPushButton("Request latest")
+        self._latest_btn.setToolTip(
+            "This phone did not list recordings. Ask for its latest saved HRV instead."
+        )
+        self._latest_btn.setVisible(False)
+        self._latest_btn.clicked.connect(self.latest_requested.emit)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.close)
+        buttons.addWidget(self._add_btn)
+        buttons.addWidget(self._refresh_btn)
+        buttons.addWidget(self._latest_btn)
+        buttons.addStretch()
+        buttons.addWidget(close_btn)
+        root.addLayout(buttons)
+
+        self._wait_timer = QTimer(self)
+        self._wait_timer.setSingleShot(True)
+        self._wait_timer.timeout.connect(self._on_wait_timeout)
+
+    def start_wait(self) -> None:
+        self._got_list = False
+        self._latest_btn.setVisible(False)
+        self._status.setText("Asking the phone for saved recordings…")
+        self._wait_timer.start(4000)
+
+    def show_recordings(self, rows: object) -> None:
+        self._wait_timer.stop()
+        self._got_list = True
+        self._latest_btn.setVisible(False)
+        parsed = rows if isinstance(rows, list) else []
+        self._rows = [
+            row
+            for row in parsed
+            if isinstance(row, dict) and str(row.get("session_id") or "").strip()
+        ]
+        self._table.setRowCount(len(self._rows))
+        any_patient = False
+        for index, row in enumerate(self._rows):
+            when_raw = str(row.get("emitted_at") or "").strip()
+            when = format_datetime_for_display(when_raw) if when_raw else ""
+            if when == "--":
+                when = ""
+            rmssd = row.get("rmssd_ms")
+            try:
+                rmssd_text = f"{float(rmssd):.1f} ms" if rmssd is not None else ""
+            except (TypeError, ValueError):
+                rmssd_text = ""
+            duration_text = format_saved_hrv_duration(row.get("duration_s"))
+            patient = str(row.get("profile_display_name") or "").strip()
+            if patient:
+                any_patient = True
+            acked = row.get("acked")
+            if acked is True:
+                status = "sent"
+            elif acked is False:
+                status = "pending"
+            else:
+                status = ""
+            session_id = str(row.get("session_id") or "").strip()
+            for col, text in enumerate(
+                (when, rmssd_text, duration_text, patient, status)
+            ):
+                item = QTableWidgetItem(text)
+                item.setData(Qt.UserRole, session_id)
+                self._table.setItem(index, col, item)
+        self._table.setColumnHidden(3, not any_patient)
+        if not self._rows:
+            self._status.setText("No saved recordings on the phone.")
+        else:
+            self._status.setText(
+                "Choose a recording. Sent means the phone already queued it to a PC."
+            )
+        self._sync_add_enabled()
+
+    def drop_session(self, session_id: str) -> None:
+        sid = str(session_id or "").strip()
+        kept = [
+            row
+            for row in self._rows
+            if str(row.get("session_id") or "").strip() != sid
+        ]
+        self.show_recordings(kept)
+        self._status.setText(
+            "That recording is no longer on the phone. Refreshing the list."
+        )
+
+    def note_request_sent(self) -> None:
+        self._status.setText(
+            "Requested. It will show in Session History when it is new."
+        )
+
+    def note_outcome(self, text: str) -> None:
+        message = str(text or "").strip()
+        if message:
+            self._status.setText(message)
+
+    def show_link_down(self) -> None:
+        self._wait_timer.stop()
+        self._status.setText("Connect to Phone Bridge before requesting saved recordings.")
+        self._add_btn.setEnabled(False)
+        self._latest_btn.setVisible(False)
+
+    def _on_wait_timeout(self) -> None:
+        if self._got_list:
+            return
+        if self._allow_latest_fallback:
+            self._status.setText(
+                "The phone did not return a recording list. It may be an older build."
+            )
+            self._latest_btn.setVisible(True)
+            return
+        self._status.setText("The phone did not return a recording list.")
+
+    def _on_refresh(self) -> None:
+        self.start_wait()
+        self.refresh_requested.emit()
+
+    def _sync_add_enabled(self) -> None:
+        self._add_btn.setEnabled(self._current_session_id() is not None)
+
+    def _current_session_id(self) -> str | None:
+        row = self._table.currentRow()
+        if row < 0 or row >= len(self._rows):
+            return None
+        sid = str(self._rows[row].get("session_id") or "").strip()
+        return sid or None
+
+    def _choose_current(self) -> None:
+        sid = self._current_session_id()
+        if not sid:
+            return
+        self.recording_chosen.emit(sid)
 
 
 class SessionHistoryDialog(QDialog):
@@ -7142,6 +7321,7 @@ class View(QMainWindow):
         self._saved_hrv_request_timer = QTimer(self)
         self._saved_hrv_request_timer.setSingleShot(True)
         self._saved_hrv_request_timer.timeout.connect(self._on_saved_hrv_request_timeout)
+        self._saved_recordings_dialog: SavedRecordingsDialog | None = None
         self._connection_mode = self._saved_connection_mode
         self.sensor = self.phone_bridge if self._connection_mode == "phone" else self.ble_sensor
         self._bind_sensor_signals(self.sensor)
@@ -7451,13 +7631,16 @@ class View(QMainWindow):
             "Import Session to History", self._on_import_session
         )
         self._request_saved_hrv_action = self._more_menu.addAction(
-            "Request saved HRV", self._on_request_saved_hrv
+            "Saved recordings…", self._on_request_saved_hrv
+        )
+        self._saved_recordings_tooltip = (
+            "List HRV recordings stored on the connected phone and add one to Session History."
         )
         self._request_saved_hrv_tooltip = (
             "Ask the connected phone for its latest saved HRV recording "
             "(same as Tech Send HRV). Adds to Session History when new."
         )
-        self._request_saved_hrv_action.setToolTip(self._request_saved_hrv_tooltip)
+        self._request_saved_hrv_action.setToolTip(self._saved_recordings_tooltip)
         self._more_menu.aboutToShow.connect(self._refresh_more_menu_actions)
         self._more_menu.addSeparator()
         self._help_menu = QMenu("Help", self._more_menu)
@@ -8548,6 +8731,12 @@ class View(QMainWindow):
         saved_hrv = getattr(sensor_client, "saved_hrv_package_ready", None)
         if saved_hrv is not None:
             saved_hrv.connect(self._on_saved_hrv_package)
+        hrv_list = getattr(sensor_client, "saved_hrv_list_ready", None)
+        if hrv_list is not None:
+            hrv_list.connect(self._on_saved_hrv_list)
+        hrv_missing = getattr(sensor_client, "saved_hrv_unavailable", None)
+        if hrv_missing is not None:
+            hrv_missing.connect(self._on_saved_hrv_unavailable)
         lod = getattr(sensor_client, "feather_leads_off_update", None)
         if lod is not None:
             lod.connect(self._on_feather_leads_off_update)
@@ -8603,6 +8792,18 @@ class View(QMainWindow):
         if saved_hrv is not None:
             try:
                 saved_hrv.disconnect(self._on_saved_hrv_package)
+            except Exception:
+                pass
+        hrv_list = getattr(sensor_client, "saved_hrv_list_ready", None)
+        if hrv_list is not None:
+            try:
+                hrv_list.disconnect(self._on_saved_hrv_list)
+            except Exception:
+                pass
+        hrv_missing = getattr(sensor_client, "saved_hrv_unavailable", None)
+        if hrv_missing is not None:
+            try:
+                hrv_missing.disconnect(self._on_saved_hrv_unavailable)
             except Exception:
                 pass
         lod = getattr(sensor_client, "feather_leads_off_update", None)
@@ -11390,37 +11591,162 @@ class View(QMainWindow):
         hrv_action = getattr(self, "_request_saved_hrv_action", None)
         if hrv_action is not None:
             linked = isinstance(self.sensor, PhoneBridgeClient) and self.sensor.is_connected()
+            use_list = self._phone_bridge_has_ritual_list() is not False
+            hrv_action.setText("Saved recordings…" if use_list else "Request saved HRV")
             hrv_action.setEnabled(linked)
-            if linked:
-                hrv_action.setToolTip(
-                    getattr(self, "_request_saved_hrv_tooltip", "") or ""
-                )
-            else:
+            if not linked:
                 hrv_action.setToolTip(
                     "Unavailable until connected to Phone Bridge"
                 )
+            elif use_list:
+                hrv_action.setToolTip(
+                    getattr(self, "_saved_recordings_tooltip", "") or ""
+                )
+            else:
+                hrv_action.setToolTip(
+                    getattr(self, "_request_saved_hrv_tooltip", "") or ""
+                )
+
+    def _phone_bridge_has_ritual_list(self) -> bool | None:
+        """True/False when discover `features` are known; None if this host was not scanned."""
+        combo = getattr(self, "bridge_host_combo", None)
+        if combo is None:
+            return None
+        host = ""
+        host_value = getattr(self, "_phone_bridge_host_value", None)
+        if callable(host_value):
+            host = str(host_value() or "").strip().lower()
+
+        def _has_list(data: object) -> bool | None:
+            if not isinstance(data, dict) or not isinstance(data.get("features"), list):
+                return None
+            return "ritual_list" in {str(item).strip() for item in data.get("features")}
+
+        if host:
+            for index in range(combo.count()):
+                data = combo.itemData(index)
+                if not isinstance(data, dict):
+                    continue
+                ip = str(data.get("ip") or "").strip().lower()
+                if ip == host:
+                    return _has_list(data)
+        return _has_list(combo.currentData())
 
     def _on_request_saved_hrv(self) -> None:
+        if not isinstance(self.sensor, PhoneBridgeClient):
+            self.show_status("Saved recordings need Phone Bridge.")
+            return
+        if not self.sensor.is_connected():
+            self.show_status("Connect to Phone Bridge before requesting saved HRV.")
+            return
+        if self._phone_bridge_has_ritual_list() is False:
+            self._request_latest_saved_hrv()
+            return
+        self._open_saved_recordings_dialog()
+
+    def _request_latest_saved_hrv(self) -> None:
+        """No-id pull: newest unacked package, otherwise the newest package."""
         if not isinstance(self.sensor, PhoneBridgeClient):
             self.show_status("Request saved HRV needs Phone Bridge.")
             return
         if not self.sensor.request_saved_hrv():
             self.show_status("Connect to Phone Bridge before requesting saved HRV.")
+            dlg = getattr(self, "_saved_recordings_dialog", None)
+            if dlg is not None:
+                dlg.show_link_down()
             return
         self._saved_hrv_request_pending += 1
         self._saved_hrv_request_timer.start(5000)
         self.show_status("Requested saved HRV from phone…")
+        dlg = getattr(self, "_saved_recordings_dialog", None)
+        if dlg is not None:
+            dlg.note_request_sent()
+
+    def _open_saved_recordings_dialog(self) -> None:
+        allow_latest = self._phone_bridge_has_ritual_list() is not True
+        existing = getattr(self, "_saved_recordings_dialog", None)
+        if existing is not None:
+            existing._allow_latest_fallback = allow_latest
+            existing.start_wait()
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            self._request_saved_recordings_list()
+            return
+        dlg = SavedRecordingsDialog(self, allow_latest_fallback=allow_latest)
+        dlg.recording_chosen.connect(self._on_saved_recording_chosen)
+        dlg.refresh_requested.connect(self._request_saved_recordings_list)
+        dlg.latest_requested.connect(self._request_latest_saved_hrv)
+        dlg.finished.connect(self._on_saved_recordings_dialog_closed)
+        self._saved_recordings_dialog = dlg
+        dlg.start_wait()
+        dlg.show()
+        self._request_saved_recordings_list()
+
+    def _on_saved_recordings_dialog_closed(self, _result: int = 0) -> None:
+        self._saved_recordings_dialog = None
+
+    def _request_saved_recordings_list(self) -> None:
+        dlg = getattr(self, "_saved_recordings_dialog", None)
+        if not isinstance(self.sensor, PhoneBridgeClient) or not self.sensor.request_saved_hrv_list():
+            if dlg is not None:
+                dlg.show_link_down()
+            self.show_status("Connect to Phone Bridge before requesting saved recordings.")
+
+    def _on_saved_recording_chosen(self, session_id: str) -> None:
+        sid = str(session_id or "").strip()
+        if not sid or not isinstance(self.sensor, PhoneBridgeClient):
+            return
+        if not self.sensor.request_saved_hrv(sid):
+            self.show_status("Connect to Phone Bridge before requesting a recording.")
+            dlg = getattr(self, "_saved_recordings_dialog", None)
+            if dlg is not None:
+                dlg.show_link_down()
+            return
+        self._saved_hrv_request_pending += 1
+        self._saved_hrv_request_timer.start(5000)
+        self.show_status("Requested that recording from the phone…")
+        dlg = getattr(self, "_saved_recordings_dialog", None)
+        if dlg is not None:
+            dlg.note_request_sent()
+
+    def _on_saved_hrv_list(self, rows: object) -> None:
+        dlg = getattr(self, "_saved_recordings_dialog", None)
+        if dlg is not None:
+            dlg.show_recordings(rows)
+
+    def _on_saved_hrv_unavailable(self, payload: object) -> None:
+        self._clear_saved_hrv_request_wait()
+        sid = ""
+        if isinstance(payload, dict):
+            sid = str(payload.get("session_id") or "").strip()
+        dlg = getattr(self, "_saved_recordings_dialog", None)
+        if dlg is not None:
+            dlg.drop_session(sid)
+        self.show_status("That recording is no longer on the phone.")
+        if (
+            dlg is not None
+            and isinstance(self.sensor, PhoneBridgeClient)
+            and self.sensor.is_connected()
+        ):
+            self.sensor.request_saved_hrv_list()
 
     def _clear_saved_hrv_request_wait(self) -> None:
         self._saved_hrv_request_pending = 0
         if self._saved_hrv_request_timer.isActive():
             self._saved_hrv_request_timer.stop()
 
+    def _tell_saved_recordings(self, text: str) -> None:
+        dlg = getattr(self, "_saved_recordings_dialog", None)
+        if dlg is not None:
+            dlg.note_outcome(text)
+
     def _on_saved_hrv_request_timeout(self) -> None:
         if not self._saved_hrv_request_pending:
             return
         self._saved_hrv_request_pending = 0
         self.show_status("No new saved HRV.")
+        self._tell_saved_recordings("No new saved HRV.")
 
     def _finish_saved_hrv_request(self, *, imported: bool) -> None:
         """Clear a manual Request wait; show no-new copy when nothing useful arrived."""
@@ -11429,6 +11755,7 @@ class View(QMainWindow):
         self._clear_saved_hrv_request_wait()
         if not imported:
             self.show_status("No new saved HRV.")
+            self._tell_saved_recordings("No new saved HRV.")
 
     def _refocus_after_profile_dialog(self):
         self.setEnabled(True)
@@ -12245,7 +12572,9 @@ class View(QMainWindow):
             )
         except Exception as exc:
             self._finish_saved_hrv_request(imported=False)
-            self.show_status(f"Saved HRV import failed: {exc}")
+            failed = f"Saved HRV import failed: {exc}"
+            self.show_status(failed)
+            self._tell_saved_recordings(failed)
             return
         if bundle is None:
             self._finish_saved_hrv_request(imported=False)
@@ -12257,18 +12586,20 @@ class View(QMainWindow):
         except (TypeError, ValueError):
             rmssd_f = None
         has_ecg = bool(package.get("ecg_chunks"))
-        if rmssd_f is not None and has_ecg:
-            self.show_status(
-                f"Saved HRV added to Session History ({rmssd_f:.1f} ms, with ECG)."
-            )
-        elif rmssd_f is not None:
-            self.show_status(
-                f"Saved HRV added to Session History ({rmssd_f:.1f} ms)."
-            )
-        elif has_ecg:
-            self.show_status("Saved HRV added to Session History (with ECG).")
+        details: list[str] = []
+        if rmssd_f is not None:
+            details.append(f"{rmssd_f:.1f} ms")
+        if has_ecg:
+            details.append("with ECG")
+        patient = str(package.get("profile_display_name") or "").strip()
+        if patient:
+            details.append(patient)
+        if details:
+            added = "Saved HRV added to Session History (" + ", ".join(details) + ")."
         else:
-            self.show_status("Saved HRV added to Session History.")
+            added = "Saved HRV added to Session History."
+        self.show_status(added)
+        self._tell_saved_recordings(added)
         if getattr(self, "_history_window", None) is not None:
             sessions = self._profile_store.list_sessions(
                 profile_name=self._session_profile_id,

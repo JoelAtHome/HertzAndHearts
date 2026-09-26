@@ -415,7 +415,11 @@ def import_saved_hrv_package(
 
     reason = str(package.get("transfer_reason") or "").strip() or "saved"
     source = str(package.get("source_device") or "").strip() or "phone_bridge"
+    patient = str(package.get("profile_display_name") or "").strip()
+    phone_profile_id = str(package.get("profile_id") or "").strip()
     note = f"[Phone Bridge] Saved HRV ({reason})"
+    if patient:
+        note = f"{note} · {patient}"
     data = replay_data_from_ibi_ms(
         ibi_raw,
         bridge_rmssd_ms=bridge_rmssd_f,
@@ -489,17 +493,22 @@ def import_saved_hrv_package(
     last_hr = data.get("hr_values", [])[-1] if data.get("hr_values") else None
     last_rmssd = data.get("rmssd_values", [])[-1] if data.get("rmssd_values") else None
 
+    phone_package: dict[str, Any] = {
+        "session_id": phone_sid,
+        "kind": package.get("kind"),
+        "mode": package.get("mode"),
+        "ibi_count": len(ibi_raw),
+        "has_ecg_chunks": bool(ecg_chunks),
+        "ecg_sample_count": len(ecg_samples),
+        "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
+    }
+    if phone_profile_id:
+        phone_package["profile_id"] = phone_profile_id
+    if patient:
+        phone_package["profile_display_name"] = patient
     artifacts: dict[str, Any] = {
         "csv": {"path": str(bundle.csv_path.name), "exists": True},
-        "phone_bridge_package": {
-            "session_id": phone_sid,
-            "kind": package.get("kind"),
-            "mode": package.get("mode"),
-            "ibi_count": len(ibi_raw),
-            "has_ecg_chunks": bool(ecg_chunks),
-            "ecg_sample_count": len(ecg_samples),
-            "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
-        },
+        "phone_bridge_package": phone_package,
     }
     if edf_ok:
         artifacts["edf"] = {"path": str(bundle.edf_path.name), "exists": True}

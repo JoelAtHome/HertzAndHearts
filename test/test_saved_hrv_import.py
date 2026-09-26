@@ -93,6 +93,34 @@ class SavedHrvImportTests(unittest.TestCase):
             matched = next(s for s in sessions if s.get("session_id") == bundle.session_id)
             self.assertEqual(matched.get("started_at"), expected_start.isoformat())
 
+    def test_import_keeps_phone_patient_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            package = {
+                "session_id": "20260915T140000Z-pat",
+                "mode": "record",
+                "kind": "ritual",
+                "transfer_reason": "manual_send",
+                "source_device": "FEATHER",
+                "emitted_at": "2026-09-15T14:00:00Z",
+                "duration_s": 60.0,
+                "rmssd_ms": 33.0,
+                "profile_id": "patient-2",
+                "profile_display_name": "Joel",
+                "ibi_ms": [800, 810, 790],
+                "ecg_chunks": [],
+            }
+            bundle = import_saved_hrv_package(package, root, "Admin", store)
+            self.assertIsNotNone(bundle)
+            assert bundle is not None
+            manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
+            stored = manifest["artifacts"]["phone_bridge_package"]
+            self.assertEqual(stored["profile_display_name"], "Joel")
+            self.assertEqual(stored["profile_id"], "patient-2")
+            csv_text = bundle.csv_path.read_text(encoding="utf-8")
+            self.assertIn("Joel", csv_text)
+
     def test_repair_shifts_stored_zulu_wall_clock_to_local(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

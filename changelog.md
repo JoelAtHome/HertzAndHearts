@@ -2,6 +2,8 @@
 
 ### Unreleased
 
++ enhancement: **More → Saved recordings…** lists the phone's stored HRV recordings (time, RMSSD, duration, patient, sent/pending) and imports the one you pick. A recording deleted on the phone is dropped and the list refreshes. Phones that do not advertise `ritual_list` still use **Request saved HRV**. Connect still pulls the newest unacked package.
+
 ### Version 1.0.0-beta.5 (September 21 2026)
 + release: Bumped pre-release version to `1.0.0b5` (public label: `1.0.0-beta.5`).
 + bugfix: Feather lead-off no longer looks like a dropped phone link. While electrodes are off, Hertz & Hearts keeps the Check electrodes banner and the phone socket instead of declaring “No data” and resetting the stream.

@@ -107,7 +107,8 @@ Notes:
 
   **β.69+:** while LOD is active the phone **stops** live NDJSON `ecg` (and ritual ECG buffering); Tech strip may still move. HnH ECG can pause until `leads_off:false` — that is expected, not a host bug. IBI stays MCU-quiet via the publish gate. Wire docs: [PROTOCOL.md §3.1](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [FEATHER_BLE_GATT.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/FEATHER_BLE_GATT.md). MCU detail: [FEATHER_BLE.md](https://github.com/JoelAtHome/ECG-Box/blob/main/docs/FEATHER_BLE.md). HnH does not invent contact from ECG SNR.
 - **Saved HRV (Record on phone):** after Stop, the phone may push a durable package on connect (`delayed_push`), when you use Tech **Send HRV**, or when HnH requests it. HnH replies with `ritual_ack`, dedupes by phone `session_id`, and writes **Session History** (IBIs + bridge RMSSD + ECG as `session.edf` when present). A package that arrives while live charts are running is saved quietly — no mode flip.
-- On connect, HnH also sends `ritual_request` (latest package). Use **More → Request saved HRV** while connected to pull again.
+- On connect, HnH also sends `ritual_request` with no `session_id` (newest unacked package, otherwise the newest). That no-id meaning stays until FlareTracker ships the same picker.
+- While linked, **More → Saved recordings…** sends `ritual_list` and shows the phone's stored Record sessions (local time, RMSSD, duration, patient name when the phone has one, sent or pending). Pick a row to send `ritual_request` with that `session_id`. If the phone deleted it, HnH drops the row on `ritual_unavailable` and asks for the list again. Phones whose discover `features` omit `ritual_list` keep **More → Request saved HRV** (the no-id pull). If Scan has not reported features yet, the list is tried first and **Request latest** appears when the phone does not answer.
 - User-facing copy says **HRV** / **saved HRV** — never “ritual” (wire types stay `ritual_*`).
 
 **Still ignored / parked:** `session_control`, host–mode conflict UI, and other unknown `type` values. Discover fields `protocol` / `features` / `bridge_version` are accepted. See [ECG-Phone-Bridge PROTOCOL.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/PROTOCOL.md) and [HOST_HANDOFF.md](https://github.com/JoelAtHome/ECG-Phone-Bridge/blob/main/docs/HOST_HANDOFF.md).
@@ -120,7 +121,7 @@ Notes:
 4. Confirm HnH status shows connected.
 5. Confirm HR/RMSSD move within ~5-15 seconds.
 6. Open ECG window; verify waveform if ECG packets are forwarded.
-7. Optional saved-HRV check: phone **Record HRV** alone → Stop → connect HnH (or **More → Request saved HRV**) → status mentions Session History → **More → Session History…** shows the row (ECG in **More → Session Replay…** when the package included it).
+7. Optional saved-HRV check: phone **Record HRV** alone → Stop → connect HnH (or **More → Saved recordings…** and pick the row) → status mentions Session History → **More → Session History…** shows the row (ECG in **More → Session Replay…** when the package included it).
 
 ## 6) Reliability notes
 
