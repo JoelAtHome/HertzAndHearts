@@ -30,6 +30,26 @@ class ReplayLoaderTests(unittest.TestCase):
             self.assertEqual(len(rmssd_times), 1)
             self.assertGreaterEqual(rmssd_times[0], hr_times[1])
 
+    def test_flat_summary_replay_uses_rolling_series(self):
+        from hnh.replay_loader import load_session_replay_data
+
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp)
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["event", "value", "timestamp", "elapsed_sec"])
+                elapsed = 0.0
+                for ibi in (600, 640, 620, 700, 580, 660):
+                    w.writerow(["IBI", f"{ibi:.1f}", "2026-09-28T20:00:00", f"{elapsed:.3f}"])
+                    elapsed += ibi
+                w.writerow(["hrv", "41.47", "2026-09-28T20:00:00", "0.000"])
+                w.writerow(["hrv", "41.47", "2026-09-28T20:00:00", f"{elapsed - 660:.3f}"])
+            data = load_session_replay_data(session_dir)
+            values = data["rmssd_values"]
+            self.assertGreater(len(values), 1)
+            self.assertGreater(max(values) - min(values), 1.0)
+
     def test_ibi_without_elapsed_uses_incremental_fallback(self):
         with TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "session.csv"

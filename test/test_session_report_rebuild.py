@@ -105,6 +105,46 @@ class SessionReportRebuildTests(unittest.TestCase):
             self.assertTrue(docx_path.exists())
             self.assertTrue(pdf_path.exists())
 
+    def test_flat_phone_summary_becomes_rolling_series_in_report_data(self):
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp) / "session-flat"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(["event", "value", "timestamp", "elapsed_sec"])
+                elapsed = 0.0
+                for ibi in (600, 640, 620, 700, 580, 660):
+                    w.writerow(["IBI", f"{ibi:.1f}", "2026-09-28T20:00:00", f"{elapsed:.3f}"])
+                    elapsed += ibi
+                w.writerow(["hrv", "41.47", "2026-09-28T20:00:00", "0.000"])
+                w.writerow(["hrv", "41.47", "2026-09-28T20:00:00", f"{elapsed - 660:.3f}"])
+            manifest = {
+                "session_id": "flat-rmssd",
+                "profile_id": "Payton",
+                "timing": {
+                    "started_at": "2026-09-28T20:00:00",
+                    "ended_at": "2026-09-28T20:02:00",
+                },
+                "metrics": {
+                    "last_hr": 90.0,
+                    "last_rmssd": 41.47,
+                    "bridge_rmssd_ms": 41.47,
+                    "qtc": {"status": "unavailable"},
+                },
+                "artifacts": {"csv": {"path": "session.csv", "exists": True}},
+                "sensor": {"source_device": "FEATHER", "ecg_sensor_name": "Feather ECG-Box"},
+            }
+            (session_dir / "session_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+            before = csv_path.read_text(encoding="utf-8")
+            data = build_report_data_from_session_dir(session_dir, profile_name="Payton")
+            self.assertEqual(csv_path.read_text(encoding="utf-8"), before)
+            self.assertGreater(len(data["rmssd_values"]), 1)
+            self.assertGreater(max(data["rmssd_values"]) - min(data["rmssd_values"]), 1.0)
+            self.assertAlmostEqual(data["last_rmssd"], data["rmssd_values"][-1], places=6)
+            self.assertAlmostEqual(data["bridge_rmssd_ms"], 41.47, places=2)
+            self.assertNotAlmostEqual(data["last_rmssd"], 41.47, places=2)
+
 
 if __name__ == "__main__":
     unittest.main()

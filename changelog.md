@@ -2,6 +2,8 @@
 
 ### Unreleased
 
++ bugfix: Phone-bridge imports plot a rolling RMSSD from the saved beat intervals. The phone's single RMSSD stays a labeled summary. Replay, reports, and Trends use that rolling series for sessions already imported, without rewriting their CSV or EDF files.
+
 ### Version 1.0.0-beta.6 (September 26 2026)
 + release: Bumped pre-release version to `1.0.0b6` (public label: `1.0.0-beta.6`).
 + enhancement: **More → Saved Phone Recordings…** lists the phone's stored HRV recordings (time, RMSSD, duration, patient, sent/pending) and imports the one you pick. A recording deleted on the phone is dropped and the list refreshes. Phones that do not advertise `ritual_list` still use **Request saved HRV**. Connect still pulls the newest unacked package.

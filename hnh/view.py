@@ -2057,6 +2057,16 @@ class SessionHistoryDialog(QDialog):
         self._replay_hr_plot.clear()
         self._replay_rmssd_plot.clear()
         self._replay_ecg_plot.clear()
+        bridge_rmssd = data.get("bridge_rmssd_ms")
+        if bridge_rmssd is not None:
+            try:
+                self._replay_rmssd_plot.setTitle(
+                    f"RMSSD (ms) — phone summary {float(bridge_rmssd):.1f} ms"
+                )
+            except (TypeError, ValueError):
+                self._replay_rmssd_plot.setTitle("RMSSD (ms)")
+        else:
+            self._replay_rmssd_plot.setTitle("RMSSD (ms)")
 
         # Remove old playhead lines
         for plot, line in [

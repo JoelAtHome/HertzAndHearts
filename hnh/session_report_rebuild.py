@@ -64,6 +64,8 @@ def _resolve_csv_path(session_dir: Path, manifest: dict[str, Any]) -> Path:
 def _load_series_from_csv(csv_path: Path) -> dict[str, Any]:
     hr_values: list[float] = []
     hr_time_seconds: list[float] = []
+    ibi_ms: list[float] = []
+    ibi_time_seconds: list[float] = []
     rmssd_values: list[float] = []
     rmssd_time_seconds: list[float] = []
     hrv_values: list[float] = []
@@ -126,6 +128,8 @@ def _load_series_from_csv(csv_path: Path) -> dict[str, Any]:
                     t_sec = current_elapsed_ms / 1000.0
                 hr_values.append(60000.0 / value)
                 hr_time_seconds.append(t_sec)
+                ibi_ms.append(value)
+                ibi_time_seconds.append(t_sec)
                 continue
 
             if event == "hrv" and value is not None:
@@ -148,6 +152,8 @@ def _load_series_from_csv(csv_path: Path) -> dict[str, Any]:
     return {
         "hr_values": hr_values,
         "hr_time_seconds": hr_time_seconds,
+        "ibi_ms": ibi_ms,
+        "ibi_time_seconds": ibi_time_seconds,
         "rmssd_values": rmssd_values,
         "rmssd_time_seconds": rmssd_time_seconds,
         "hrv_values": hrv_values,
@@ -234,6 +240,21 @@ def build_report_data_from_session_dir(
 
     hr_values = list(series.get("hr_values") or [])
     rmssd_values = list(series.get("rmssd_values") or [])
+    rmssd_time_seconds = list(series.get("rmssd_time_seconds") or [])
+
+    from hnh.rmssd_series import rolling_rmssd_series, series_is_flat
+
+    stored_rmssd_was_flat = series_is_flat(rmssd_values)
+    if stored_rmssd_was_flat:
+        rolled_times, rolled_values = rolling_rmssd_series(
+            list(series.get("ibi_ms") or []),
+            list(series.get("ibi_time_seconds") or []),
+        )
+        if rolled_values:
+            rmssd_values = rolled_values
+            rmssd_time_seconds = rolled_times
+        else:
+            stored_rmssd_was_flat = False
 
     baseline_hr = metrics.get("baseline_hr") if isinstance(metrics, dict) else None
     baseline_rmssd = metrics.get("baseline_rmssd") if isinstance(metrics, dict) else None
@@ -241,7 +262,9 @@ def build_report_data_from_session_dir(
     last_rmssd = metrics.get("last_rmssd") if isinstance(metrics, dict) else None
     if last_hr is None and hr_values:
         last_hr = hr_values[-1]
-    if last_rmssd is None and rmssd_values:
+    if stored_rmssd_was_flat and rmssd_values:
+        last_rmssd = rmssd_values[-1]
+    elif last_rmssd is None and rmssd_values:
         last_rmssd = rmssd_values[-1]
 
     settings_snapshot = manifest.get("settings_snapshot") if isinstance(manifest, dict) else {}
@@ -290,6 +313,7 @@ def build_report_data_from_session_dir(
         "baseline_rmssd": baseline_rmssd,
         "last_hr": last_hr,
         "last_rmssd": last_rmssd,
+        "bridge_rmssd_ms": metrics.get("bridge_rmssd_ms") if isinstance(metrics, dict) else None,
         "annotations": list(series.get("annotations") or []),
         "ecg_cursor_captures": (
             list(manifest.get("ecg_cursor_captures") or [])
@@ -299,7 +323,7 @@ def build_report_data_from_session_dir(
         "hr_values": hr_values,
         "hr_time_seconds": list(series.get("hr_time_seconds") or []),
         "rmssd_values": rmssd_values,
-        "rmssd_time_seconds": list(series.get("rmssd_time_seconds") or []),
+        "rmssd_time_seconds": rmssd_time_seconds,
         "hrv_values": list(series.get("hrv_values") or []),
         "hrv_time_seconds": list(series.get("hrv_time_seconds") or []),
         "stress_ratio_values": list(series.get("stress_ratio_values") or []),

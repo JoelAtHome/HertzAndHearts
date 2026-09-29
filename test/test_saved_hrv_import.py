@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import struct
 import tempfile
 import unittest
@@ -18,7 +19,7 @@ from hnh.report import naive_local_from_iso
 
 
 class SavedHrvImportTests(unittest.TestCase):
-    def test_replay_data_prefers_bridge_rmssd(self):
+    def test_replay_data_uses_rolling_rmssd_not_phone_summary(self):
         data = replay_data_from_ibi_ms(
             [800, 820, 810],
             bridge_rmssd_ms=42.5,
@@ -27,7 +28,9 @@ class SavedHrvImportTests(unittest.TestCase):
         self.assertIsNotNone(data)
         assert data is not None
         self.assertEqual(len(data["hr_times"]), 3)
-        self.assertEqual(data["rmssd_values"], [42.5])
+        self.assertEqual(len(data["rmssd_values"]), 1)
+        self.assertAlmostEqual(data["rmssd_values"][0], math.sqrt(250.0), places=6)
+        self.assertNotEqual(data["rmssd_values"], [42.5])
         self.assertEqual(data["annotations"][0][1], "[Phone Bridge] Saved HRV")
 
     def test_decode_ritual_ecg_chunks_to_mv(self):
@@ -276,6 +279,87 @@ class SavedHrvImportTests(unittest.TestCase):
             replay = load_session_replay_data(bundle.session_dir)
             self.assertTrue(replay.get("ecg_samples"))
             self.assertGreaterEqual(len(replay["ecg_samples"]), 50)
+
+    def test_import_writes_rolling_rmssd_and_keeps_phone_summary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            ibis = [600, 640, 620, 700, 580, 660]
+            package = {
+                "session_id": "20260928T200000Z-roll",
+                "mode": "record",
+                "kind": "ritual",
+                "transfer_reason": "delayed_push",
+                "source_device": "FEATHER",
+                "emitted_at": "2026-09-28T20:00:00Z",
+                "duration_s": 4.0,
+                "rmssd_ms": 41.47,
+                "ibi_ms": ibis,
+                "ecg_chunks": [],
+            }
+            bundle = import_saved_hrv_package(package, root, "Payton", store)
+            self.assertIsNotNone(bundle)
+            assert bundle is not None
+            manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["metrics"]["bridge_rmssd_ms"], 41.47)
+            self.assertNotAlmostEqual(manifest["metrics"]["last_rmssd"], 41.47, places=2)
+            csv_text = bundle.csv_path.read_text(encoding="utf-8")
+            hrv_values = [
+                float(line.split(",")[1])
+                for line in csv_text.splitlines()
+                if line.startswith("hrv,")
+            ]
+            self.assertGreater(len(hrv_values), 1)
+            self.assertGreater(max(hrv_values) - min(hrv_values), 1.0)
+            trends = store.list_session_trends("Payton", span="year")
+            self.assertEqual(len(trends), 1)
+            self.assertNotAlmostEqual(trends[0]["avg_rmssd"], 41.47, places=2)
+
+    def test_existing_flat_session_trend_average_is_recomputed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            session_dir = root / "old-flat"
+            session_dir.mkdir()
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as handle:
+                handle.write("event,value,timestamp,elapsed_sec\n")
+                elapsed = 0.0
+                for ibi in (600, 640, 620, 700, 580, 660):
+                    handle.write(f"IBI,{ibi:.1f},2026-09-28T20:00:00,{elapsed:.3f}\n")
+                    elapsed += ibi
+                handle.write("hrv,41.47,2026-09-28T20:00:00,0.000\n")
+                handle.write(f"hrv,41.47,2026-09-28T20:00:00,{elapsed - 660:.3f}\n")
+            with store._db() as conn:
+                conn.execute(
+                    """
+                    INSERT INTO session_history (
+                        session_id, profile_name, started_at, ended_at, state, session_dir, csv_path
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "old-flat",
+                        "Payton",
+                        "2026-09-28T20:00:00",
+                        "2026-09-28T20:02:00",
+                        "imported",
+                        str(session_dir),
+                        str(csv_path),
+                    ),
+                )
+            store.record_session_trend(
+                profile_name="Payton",
+                session_id="old-flat",
+                ended_at="2026-09-28T20:02:00",
+                avg_hr=95.0,
+                avg_rmssd=41.47,
+            )
+            before = csv_path.read_text(encoding="utf-8")
+            trends = store.list_session_trends("Payton", span="year")
+            self.assertEqual(csv_path.read_text(encoding="utf-8"), before)
+            self.assertEqual(len(trends), 1)
+            self.assertNotAlmostEqual(trends[0]["avg_rmssd"], 41.47, places=2)
+            self.assertAlmostEqual(trends[0]["avg_hr"], 95.0, places=3)
 
 
 if __name__ == "__main__":

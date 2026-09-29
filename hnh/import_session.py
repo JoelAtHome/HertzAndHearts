@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import csv
-import math
 import shutil
 import struct
 from datetime import datetime, timedelta
@@ -14,17 +13,13 @@ from typing import Any
 from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
 from hnh.profile_store import ProfileStore
 from hnh.report import format_ecg_sensor_display_name, naive_local_from_iso
+from hnh.rmssd_series import rolling_rmssd_series
 
 
-def _compute_rmssd_from_ibis(ibis_ms: list[float]) -> list[float]:
-    """Compute RMSSD from successive IBI pairs. Returns empty if < 2 IBIs."""
-    if len(ibis_ms) < 2:
-        return []
-    diffs = []
-    for i in range(1, len(ibis_ms)):
-        d = ibis_ms[i] - ibis_ms[i - 1]
-        diffs.append(d * d)
-    return [math.sqrt(sum(diffs) / len(diffs))] if diffs else []
+def _rmssd_trend_average(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
 
 
 def parse_external_file(path: Path) -> dict[str, Any] | None:
@@ -147,9 +142,7 @@ def _parse_rr_only(path: Path) -> dict[str, Any] | None:
         hr_values.append(hr_bpm)
         elapsed_ms += ibi
 
-    rmssd_val = _compute_rmssd_from_ibis(ibis_ms)
-    rmssd_times = [hr_times[-1]] * len(rmssd_val) if rmssd_val else []
-    rmssd_values = rmssd_val
+    rmssd_times, rmssd_values = rolling_rmssd_series(ibis_ms, hr_times)
 
     duration = max(hr_times) if hr_times else 0.0
     return {
@@ -175,18 +168,19 @@ def write_session_csv(csv_path: Path, data: dict[str, Any]) -> None:
         base_ts = datetime.now().isoformat()
         hr_times = data.get("hr_times") or []
         hr_values = data.get("hr_values") or []
-        rmssd_values = data.get("rmssd_values") or []
+        rmssd_times = list(data.get("rmssd_times") or [])
+        rmssd_values = list(data.get("rmssd_values") or [])
         annotations = data.get("annotations") or []
+        if rmssd_values and not rmssd_times:
+            rmssd_times = list(hr_times[: len(rmssd_values)])
 
-        for i, (t, hr) in enumerate(zip(hr_times, hr_values)):
+        for t, hr in zip(hr_times, hr_values):
             elapsed_ms = t * 1000.0
             ibi_ms = 60000.0 / hr
             w.writerow(["IBI", f"{ibi_ms:.1f}", base_ts, f"{elapsed_ms:.3f}"])
-            if rmssd_values:
-                if i < len(rmssd_values):
-                    w.writerow(["hrv", f"{rmssd_values[i]:.2f}", base_ts, f"{elapsed_ms:.3f}"])
-                elif i == len(hr_times) - 1 and len(rmssd_values) == 1:
-                    w.writerow(["hrv", f"{rmssd_values[0]:.2f}", base_ts, f"{elapsed_ms:.3f}"])
+
+        for t, rmssd in zip(rmssd_times, rmssd_values):
+            w.writerow(["hrv", f"{float(rmssd):.2f}", base_ts, f"{float(t) * 1000.0:.3f}"])
 
         for t, text in annotations:
             elapsed_ms = t * 1000.0
@@ -274,13 +268,14 @@ def import_file_as_session(
         )
 
     last_hr = data.get("hr_values", [])[-1] if data.get("hr_values") else None
-    last_rmssd = data.get("rmssd_values", [])[-1] if data.get("rmssd_values") else None
+    rmssd_values = data.get("rmssd_values") or []
+    last_rmssd = rmssd_values[-1] if rmssd_values else None
     profile_store.record_session_trend(
         profile_name=profile_id,
         session_id=bundle.session_id,
         ended_at=now,
         avg_hr=last_hr,
-        avg_rmssd=last_rmssd,
+        avg_rmssd=_rmssd_trend_average(rmssd_values),
     )
 
     return bundle
@@ -312,11 +307,10 @@ def replay_data_from_ibi_ms(
         hr_values.append(60000.0 / ibi)
         elapsed_ms += ibi
 
-    if bridge_rmssd_ms is not None and bridge_rmssd_ms == bridge_rmssd_ms and bridge_rmssd_ms >= 0:
-        rmssd_values = [float(bridge_rmssd_ms)]
-    else:
-        rmssd_values = _compute_rmssd_from_ibis(cleaned)
-    rmssd_times = [hr_times[-1]] * len(rmssd_values) if rmssd_values else []
+    # bridge_rmssd_ms is the phone's session summary. The chart uses the live
+    # monitor's rolling window so that one number is not drawn across the session.
+    _ = bridge_rmssd_ms
+    rmssd_times, rmssd_values = rolling_rmssd_series(cleaned, hr_times)
 
     annotations: list[tuple[float, str]] = []
     if annotation:
@@ -491,7 +485,8 @@ def import_saved_hrv_package(
             edf_ok = False
 
     last_hr = data.get("hr_values", [])[-1] if data.get("hr_values") else None
-    last_rmssd = data.get("rmssd_values", [])[-1] if data.get("rmssd_values") else None
+    rmssd_for_trend = data.get("rmssd_values") or []
+    last_rmssd = rmssd_for_trend[-1] if rmssd_for_trend else None
 
     phone_package: dict[str, Any] = {
         "session_id": phone_sid,
@@ -575,7 +570,7 @@ def import_saved_hrv_package(
         session_id=bundle.session_id,
         ended_at=end_dt,
         avg_hr=last_hr,
-        avg_rmssd=last_rmssd,
+        avg_rmssd=_rmssd_trend_average(rmssd_for_trend),
     )
     profile_store.remember_phone_bridge_import(
         profile_id, phone_sid, bundle.session_id

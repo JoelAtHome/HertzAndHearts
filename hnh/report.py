@@ -1260,6 +1260,9 @@ def generate_session_report(path: str, data: dict) -> None:
             pct = ((last_rmssd_val - baseline_rmssd) / baseline_rmssd) * 100
             delta_rmssd = f"{pct:+.1f}%"
         stats_rows.append(("\u0394 RMSSD from Baseline", delta_rmssd))
+        bridge_rmssd = _to_float(data.get("bridge_rmssd_ms"))
+        if bridge_rmssd is not None:
+            stats_rows.append(("Phone RMSSD (summary)", f"{bridge_rmssd:.1f} ms"))
     else:
         stats_rows.append(("RMSSD", "No data recorded"))
     hrv_vals = hrv_vals_settled

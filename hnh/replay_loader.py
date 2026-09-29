@@ -23,12 +23,44 @@ def load_session_replay_data(session_dir: Path) -> dict[str, Any]:
     if edf_path.exists():
         data = _load_from_edf(edf_path)
         if data:
-            return data
+            return _overlay_rolling_rmssd(session_dir, data)
 
     if csv_path.exists():
-        return _load_from_csv(csv_path)
+        return _overlay_rolling_rmssd(session_dir, _load_from_csv(csv_path))
 
     return _empty_replay_data()
+
+
+def _overlay_rolling_rmssd(session_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
+    """Replace a flat stored RMSSD summary with the rolling series from IBIs.
+
+    Existing phone-bridge imports wrote one RMSSD into every second of the EDF.
+    The CSV and EDF stay untouched; replay just stops drawing that summary as a line.
+    """
+    from hnh.rmssd_series import (
+        bridge_rmssd_from_manifest,
+        read_ibi_series,
+        rolling_rmssd_series,
+        series_is_flat,
+    )
+
+    bridge = bridge_rmssd_from_manifest(session_dir)
+    if bridge is not None:
+        data["bridge_rmssd_ms"] = bridge
+    stored = data.get("rmssd_values") or []
+    if not series_is_flat(stored):
+        return data
+    csv_path = session_dir / "session.csv"
+    times, ibis, csv_stored = read_ibi_series(csv_path)
+    if csv_stored and not series_is_flat(csv_stored):
+        from_csv = _load_from_csv(csv_path)
+        data["rmssd_times"] = from_csv.get("rmssd_times") or []
+        data["rmssd_values"] = from_csv.get("rmssd_values") or []
+        return data
+    rmssd_times, rmssd_values = rolling_rmssd_series(ibis, times)
+    data["rmssd_times"] = rmssd_times
+    data["rmssd_values"] = rmssd_values
+    return data
 
 
 def _empty_replay_data() -> dict[str, Any]:

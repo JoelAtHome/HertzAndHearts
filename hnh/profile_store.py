@@ -953,6 +953,46 @@ class ProfileStore:
                 ),
             )
 
+    def _correct_flat_rmssd_trend_averages(self, profile_name: str) -> None:
+        """Point Trends at the rolling RMSSD when a session only stored a flat summary.
+
+        CSV and EDF files are left as imported. Only session_trends.avg_rmssd changes,
+        and only when the saved RMSSD series does not vary.
+        """
+        from hnh.rmssd_series import summary_rmssd_average_from_csv
+
+        profile = self._normalize_profile(profile_name)
+        with self._db() as conn:
+            rows = conn.execute(
+                """
+                SELECT h.session_id, h.csv_path, h.session_dir, t.avg_rmssd
+                FROM session_history h
+                JOIN session_trends t ON t.session_id = h.session_id
+                WHERE h.profile_name = ? COLLATE NOCASE
+                """,
+                (profile,),
+            ).fetchall()
+        updates: list[tuple[float, str]] = []
+        for row in rows:
+            csv_path = Path(str(row["csv_path"] or "").strip())
+            if not csv_path.is_file():
+                session_dir = Path(str(row["session_dir"] or "").strip())
+                csv_path = session_dir / "session.csv"
+            average = summary_rmssd_average_from_csv(csv_path)
+            if average is None:
+                continue
+            stored = row["avg_rmssd"]
+            if stored is not None and abs(float(stored) - average) < 0.05:
+                continue
+            updates.append((average, str(row["session_id"])))
+        if not updates:
+            return
+        with self._db() as conn:
+            conn.executemany(
+                "UPDATE session_trends SET avg_rmssd = ? WHERE session_id = ?",
+                updates,
+            )
+
     def list_session_trends(
         self,
         profile_name: str,
@@ -961,6 +1001,7 @@ class ProfileStore:
     ) -> list[dict[str, str | float | None]]:
         """List session trend rows for a profile within the given time span."""
         profile = self._normalize_profile(profile_name)
+        self._correct_flat_rmssd_trend_averages(profile)
         now = datetime.now()
         if span == "day":
             since = now - timedelta(days=1)
