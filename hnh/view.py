@@ -2096,8 +2096,13 @@ class SessionHistoryDialog(QDialog):
             self._replay_rmssd_plot.plot(rmssd_t, rmssd_v, pen=pg.mkPen("b", width=1.5))
 
         if ecg_samples:
-            ecg_t = [i / ecg_rate for i in range(len(ecg_samples))]
-            self._replay_ecg_plot.plot(ecg_t, ecg_samples, pen=pg.mkPen("k", width=1.0))
+            from hnh.ecg_display import display_ecg
+
+            # Saved samples stay raw. The review trace drops electrode drift
+            # so a phone recording and a live stream share a flat baseline.
+            shown = display_ecg(ecg_samples, ecg_rate)
+            ecg_t = [i / ecg_rate for i in range(len(shown))]
+            self._replay_ecg_plot.plot(ecg_t, shown, pen=pg.mkPen("k", width=1.0))
         else:
             self._replay_ecg_plot.addItem(
                 pg.TextItem(

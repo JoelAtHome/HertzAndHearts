@@ -50,6 +50,26 @@ class ReplayLoaderTests(unittest.TestCase):
             self.assertGreater(len(values), 1)
             self.assertGreater(max(values) - min(values), 1.0)
 
+    def test_replay_hr_uses_chart_smooth_not_raw_beat_rate(self):
+        from hnh.replay_loader import load_session_replay_data
+
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp)
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["event", "value", "timestamp", "elapsed_sec"])
+                elapsed = 0.0
+                intervals = [800.0] * 12 + [250.0] + [800.0] * 8
+                for ibi in intervals:
+                    w.writerow(["IBI", f"{ibi:.1f}", "2026-10-18T20:00:00", f"{elapsed:.3f}"])
+                    elapsed += ibi
+            data = load_session_replay_data(session_dir)
+            hr = data["hr_values"]
+            self.assertGreater(len(hr), 3)
+            self.assertLess(max(hr), 120.0)
+            self.assertGreater(min(hr), 50.0)
+
     def test_ibi_without_elapsed_uses_incremental_fallback(self):
         with TemporaryDirectory() as tmp:
             csv_path = Path(tmp) / "session.csv"

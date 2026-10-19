@@ -46,6 +46,19 @@ class SavedHrvImportTests(unittest.TestCase):
         self.assertEqual(rate, 250)
         self.assertEqual(samples, [1.0, -0.5])
 
+    def test_decode_ritual_ecg_int32_above_int16_rail(self):
+        # 40000 µV is past the old ±32767 clamp and must survive as 40 mV.
+        raw = struct.pack("<i", 40000)
+        chunk = {
+            "encoding": "int32_uv_b64",
+            "sample_rate_hz": 130,
+            "scale_uv_per_lsb": 1.0,
+            "data": base64.b64encode(raw).decode("ascii"),
+        }
+        samples, rate = decode_ritual_ecg_chunks([chunk])
+        self.assertEqual(rate, 130)
+        self.assertAlmostEqual(samples[0], 40.0, places=3)
+
     def test_import_writes_history_and_dedupes(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

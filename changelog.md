@@ -2,7 +2,12 @@
 
 ### Unreleased
 
+### Version 1.0.0-beta.7 (October 18 2026)
++ release: Bumped pre-release version to `1.0.0b7` (public label: `1.0.0-beta.7`).
 + bugfix: Phone-bridge imports plot a rolling RMSSD from the saved beat intervals. The phone's single RMSSD stays a labeled summary. Replay, reports, and Trends use that rolling series for sessions already imported, without rewriting their CSV or EDF files.
++ bugfix: Session replay builds heart rate from the saved beat intervals with the live chart's artifact rules and exponential smooth, for both streamed sessions and phone recordings.
++ bugfix: Session replay draws the ECG through a 0.5 Hz high-pass so electrode drift does not shift the baseline. The saved waveform stays raw.
++ enhancement: Saved phone ECG chunks may arrive as int32 microvolts (`int32_uv_b64`) so offsets past ±32.8 mV are kept. Existing int16 packages still load.
 
 ### Version 1.0.0-beta.6 (September 26 2026)
 + release: Bumped pre-release version to `1.0.0b6` (public label: `1.0.0-beta.6`).

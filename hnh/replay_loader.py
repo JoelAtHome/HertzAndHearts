@@ -23,12 +23,42 @@ def load_session_replay_data(session_dir: Path) -> dict[str, Any]:
     if edf_path.exists():
         data = _load_from_edf(edf_path)
         if data:
-            return _overlay_rolling_rmssd(session_dir, data)
+            return _overlay_replay_series(session_dir, data)
 
     if csv_path.exists():
-        return _overlay_rolling_rmssd(session_dir, _load_from_csv(csv_path))
+        return _overlay_replay_series(session_dir, _load_from_csv(csv_path))
 
     return _empty_replay_data()
+
+
+def _overlay_replay_series(session_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
+    """Draw RMSSD and HR from the saved intervals, not from a stored summary.
+
+    Live sessions persist the smoothed chart in the EDF heart-rate channel.
+    Phone imports persist raw beat-to-beat rate. Rebuilding both from the
+    CSV intervals makes playback use one rule set.
+    """
+    data = _overlay_rolling_rmssd(session_dir, data)
+    return _overlay_display_hr(session_dir, data)
+
+
+def _overlay_display_hr(session_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
+    from hnh.hr_series import display_hr_from_ibis
+    from hnh.rmssd_series import read_ibi_series
+
+    times, ibis, _stored = read_ibi_series(session_dir / "session.csv")
+    if len(ibis) < 3:
+        return data
+    hr_times, hr_values = display_hr_from_ibis(ibis, times)
+    if not hr_times or not hr_values:
+        return data
+    data["hr_times"] = hr_times
+    data["hr_values"] = hr_values
+    data["duration_seconds"] = max(
+        float(data.get("duration_seconds") or 0.0),
+        float(hr_times[-1]),
+    )
+    return data
 
 
 def _overlay_rolling_rmssd(session_dir: Path, data: dict[str, Any]) -> dict[str, Any]:

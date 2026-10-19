@@ -336,8 +336,10 @@ def decode_ritual_ecg_chunks(
     """
     Decode PROTOCOL §7 `ritual_chunk` ECG payloads to mV samples.
 
-    Wire encoding: little-endian int16 microvolts (+ optional scale_uv_per_lsb),
-    base64 in `data`. Returns (samples_mv, sample_rate_hz).
+    Wire encoding: little-endian int16 or int32 microvolts (+ optional
+    scale_uv_per_lsb), base64 in `data`. int32 is the unclamped recording
+    format; int16 remains for packages already on disk. Returns
+    (samples_mv, sample_rate_hz).
     """
     samples_uv: list[float] = []
     rate_hz = 130
@@ -345,8 +347,14 @@ def decode_ritual_ecg_chunks(
         if not isinstance(chunk, dict):
             continue
         encoding = str(chunk.get("encoding") or "").strip().lower()
-        if encoding and encoding not in {"int16_uv_b64", "int16_uv"}:
+        if encoding and encoding not in {
+            "int16_uv_b64",
+            "int16_uv",
+            "int32_uv_b64",
+            "int32_uv",
+        }:
             continue
+        wide = encoding in {"int32_uv_b64", "int32_uv"}
         raw_b64 = str(chunk.get("data") or "").strip()
         if not raw_b64:
             continue
@@ -364,9 +372,11 @@ def decode_ritual_ecg_chunks(
             rate_hz = int(round(float(chunk.get("sample_rate_hz") or rate_hz)))
         except (TypeError, ValueError):
             pass
-        n = len(raw) // 2
+        width = 4 if wide else 2
+        fmt = "<i" if wide else "<h"
+        n = len(raw) // width
         for i in range(n):
-            (val,) = struct.unpack_from("<h", raw, i * 2)
+            (val,) = struct.unpack_from(fmt, raw, i * width)
             samples_uv.append(float(val) * scale)
     rate_hz = max(25, min(1000, int(rate_hz or 130)))
     samples_mv = [v / 1000.0 for v in samples_uv]
