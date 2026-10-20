@@ -138,12 +138,14 @@ HELP_TOPICS: dict[str, HelpTopic] = {
                 kind="list",
                 title="How to use",
                 items=(
-                    "<b>Freeze</b>: pause the stream to place cursors and measure Δt.",
-                    "<b>Cursors A / B</b>: drag lines or nudge with keyboard when frozen.",
+                    "<b>Freeze</b>: pause at the current zoom (pan/zoom stay available; no cursors).",
+                    "<b>Freeze 1 Cycle</b>: pause, zoom to about one beat cycle, and enable cursors.",
+                    "<b>Cursors A / B</b>: drag lines or nudge with keyboard after Freeze 1 Cycle.",
                     "<b>Log Δt</b>: save the interval as a session annotation and attach a "
                     "plot snippet to the report (up to 5 per session). Optional type label "
                     "(R-R / QRS / QT / …) — leave as — if you only need duration.",
-                    "<b>Zoom / Relock</b>: inspect a window of time; Relock follows the main plot.",
+                    "<b>Zoom / Reset</b>: inspect a window while frozen; Reset returns live sweep "
+                    "to the default strip width.",
                     "<b>Capture Image</b>: snapshot the plot into the session folder.",
                 ),
             ),

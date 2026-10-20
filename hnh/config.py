@@ -136,8 +136,9 @@ HR_EWMA_WEIGHT: Final[float] = 0.33
 ECG_SAMPLE_RATE: Final[int] = 130  # Hz
 FEATHER_ECG_SAMPLE_RATE: Final[int] = 250  # Hz
 
-# How many seconds of ECG waveform are visible at once.
-ECG_DISPLAY_SECONDS: Final[int] = 5
+# How many seconds of ECG waveform are visible at once (live monitor default).
+# Keep this in the 3–5 s clinical strip range; settings allow 2–15.
+ECG_DISPLAY_SECONDS: Final[int] = 4
 
 # Linux-only toggle: enable Polar PMD (ECG control/data) path.
 # Some BlueZ/adapter combinations are more stable with HR/RR-only mode.

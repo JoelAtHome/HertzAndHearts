@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
     QToolButton, QMenu, QSpinBox,
 )
 from collections import deque
+from itertools import islice
 from typing import Optional
 from hnh.utils import get_sensor_address, NamedSignal
 from hnh.ble_diagnostics import ble_diagnostics_log_path
@@ -4880,11 +4881,14 @@ class EcgWindow(QMainWindow):
 
         self._settings = Settings()
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
-        self._default_view_sec = 10.0
+        # Live strip width (3–5 s). Independent of the rolling history buffer (~30 s+).
+        self._default_view_sec = self._clamp_live_view_sec(self._display_sec)
         self._view_sec = float(self._default_view_sec)
-        # Keep a larger rolling history so zoom-out works immediately.
+        # Rolling history for zoom-out / freeze — must not become the default X span.
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
+        # Main-plot X axis pads 2 s past live data; ECG must not inherit that empty pad.
+        self._main_timeline_pad_sec = 2.0
         self._sample_rate_hz = int(ECG_SAMPLE_RATE)
         self._raw_time_sec = 0.0
         buf_size = self._sample_rate_hz * self._history_sec
@@ -4901,7 +4905,10 @@ class EcgWindow(QMainWindow):
 
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
+        self._y_smooth_initialized = False
         self._redraw_ms_ema = 0.0
+        # Live sweep page: fixed X window, draw L→R, then clear and restart.
+        self._sweep_origin: float | None = None
 
         self._plot_widget = pg.PlotWidget(background='w')
         self._plot_widget.showGrid(x=True, y=True, alpha=0.3)
@@ -4913,13 +4920,21 @@ class EcgWindow(QMainWindow):
         self._plot_widget.getAxis('bottom').setPen(pg.mkPen('k'))
         self._plot_widget.setMouseEnabled(x=False, y=False)
         self._plot_widget.hideButtons()
+        # Prevent pyqtgraph from auto-expanding X to the full history buffer (~30 s).
+        view_box = self._plot_widget.getViewBox()
+        view_box.enableAutoRange(x=False, y=False)
+        view_box.setDefaultPadding(0.0)
+        self._plot_widget.setXRange(0.0, float(self._default_view_sec), padding=0)
 
+        # Antialias on: sweep mode keeps X fixed, so AA no longer fights a scrolling camera.
         self._curve = self._plot_widget.plot(
             pen=pg.mkPen(color='k', width=1.2),
             antialias=True,
         )
         self._curve.setClipToView(True)
-        self._yrange_recalc_stride = 3
+        if hasattr(self._curve, "setSkipFiniteCheck"):
+            self._curve.setSkipFiniteCheck(True)
+        self._yrange_recalc_stride = 6
         self._yrange_frame_counter = 0
         self._cached_y_bounds: tuple[float, float] | None = None
         self._cursor_active = "A"
@@ -4985,6 +5000,7 @@ class EcgWindow(QMainWindow):
         self._plot_widget.addItem(self._cursor_delta_text)
 
         self._frozen = False
+        self._freeze_mode: str | None = None  # None | "hold" | "cycle"
         self._pre_freeze_view_sec: float | None = None
         self._pre_freeze_follow_main: bool = True
         self._timeline_offset_sec = 0.0
@@ -5009,10 +5025,20 @@ class EcgWindow(QMainWindow):
         self._zoom_reset_button.setToolTip("Reset manual zoom to current display window.")
         self._zoom_reset_button.clicked.connect(self._reset_zoom)
 
-        self._freeze_button = QPushButton("Freeze")
-        self._freeze_button.setFixedWidth(80)
-        self._freeze_button.setToolTip("Freeze ECG stream (enables cursor measurement tools).")
-        self._freeze_button.clicked.connect(self._toggle_freeze)
+        # Plain freeze: hold current zoom, pan/zoom ok, no cursors.
+        self._hold_freeze_button = QPushButton("Freeze")
+        self._hold_freeze_button.setFixedWidth(64)
+        self._hold_freeze_button.setToolTip(
+            "Pause the stream at the current zoom. Pan and zoom stay available; no cursors."
+        )
+        self._hold_freeze_button.clicked.connect(self._toggle_hold_freeze)
+        # Cycle freeze: auto-zoom to ~one beat cycle and enable cursor tools.
+        self._freeze_button = QPushButton("Freeze 1 Cycle")
+        self._freeze_button.setFixedWidth(108)
+        self._freeze_button.setToolTip(
+            "Pause the stream and zoom to about one beat cycle for cursor measurement."
+        )
+        self._freeze_button.clicked.connect(self._toggle_cycle_freeze)
         self._pin_button = QPushButton("\U0001F4CC")
         self._pin_button.setCheckable(True)
         self._pin_button.setFixedWidth(30)
@@ -5021,11 +5047,6 @@ class EcgWindow(QMainWindow):
         self._pin_button.setStyleSheet("font-size: 13px; border: none; padding: 0 2px;")
         self._pin_button.toggled.connect(self._set_pinned)
         self._update_pin_button_visual()
-        self._relock_button = QPushButton("Relock")
-        self._relock_button.setFixedWidth(64)
-        self._relock_button.setToolTip("Relock this chart to the main plot time range.")
-        self._relock_button.clicked.connect(self._relock_to_main_xrange)
-        self._relock_button.setEnabled(False)
 
         self._controls_bar = QWidget()
         controls_row = QHBoxLayout(self._controls_bar)
@@ -5076,7 +5097,7 @@ class EcgWindow(QMainWindow):
         controls_row.addWidget(self._cursor_capture_button)
         controls_row.addWidget(self._capture_image_button)
         controls_row.addStretch(1)
-        controls_row.addWidget(self._relock_button)
+        controls_row.addWidget(self._hold_freeze_button)
         controls_row.addWidget(self._freeze_button)
         controls_row.addWidget(self._pin_button)
         self._info_button = QPushButton("i")
@@ -5099,7 +5120,6 @@ class EcgWindow(QMainWindow):
         central_layout.addWidget(self._plot_widget, 1)
         central_layout.addWidget(self._controls_bar)
         self.setCentralWidget(central)
-        view_box = self._plot_widget.getViewBox()
         if hasattr(view_box, "sigRangeChangedManually"):
             view_box.sigRangeChangedManually.connect(self._on_manual_range_changed)
 
@@ -5109,15 +5129,20 @@ class EcgWindow(QMainWindow):
         self._update_zoom_button_states()
         install_f1_help(self, "ecg")
 
+    @staticmethod
+    def _clamp_live_view_sec(seconds: float | int) -> float:
+        """Default / reset live strip width: prefer 3–5 s, allow settings 2–15."""
+        return float(max(2.0, min(15.0, float(seconds))))
+
     def start(self):
         self._display_sec = self._settings.ECG_DISPLAY_SECONDS
-        self._view_sec = min(self._max_view_sec, float(self._default_view_sec))
-        self._follow_main_xrange = True
-        self._relock_button.setEnabled(False)
-        self._refresh_relock_tooltip()
-        self._apply_interaction_mode()
         self._history_sec = max(int(self._display_sec), 30)
         self._max_view_sec = float(self._history_sec)
+        # Always reopen on the configured live strip — never the ~30 s history length.
+        self._default_view_sec = self._clamp_live_view_sec(self._display_sec)
+        self._view_sec = float(self._default_view_sec)
+        self._follow_main_xrange = True
+        self._apply_interaction_mode()
         buf_size = self._sample_rate_hz * self._history_sec
         self._times = deque(maxlen=buf_size)
         self._values = deque(maxlen=buf_size)
@@ -5126,8 +5151,10 @@ class EcgWindow(QMainWindow):
         ))
         self._y_min_smooth = 0.0
         self._y_max_smooth = 0.0
+        self._y_smooth_initialized = False
         self._yrange_frame_counter = 0
         self._cached_y_bounds = None
+        self._sweep_origin = None
         if len(self._pending) > buf_size:
             drop = len(self._pending) - buf_size
             for _ in range(drop):
@@ -5140,13 +5167,17 @@ class EcgWindow(QMainWindow):
         self._refresh_timer.setInterval(self._settings.ECG_REFRESH_MS)
         self._refresh_timer.start()
         if self._got_first_data:
-            self._snap_trace_to_synced_xrange()
+            # One-time align when opening; live frames use sweep/clear (not scroll).
+            self._snap_trace_to_synced_xrange(min_delta_sec=0.25)
+            self._begin_sweep_at(float(self._times[-1]))
             try:
                 self._paint_live_trace()
             except Exception:
                 pass
-            self._statusbar.showMessage("ECG streaming...")
+            self._statusbar.showMessage("ECG streaming (sweep)...")
         else:
+            self._last_x_range = None
+            self._set_xrange_if_needed(0.0, float(self._default_view_sec))
             self._statusbar.showMessage("Waiting for ECG data from sensor\u2026")
         self._update_zoom_button_states()
 
@@ -5160,17 +5191,17 @@ class EcgWindow(QMainWindow):
         self._timeline_offset_sec = 0.0
         self._synced_xrange = None
         self._follow_main_xrange = True
-        self._relock_button.setEnabled(False)
-        self._refresh_relock_tooltip()
         self._got_first_data = False
         self._frozen = False
         self._disable_cursors_for_streaming_view()
-        self._freeze_button.setText("Freeze")
+        self._set_ecg_freeze_button_idle()
         self._apply_interaction_mode()
         self._last_x_range = None
         self._last_y_range = None
         self._yrange_frame_counter = 0
         self._cached_y_bounds = None
+        self._y_smooth_initialized = False
+        self._sweep_origin = None
         self._curve.setData([], [])
         self._statusbar.showMessage("Waiting for ECG data...")
         self._redraw_ms_ema = 0.0
@@ -5180,14 +5211,57 @@ class EcgWindow(QMainWindow):
         self._refresh_timer.stop()
         self._frozen = False
         self._disable_cursors_for_streaming_view()
-        self._freeze_button.setText("Freeze")
+        self._set_ecg_freeze_button_idle()
         self._apply_interaction_mode()
         self._statusbar.showMessage("ECG stopped.")
         self._redraw_ms_ema = 0.0
         self._update_zoom_button_states()
 
-    def _toggle_freeze(self):
-        self.set_stream_frozen(not self._frozen)
+    def _set_ecg_freeze_button_idle(self) -> None:
+        self._freeze_mode = None
+        self._hold_freeze_button.setText("Freeze")
+        self._hold_freeze_button.setToolTip(
+            "Pause the stream at the current zoom. Pan and zoom stay available; no cursors."
+        )
+        self._hold_freeze_button.setEnabled(True)
+        self._freeze_button.setText("Freeze 1 Cycle")
+        self._freeze_button.setToolTip(
+            "Pause the stream and zoom to about one beat cycle for cursor measurement."
+        )
+        self._freeze_button.setEnabled(True)
+
+    def _sync_ecg_freeze_button_labels(self) -> None:
+        if not self._frozen:
+            self._set_ecg_freeze_button_idle()
+            return
+        resume_tip = "Resume live sweep and restore the previous zoom."
+        other_tip = "Resume first to use this freeze mode."
+        if self._freeze_mode == "hold":
+            self._hold_freeze_button.setText("Resume")
+            self._hold_freeze_button.setToolTip(resume_tip)
+            self._hold_freeze_button.setEnabled(True)
+            self._freeze_button.setText("Freeze 1 Cycle")
+            self._freeze_button.setToolTip(other_tip)
+            self._freeze_button.setEnabled(False)
+        else:
+            self._freeze_button.setText("Resume")
+            self._freeze_button.setToolTip(resume_tip)
+            self._freeze_button.setEnabled(True)
+            self._hold_freeze_button.setText("Freeze")
+            self._hold_freeze_button.setToolTip(other_tip)
+            self._hold_freeze_button.setEnabled(False)
+
+    def _toggle_hold_freeze(self):
+        if self._frozen:
+            self.set_stream_frozen(False)
+        else:
+            self.set_stream_frozen(True, mode="hold")
+
+    def _toggle_cycle_freeze(self):
+        if self._frozen:
+            self.set_stream_frozen(False)
+        else:
+            self.set_stream_frozen(True, mode="cycle")
 
     def _update_pin_button_visual(self):
         self._pin_button.setChecked(self._pinned)
@@ -5219,7 +5293,15 @@ class EcgWindow(QMainWindow):
                 self.raise_()
                 self.activateWindow()
 
-    def set_stream_frozen(self, frozen: bool):
+    def set_stream_frozen(self, frozen: bool, *, mode: str = "hold"):
+        """Freeze or resume the ECG stream.
+
+        mode:
+          - "hold": keep current zoom, pan/zoom on, no cursors (plain Freeze)
+          - "cycle": zoom to ~1 beat cycle and enable cursors (Freeze 1 Cycle)
+        External callers (e.g. Freeze All) default to hold.
+        """
+        mode = "cycle" if str(mode).strip().lower() == "cycle" else "hold"
         was_frozen = self._frozen
         self._frozen = bool(frozen)
         if self._frozen:
@@ -5228,43 +5310,44 @@ class EcgWindow(QMainWindow):
                 self._pre_freeze_follow_main = bool(self._follow_main_xrange)
             if self._follow_main_xrange:
                 self._follow_main_xrange = False
-                self._relock_button.setEnabled(True)
-            self._freeze_button.setText("Resume")
-            self._freeze_button.setToolTip("Resume ECG streaming and hide cursor tools.")
+            self._freeze_mode = mode
+            self._sync_ecg_freeze_button_labels()
             self._apply_interaction_mode()
             self._render_snapshot_for_frozen_view()
-            self._auto_zoom_for_frozen_view()
-            self._enable_cursors_for_frozen_view()
-            self._refresh_relock_tooltip()
-            self._statusbar.showMessage("ECG frozen \u2014 drag to pan, scroll wheel or +/\u2212 to zoom.")
+            if mode == "cycle":
+                self._auto_zoom_for_frozen_view()
+                self._enable_cursors_for_frozen_view()
+                self._statusbar.showMessage(
+                    "ECG frozen on ~1 cycle \u2014 drag to pan, scroll wheel or +/\u2212 to zoom."
+                )
+            else:
+                # Keep the on-screen X span; do not auto-zoom or show cursors.
+                self._disable_cursors_for_streaming_view()
+                if self._last_x_range is not None:
+                    lo, hi = self._last_x_range
+                    self._view_sec = max(0.5, float(hi) - float(lo))
+                    self._set_xrange_if_needed(float(lo), float(hi))
+                self._statusbar.showMessage(
+                    "ECG frozen \u2014 drag to pan, scroll wheel or +/\u2212 to zoom."
+                )
         else:
             if was_frozen and self._pre_freeze_view_sec is not None:
                 self._view_sec = float(self._pre_freeze_view_sec)
-            # Resume should return to the live, relocked timeline behavior while
-            # preserving the pre-freeze zoom span.
-            self._follow_main_xrange = True
-            self._relock_button.setEnabled(False)
-            self._freeze_button.setText("Freeze")
-            self._freeze_button.setToolTip("Freeze ECG stream (enables cursor measurement tools).")
-            self._apply_interaction_mode()
+            # Resume returns to live sweep from the current tip.
+            self._set_ecg_freeze_button_idle()
             self._disable_cursors_for_streaming_view()
-            if self._synced_xrange is not None:
-                x_lo, x_hi = self._synced_xrange
-                self._set_follow_main_xrange(float(x_lo), float(x_hi))
-            self._refresh_relock_tooltip()
+            self._return_to_live_sweep()
             self._statusbar.showMessage(
-                "ECG streaming..." if self._got_first_data else "Waiting for ECG data..."
+                "ECG streaming (sweep)..."
+                if self._got_first_data
+                else "Waiting for ECG data..."
             )
         self._update_zoom_button_states()
 
     def _apply_interaction_mode(self):
-        # Manual mode mirrors Poincare-style drag+wheel on X.
+        # Manual pan/zoom when unlocked from live follow (frozen or after +/-).
         manual_mode = not self._follow_main_xrange
         self._plot_widget.setMouseEnabled(x=manual_mode, y=False)
-        # Keep Relock visible while frozen: it resumes streaming and relocks to main.
-        self._relock_button.setVisible(True)
-        if self._frozen:
-            self._relock_button.setEnabled(True)
 
     def _render_snapshot_for_frozen_view(self):
         """Ensure buffered trace is visible when freezing before next timer redraw."""
@@ -5293,16 +5376,6 @@ class EcgWindow(QMainWindow):
         self._cursor_interval_type_combo.setEnabled(enabled)
         self._cursor_capture_button.setEnabled(enabled)
         self._set_active_cursor_visuals()
-
-    def _refresh_relock_tooltip(self):
-        if self._frozen:
-            self._relock_button.setToolTip(
-                "Resume streaming and relock this chart to the main plot time range."
-            )
-        elif self._follow_main_xrange:
-            self._relock_button.setToolTip("Chart is already locked to the main plot time range.")
-        else:
-            self._relock_button.setToolTip("Relock this chart to the main plot time range.")
 
     def _update_zoom_button_states(self):
         eps = 1e-6
@@ -5692,8 +5765,6 @@ class EcgWindow(QMainWindow):
             if current_span > 0:
                 self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
-            self._relock_button.setEnabled(True)
-            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         self._view_sec = max(0.5, self._view_sec / 1.4)
         self._refresh_frozen_view()
@@ -5706,62 +5777,119 @@ class EcgWindow(QMainWindow):
             if current_span > 0:
                 self._view_sec = min(self._max_view_sec, max(0.5, current_span))
             self._follow_main_xrange = False
-            self._relock_button.setEnabled(True)
-            self._refresh_relock_tooltip()
             self._apply_interaction_mode()
         self._view_sec = min(self._max_view_sec, self._view_sec * 1.4)
         self._refresh_frozen_view()
         self._update_zoom_button_states()
 
     def _reset_zoom(self):
-        self._view_sec = float(self._display_sec)
-        if self._follow_main_xrange:
-            self._relock_to_main_xrange()
-        else:
+        self._default_view_sec = self._clamp_live_view_sec(self._display_sec)
+        self._view_sec = float(self._default_view_sec)
+        if self._frozen:
             self._refresh_frozen_view()
+        else:
+            # Reset returns to live sweep at the default strip width.
+            self._return_to_live_sweep()
         self._update_zoom_button_states()
 
-    def _relock_to_main_xrange(self):
+    def _return_to_live_sweep(self) -> None:
+        """Re-enable live sweep at the default strip width (replaces old Relock)."""
         if self._frozen:
-            # Relock doubles as Resume for faster workflow.
             self.set_stream_frozen(False)
+            return
         self._follow_main_xrange = True
-        self._relock_button.setEnabled(False)
-        self._refresh_relock_tooltip()
+        self._view_sec = float(self._default_view_sec)
         self._apply_interaction_mode()
-        if self._synced_xrange is not None:
+        if self._times:
+            self._begin_sweep_at(float(self._times[-1]))
+        elif self._synced_xrange is not None:
             x_lo, x_hi = self._synced_xrange
             self._set_follow_main_xrange(x_lo, x_hi)
         self._update_zoom_button_states()
 
-    def _set_follow_main_xrange(self, x_lo: float, x_hi: float):
-        # Keep ECG right edge aligned to the main plots while using ECG's own zoom span.
-        target_hi = float(x_hi)
-        min_lo = float(x_lo)
-        target_lo = max(min_lo, target_hi - self._view_sec)
-        self._set_xrange_if_needed(target_lo, target_hi)
+    def _begin_sweep_at(self, t0: float) -> None:
+        """Start a new L→R sweep page at t0 (fixed X window until it fills)."""
+        self._sweep_origin = float(t0)
+        span = float(self._view_sec)
+        self._last_x_range = None
+        self._set_xrange_if_needed(self._sweep_origin, self._sweep_origin + span)
+        self._curve.setData([], [])
 
-    def _set_xrange_if_needed(self, x_lo: float, x_hi: float):
+    def _set_live_xrange_from_trace(self) -> None:
+        """Live follow uses sweep pages; keep X locked to the current page."""
+        if not self._times:
+            return
+        if self._follow_main_xrange and not self._frozen:
+            self._view_sec = float(self._default_view_sec)
+        t_max = float(self._times[-1])
+        span = float(self._view_sec)
+        if self._sweep_origin is None:
+            self._begin_sweep_at(t_max)
+            return
+        origin = float(self._sweep_origin)
+        if t_max >= origin + span:
+            pages = int((t_max - origin) / span)
+            self._begin_sweep_at(origin + pages * span)
+        self._set_xrange_if_needed(
+            float(self._sweep_origin), float(self._sweep_origin) + span
+        )
+
+    def _set_follow_main_xrange(self, x_lo: float, x_hi: float):
+        # Live ECG owns a sweep page; do not inherit main's span or right pad.
+        if self._follow_main_xrange and not self._frozen:
+            self._view_sec = float(self._default_view_sec)
+            if self._times:
+                self._set_live_xrange_from_trace()
+                return
+            span = float(self._view_sec)
+            data_hi = float(x_hi) - float(self._main_timeline_pad_sec)
+            self._begin_sweep_at(data_hi)
+            self._set_xrange_if_needed(data_hi, data_hi + span)
+            return
+        if self._times:
+            self._set_live_xrange_from_trace()
+            return
+        span = float(self._view_sec)
+        data_hi = float(x_hi) - float(self._main_timeline_pad_sec)
+        self._set_xrange_if_needed(data_hi - span, data_hi)
+
+    def _set_xrange_if_needed(self, x_lo: float, x_hi: float, *, defer_update: bool = False):
         target = (float(x_lo), float(x_hi))
         if self._last_x_range is not None:
             prev_lo, prev_hi = self._last_x_range
             if abs(prev_lo - target[0]) < 1e-6 and abs(prev_hi - target[1]) < 1e-6:
                 return
         self._suppress_manual_range_signal = True
-        self._plot_widget.setXRange(target[0], target[1], padding=0)
+        vb = self._plot_widget.getViewBox()
+        # Live paint batches with setData (defer_update=True); other paths refresh now.
+        vb.setRange(
+            xRange=target,
+            padding=0,
+            update=not defer_update,
+            disableAutoRange=True,
+        )
         self._suppress_manual_range_signal = False
         self._last_x_range = target
-        self._update_cursor_readout()
+        if self._frozen:
+            self._update_cursor_readout()
 
-    def _set_yrange_if_needed(self, y_lo: float, y_hi: float):
+    def _set_yrange_if_needed(self, y_lo: float, y_hi: float, *, min_frac: float = 0.0):
         target = (float(y_lo), float(y_hi))
         if self._last_y_range is not None:
             prev_lo, prev_hi = self._last_y_range
             if abs(prev_lo - target[0]) < 1e-6 and abs(prev_hi - target[1]) < 1e-6:
                 return
+            if min_frac > 0.0:
+                span = max(abs(prev_hi - prev_lo), 1e-3)
+                if (
+                    abs(prev_lo - target[0]) < min_frac * span
+                    and abs(prev_hi - target[1]) < min_frac * span
+                ):
+                    return
         self._plot_widget.setYRange(target[0], target[1], padding=0)
         self._last_y_range = target
-        self._update_cursor_readout()
+        if self._frozen:
+            self._update_cursor_readout()
 
     def _refresh_frozen_view(self):
         if len(self._times) < 2:
@@ -5851,12 +5979,9 @@ class EcgWindow(QMainWindow):
 
     def set_synced_xrange(self, x_lo: float, x_hi: float):
         self._synced_xrange = (float(x_lo), float(x_hi))
-        if self._follow_main_xrange:
-            synced_span = max(0.5, float(x_hi) - float(x_lo))
-            self._view_sec = min(self._max_view_sec, synced_span)
-        if self._follow_main_xrange:
-            self._snap_trace_to_synced_xrange()
-            self._set_follow_main_xrange(float(x_lo), float(x_hi))
+        # Live sweep owns X; only keep the configured strip width in sync.
+        if self._follow_main_xrange and not self._frozen:
+            self._view_sec = float(self._default_view_sec)
         self._update_zoom_button_states()
 
     def _on_manual_range_changed(self, *_args):
@@ -5864,36 +5989,72 @@ class EcgWindow(QMainWindow):
             return
         x_rng = self._plot_widget.viewRange()[0]
         self._view_sec = max(0.5, min(self._max_view_sec, float(x_rng[1] - x_rng[0])))
-        self._refresh_relock_tooltip()
         self._update_zoom_button_states()
 
-    def _snap_trace_to_synced_xrange(self) -> None:
+    def _snap_trace_to_synced_xrange(self, min_delta_sec: float = 0.75) -> None:
         if not self._times or self._synced_xrange is None:
             return
         _x_lo, x_hi = self._synced_xrange
-        target_right = float(x_hi) - 2.0
+        # Align newest sample to main's live data edge (right axis minus pad).
+        target_right = float(x_hi) - float(self._main_timeline_pad_sec)
         latest = float(self._times[-1])
         delta = target_right - latest
-        if abs(delta) <= 0.75:
+        if abs(delta) <= float(min_delta_sec):
             return
         self._times = deque(
             (t + delta for t in self._times),
             maxlen=self._times.maxlen,
         )
         self._timeline_offset_sec += delta
+        if self._sweep_origin is not None:
+            self._sweep_origin += delta
 
     def _paint_live_trace(self, drained_min: float | None = None, drained_max: float | None = None) -> None:
         n = len(self._times)
         if n < 2:
             return
+
+        # Live strip width stays at the configured default while following.
+        if self._follow_main_xrange and not self._frozen:
+            self._view_sec = float(self._default_view_sec)
+
+        span = float(self._view_sec)
+        t_max = float(self._times[-1])
+        if self._sweep_origin is None:
+            self._begin_sweep_at(t_max)
+        # Page flip: clear and restart drawing from the left of a new fixed window.
+        origin = float(self._sweep_origin)
+        if t_max >= origin + span:
+            pages = int((t_max - origin) / span)
+            self._begin_sweep_at(origin + pages * span)
+
+        x_lo = float(self._sweep_origin)
+        x_hi = x_lo + span
+        self._set_xrange_if_needed(x_lo, x_hi)
+
+        # Only the current sweep page (origin → live tip). Fresh arrays — no copy=False reuse.
+        max_page = int(span * float(self._sample_rate_hz)) + 8
+        i0 = max(0, n - max_page)
+        t_page = np.fromiter(islice(self._times, i0, None), dtype=float, count=n - i0)
+        v_page = np.fromiter(islice(self._values, i0, None), dtype=float, count=n - i0)
+        mask = (t_page >= x_lo) & (t_page <= t_max)
+        if not np.any(mask):
+            self._curve.setData([], [])
+            return
+        t_vis = np.ascontiguousarray(t_page[mask])
+        v_vis = np.ascontiguousarray(v_page[mask])
+        if t_vis.size < 2:
+            self._curve.setData(t_vis, v_vis)
+            return
+
         self._yrange_frame_counter += 1
         recalc_y = (
             self._cached_y_bounds is None
             or (self._yrange_frame_counter % self._yrange_recalc_stride) == 0
         )
         if recalc_y:
-            y_lo = float(min(self._values))
-            y_hi = float(max(self._values))
+            y_lo = float(np.min(v_vis))
+            y_hi = float(np.max(v_vis))
         else:
             y_lo, y_hi = self._cached_y_bounds
             if drained_min is not None:
@@ -5904,24 +6065,17 @@ class EcgWindow(QMainWindow):
         margin = max(0.1, (y_hi - y_lo) * 0.15)
         target_lo = y_lo - margin
         target_hi = y_hi + margin
-        alpha = 0.15
-        self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
-        self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
-        self._set_yrange_if_needed(self._y_min_smooth, self._y_max_smooth)
-
-        t_max = float(self._times[-1])
-        if self._follow_main_xrange and self._synced_xrange is not None:
-            x_lo, x_hi = self._synced_xrange
-            self._set_follow_main_xrange(x_lo, x_hi)
+        if not self._y_smooth_initialized:
+            self._y_min_smooth = target_lo
+            self._y_max_smooth = target_hi
+            self._y_smooth_initialized = True
         else:
-            x_hi = t_max + 2.0
-            x_lo = x_hi - self._view_sec
-            self._set_xrange_if_needed(x_lo, x_hi)
+            alpha = 0.05
+            self._y_min_smooth += alpha * (target_lo - self._y_min_smooth)
+            self._y_max_smooth += alpha * (target_hi - self._y_max_smooth)
+        self._set_yrange_if_needed(self._y_min_smooth, self._y_max_smooth, min_frac=0.05)
 
-        self._curve.setData(
-            np.fromiter(self._times, dtype=float, count=n),
-            np.fromiter(self._values, dtype=float, count=n),
-        )
+        self._curve.setData(t_vis, v_vis)
 
     def _redraw(self):
         if self._frozen:
@@ -5933,14 +6087,15 @@ class EcgWindow(QMainWindow):
 
         if not self._got_first_data:
             self._got_first_data = True
-            self._statusbar.showMessage("ECG streaming...")
+            self._statusbar.showMessage("ECG streaming (sweep)...")
 
-        if n_pending > 200:
-            drain = min(50, n_pending)
-        elif n_pending > 100:
-            drain = min(20, n_pending)
+        # Steady drain near realtime; catch up gradually instead of bursty jumps.
+        target = self._drain_rate + 2
+        if n_pending <= target:
+            drain = n_pending
         else:
-            drain = min(self._drain_rate + 2, n_pending)
+            backlog = n_pending - target
+            drain = min(n_pending, target + max(1, backlog // 4), target * 3)
         redraw_start_ns = time.perf_counter_ns()
 
         drained_min = float("inf")

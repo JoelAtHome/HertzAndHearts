@@ -2,6 +2,14 @@
 
 ### Unreleased
 
+### Version 1.0.0-beta.8 (October 19 2026)
++ release: Bumped pre-release version to `1.0.0b8` (public label: `1.0.0-beta.8`).
++ enhancement: ECG live view uses classic sweep/clear redraw (fixed X page, draw L→R, then restart) at a 3–5 s default strip.
++ enhancement: ECG monitor has plain **Freeze** (hold current zoom, pan/zoom, no cursors) plus **Freeze 1 Cycle** for measurement zoom+cursors.
++ cleanup: Removed ECG **Relock** (no longer synced to the main plot after sweep mode; Resume/Reset return to live).
++ bugfix: ECG live zoom no longer inherits the ~30 s history buffer or main-plot span; auto-range is disabled on the strip.
++ docs: ECG Quick Guide updated for Freeze / Freeze 1 Cycle / Reset (no Relock).
+
 ### Version 1.0.0-beta.7 (October 18 2026)
 + release: Bumped pre-release version to `1.0.0b7` (public label: `1.0.0-beta.7`).
 + bugfix: Phone-bridge imports plot a rolling RMSSD from the saved beat intervals. The phone's single RMSSD stays a labeled summary. Replay, reports, and Trends use that rolling series for sessions already imported, without rewriting their CSV or EDF files.
