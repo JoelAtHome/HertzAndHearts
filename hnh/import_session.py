@@ -13,7 +13,7 @@ from typing import Any
 from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
 from hnh.profile_store import ProfileStore
 from hnh.report import format_ecg_sensor_display_name, naive_local_from_iso
-from hnh.rmssd_series import rolling_rmssd_series
+from hnh.rmssd_series import rolling_rmssd_series, rolling_sdnn_series
 
 
 def _rmssd_trend_average(values: list[float]) -> float | None:
@@ -143,6 +143,7 @@ def _parse_rr_only(path: Path) -> dict[str, Any] | None:
         elapsed_ms += ibi
 
     rmssd_times, rmssd_values = rolling_rmssd_series(ibis_ms, hr_times)
+    hrv_times, hrv_values = rolling_sdnn_series(ibis_ms, hr_times)
 
     duration = max(hr_times) if hr_times else 0.0
     return {
@@ -150,8 +151,8 @@ def _parse_rr_only(path: Path) -> dict[str, Any] | None:
         "hr_values": hr_values,
         "rmssd_times": rmssd_times,
         "rmssd_values": rmssd_values,
-        "hrv_times": [],
-        "hrv_values": [],
+        "hrv_times": hrv_times,
+        "hrv_values": hrv_values,
         "annotations": [],
         "ecg_samples": [],
         "ecg_sample_rate_hz": 130,
@@ -170,9 +171,13 @@ def write_session_csv(csv_path: Path, data: dict[str, Any]) -> None:
         hr_values = data.get("hr_values") or []
         rmssd_times = list(data.get("rmssd_times") or [])
         rmssd_values = list(data.get("rmssd_values") or [])
+        hrv_times = list(data.get("hrv_times") or [])
+        hrv_values = list(data.get("hrv_values") or [])
         annotations = data.get("annotations") or []
         if rmssd_values and not rmssd_times:
             rmssd_times = list(hr_times[: len(rmssd_values)])
+        if hrv_values and not hrv_times:
+            hrv_times = list(hr_times[: len(hrv_values)])
 
         for t, hr in zip(hr_times, hr_values):
             elapsed_ms = t * 1000.0
@@ -182,9 +187,29 @@ def write_session_csv(csv_path: Path, data: dict[str, Any]) -> None:
         for t, rmssd in zip(rmssd_times, rmssd_values):
             w.writerow(["hrv", f"{float(rmssd):.2f}", base_ts, f"{float(t) * 1000.0:.3f}"])
 
+        for t, sdnn in zip(hrv_times, hrv_values):
+            w.writerow(["SDNN", f"{float(sdnn):.2f}", base_ts, f"{float(t) * 1000.0:.3f}"])
+
         for t, text in annotations:
             elapsed_ms = t * 1000.0
             w.writerow(["Annotation", str(text), base_ts, f"{elapsed_ms:.3f}"])
+
+
+def _write_ecg_stream(path: Path, samples: list[float], sample_rate_hz: int) -> bool:
+    """Persist float32 LE ECG samples for report rebuild (same as live sessions)."""
+    if not samples:
+        return False
+    try:
+        from hnh.ecg_stream import EcgSampleStream
+
+        stream = EcgSampleStream.open_write(path, sample_rate_hz=sample_rate_hz)
+        try:
+            stream.append(samples)
+        finally:
+            stream.close()
+        return path.is_file() and path.stat().st_size > 0
+    except Exception:
+        return False
 
 
 def import_file_as_session(
@@ -192,16 +217,22 @@ def import_file_as_session(
     session_root: Path,
     profile_id: str,
     profile_store: ProfileStore,
+    *,
+    include_profile_subpath: bool = False,
 ) -> SessionBundle | None:
     """
     Import a CSV or EDF file as a session. Creates session folder, writes CSV and manifest,
     registers in profile_store. Returns SessionBundle or None on failure.
+
+    `session_root` should be the profile Session Save Path (same root live Stop & Save uses).
     """
     data = parse_external_file(source_path)
     if not data or not data.get("hr_times"):
         return None
 
-    bundle = create_session_bundle(session_root, profile_id)
+    bundle = create_session_bundle(
+        session_root, profile_id, include_profile_subpath=include_profile_subpath
+    )
     write_session_csv(bundle.csv_path, data)
 
     edf_ok = False
@@ -212,11 +243,19 @@ def import_file_as_session(
         except OSError:
             edf_ok = False
 
+    ecg_samples = list(data.get("ecg_samples") or [])
+    ecg_rate = int(data.get("ecg_sample_rate_hz") or 130)
+    ecg_stream_ok = False
+    if ecg_samples:
+        ecg_stream_ok = _write_ecg_stream(bundle.ecg_stream_path, ecg_samples, ecg_rate)
+
     artifacts: dict[str, Any] = {
         "csv": {"path": str(bundle.csv_path.name), "exists": True},
     }
     if edf_ok:
         artifacts["edf"] = {"path": str(bundle.edf_path.name), "exists": True}
+    if ecg_stream_ok:
+        artifacts["ecg_stream"] = {"path": str(bundle.ecg_stream_path.name), "exists": True}
 
     now = datetime.now()
     payload = {
@@ -226,7 +265,10 @@ def import_file_as_session(
         "profile_id": bundle.profile_id,
         "state": "imported",
         "report_stage": "final",
-        "sensor": {"selected_device": "imported"},
+        "sensor": {
+            "selected_device": "imported",
+            "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
+        },
         "timing": {
             "started_at": bundle.started_at.isoformat(),
             "first_data_at": None,
@@ -311,6 +353,7 @@ def replay_data_from_ibi_ms(
     # monitor's rolling window so that one number is not drawn across the session.
     _ = bridge_rmssd_ms
     rmssd_times, rmssd_values = rolling_rmssd_series(cleaned, hr_times)
+    hrv_times, hrv_values = rolling_sdnn_series(cleaned, hr_times)
 
     annotations: list[tuple[float, str]] = []
     if annotation:
@@ -321,8 +364,8 @@ def replay_data_from_ibi_ms(
         "hr_values": hr_values,
         "rmssd_times": rmssd_times,
         "rmssd_values": rmssd_values,
-        "hrv_times": [],
-        "hrv_values": [],
+        "hrv_times": hrv_times,
+        "hrv_values": hrv_values,
         "annotations": annotations,
         "ecg_samples": [],
         "ecg_sample_rate_hz": 130,
@@ -388,6 +431,8 @@ def import_saved_hrv_package(
     session_root: Path,
     profile_id: str,
     profile_store: ProfileStore,
+    *,
+    include_profile_subpath: bool = False,
 ) -> SessionBundle | None:
     """
     Persist a PROTOCOL §7 saved-HRV package into Session History.
@@ -397,7 +442,8 @@ def import_saved_hrv_package(
     (caller should treat that as a quiet no-op success via return of None and
     check profile_store mapping — actually return a sentinel).
 
-    Returns the new SessionBundle, or None if skipped/failed.
+    `session_root` should be the profile Session Save Path (same root live
+    Stop & Save uses). Returns the new SessionBundle, or None if skipped/failed.
     On durable dedupe hit, returns None and leaves mapping unchanged.
     """
     if not isinstance(package, dict):
@@ -445,7 +491,9 @@ def import_saved_hrv_package(
             if ecg_dur > float(data.get("duration_seconds") or 0):
                 data["duration_seconds"] = ecg_dur
 
-    bundle = create_session_bundle(session_root, profile_id)
+    bundle = create_session_bundle(
+        session_root, profile_id, include_profile_subpath=include_profile_subpath
+    )
     write_session_csv(bundle.csv_path, data)
 
     emitted_at = str(package.get("emitted_at") or "").strip() or None
@@ -470,7 +518,9 @@ def import_saved_hrv_package(
     ended_at = end_dt.isoformat()
 
     edf_ok = False
+    ecg_stream_ok = False
     if ecg_samples:
+        ecg_stream_ok = _write_ecg_stream(bundle.ecg_stream_path, ecg_samples, ecg_rate)
         try:
             from hnh.edf_export import export_session_edf_plus
 
@@ -517,6 +567,8 @@ def import_saved_hrv_package(
     }
     if edf_ok:
         artifacts["edf"] = {"path": str(bundle.edf_path.name), "exists": True}
+    if ecg_stream_ok:
+        artifacts["ecg_stream"] = {"path": str(bundle.ecg_stream_path.name), "exists": True}
 
     payload = {
         "schema_version": 1,
@@ -529,6 +581,7 @@ def import_saved_hrv_package(
             "selected_device": "phone_bridge",
             "source_device": source,
             "ecg_sensor_name": format_ecg_sensor_display_name(source),
+            "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
             "phone_bridge_session_id": phone_sid,
             "transfer_reason": reason,
         },

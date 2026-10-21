@@ -203,11 +203,6 @@ def _load_from_csv(csv_path: Path) -> dict[str, Any]:
                     parsed_elapsed = float(elapsed_str)
                 except ValueError:
                     parsed_elapsed = None
-            if parsed_elapsed is not None:
-                # Old files can have backwards elapsed values; clamp monotonic
-                # to avoid replay zig-zag artifacts.
-                current_elapsed = max(current_elapsed, parsed_elapsed)
-
             try:
                 value = float(value_str) if value_str else None
             except ValueError:
@@ -216,15 +211,28 @@ def _load_from_csv(csv_path: Path) -> dict[str, Any]:
             if event == "IBI" and value is not None and value > 0:
                 if parsed_elapsed is None:
                     current_elapsed += value
+                else:
+                    # Beat timeline only: clamp monotonic to avoid zig-zag artifacts.
+                    current_elapsed = max(current_elapsed, parsed_elapsed)
                 hr_bpm = 60000.0 / value
                 hr_times.append(current_elapsed / 1000.0)
                 hr_values.append(hr_bpm)
             elif event == "hrv" and value is not None:
-                rmssd_times.append(current_elapsed / 1000.0)
+                # Phone imports append RMSSD after all IBIs; use the row elapsed.
+                if parsed_elapsed is not None:
+                    t_ms = parsed_elapsed
+                    current_elapsed = max(current_elapsed, parsed_elapsed)
+                else:
+                    t_ms = current_elapsed
+                rmssd_times.append(t_ms / 1000.0)
                 rmssd_values.append(value)
             elif event == "Annotation":
-                t = current_elapsed / 1000.0 if current_elapsed else 0.0
-                annotations.append((t, value_str or "(annotation)"))
+                if parsed_elapsed is not None:
+                    t_ms = parsed_elapsed
+                    current_elapsed = max(current_elapsed, parsed_elapsed)
+                else:
+                    t_ms = current_elapsed
+                annotations.append((t_ms / 1000.0 if t_ms else 0.0, value_str or "(annotation)"))
 
     duration = 0.0
     if hr_times:

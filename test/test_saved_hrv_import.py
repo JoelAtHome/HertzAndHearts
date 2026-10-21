@@ -31,6 +31,8 @@ class SavedHrvImportTests(unittest.TestCase):
         self.assertEqual(len(data["rmssd_values"]), 1)
         self.assertAlmostEqual(data["rmssd_values"][0], math.sqrt(250.0), places=6)
         self.assertNotEqual(data["rmssd_values"], [42.5])
+        self.assertEqual(len(data["hrv_values"]), 1)
+        self.assertGreater(data["hrv_values"][0], 0.0)
         self.assertEqual(data["annotations"][0][1], "[Phone Bridge] Saved HRV")
 
     def test_decode_ritual_ecg_chunks_to_mv(self):
@@ -271,7 +273,7 @@ class SavedHrvImportTests(unittest.TestCase):
                 "emitted_at": "2026-09-15T13:00:00Z",
                 "duration_s": 1.0,
                 "rmssd_ms": 40.0,
-                "ibi_ms": [800, 810],
+                "ibi_ms": [800, 810, 790, 805, 820],
                 "ecg_chunks": [
                     {
                         "seq": 1,
@@ -287,11 +289,18 @@ class SavedHrvImportTests(unittest.TestCase):
             self.assertIsNotNone(bundle)
             assert bundle is not None
             self.assertTrue(bundle.edf_path.is_file())
+            self.assertTrue(bundle.ecg_stream_path.is_file())
+            # Session Save Path layout: YYYY/YYYY-MM-DD/id (no Sessions/profile nest).
+            self.assertNotIn("Sessions", bundle.session_dir.parts)
             from hnh.replay_loader import load_session_replay_data
+            from hnh.session_report_rebuild import build_report_data_from_session_dir
 
             replay = load_session_replay_data(bundle.session_dir)
             self.assertTrue(replay.get("ecg_samples"))
             self.assertGreaterEqual(len(replay["ecg_samples"]), 50)
+            report = build_report_data_from_session_dir(bundle.session_dir)
+            self.assertGreaterEqual(len(report["ecg_samples"]), 50)
+            self.assertGreater(len(report["hrv_values"]), 0)
 
     def test_import_writes_rolling_rmssd_and_keeps_phone_summary(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -322,8 +331,14 @@ class SavedHrvImportTests(unittest.TestCase):
                 for line in csv_text.splitlines()
                 if line.startswith("hrv,")
             ]
+            sdnn_values = [
+                float(line.split(",")[1])
+                for line in csv_text.splitlines()
+                if line.startswith("SDNN,")
+            ]
             self.assertGreater(len(hrv_values), 1)
             self.assertGreater(max(hrv_values) - min(hrv_values), 1.0)
+            self.assertGreater(len(sdnn_values), 1)
             trends = store.list_session_trends("Payton", span="year")
             self.assertEqual(len(trends), 1)
             self.assertNotAlmostEqual(trends[0]["avg_rmssd"], 41.47, places=2)

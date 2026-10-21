@@ -49,6 +49,7 @@ from hnh.sensor import (
     format_feather_profile_status_message,
     format_saved_hrv_duration,
     is_feather_profile_status_message,
+    suppresses_feather_ui_for_source,
 )
 from hnh.linux_ble_prep import LinuxBlePrepWorker
 from hnh.logger import Logger
@@ -9528,12 +9529,37 @@ class View(QMainWindow):
         if stream is not None:
             stream.sample_rate_hz = rate
 
+    def _phone_bridge_source_device(self) -> str:
+        """Latest live or pending PROTOCOL ``source_device`` (e.g. FEATHER / POLAR_H10)."""
+        bridge = getattr(self, "phone_bridge", None)
+        if bridge is not None and hasattr(bridge, "last_source_device"):
+            try:
+                live = str(bridge.last_source_device() or "").strip()
+                if live:
+                    return live
+            except Exception:
+                pass
+        return str(getattr(self, "_pending_ecg_source_device", "") or "").strip()
+
+    def _phone_bridge_suppresses_feather_ui(self) -> bool:
+        """Hide Feather profile / lead-off UI while linked to Polar (or other non-Feather)."""
+        return suppresses_feather_ui_for_source(self._phone_bridge_source_device())
+
+    def _clear_feather_ui_for_non_feather_source(self) -> None:
+        """Drop leftover Feather banners when source is known non-Feather."""
+        if not self._phone_bridge_suppresses_feather_ui():
+            return
+        self._hide_feather_profile_banner()
+        if getattr(self, "_feather_leads_off_active", False):
+            self._on_feather_leads_off_update(None)
+
     def _on_bridge_source_device(self, source: str) -> None:
         """Remember the sensor for this session before a later disconnect clears the socket."""
         text = str(source or "").strip()
         if not text:
             return
         self._pending_ecg_source_device = text
+        self._clear_feather_ui_for_non_feather_source()
         if self._session_state != "recording":
             return
         if text == self._session_ecg_source_device:
@@ -10843,6 +10869,15 @@ class View(QMainWindow):
         banner = getattr(self, "_feather_leads_off_banner", None)
         label = getattr(self, "_feather_leads_off_banner_label", None)
         active = isinstance(payload, dict) and bool(payload.get("active"))
+        if active:
+            payload_source = ""
+            if isinstance(payload, dict):
+                payload_source = str(payload.get("source_device") or "").strip()
+            if suppresses_feather_ui_for_source(
+                payload_source or self._phone_bridge_source_device()
+            ):
+                active = False
+                payload = None
         was = bool(getattr(self, "_feather_leads_off_active", False))
         self._feather_leads_off_active = active
         # MCU holds IBI and the phone holds ECG while leads are open. That
@@ -10856,7 +10891,7 @@ class View(QMainWindow):
             if was and self._is_sensor_connected() and not self._fault_active:
                 self._set_signal_indicator("Connected (waiting for beats)", "#2196F3")
             return
-        msg = str(payload.get("message") or "").strip()
+        msg = str(payload.get("message") or "").strip() if isinstance(payload, dict) else ""
         if not msg:
             msg = "Feather lead-off"
         label.setText(f"Check electrodes — {msg}")
@@ -11690,7 +11725,7 @@ class View(QMainWindow):
 
         bundle = import_file_as_session(
             Path(path),
-            self._session_root,
+            self._session_save_path_from_settings(),
             self._session_profile_id,
             self._profile_store,
         )
@@ -12740,7 +12775,7 @@ class View(QMainWindow):
         try:
             bundle = import_saved_hrv_package(
                 package,
-                self._session_root,
+                self._session_save_path_from_settings(),
                 self._session_profile_id,
                 self._profile_store,
             )
@@ -13002,6 +13037,11 @@ class View(QMainWindow):
     def show_status(self, status: str, print_to_terminal=True):
         display_status = status
         feather_status = is_feather_profile_status_message(status)
+        if feather_status and self._phone_bridge_suppresses_feather_ui():
+            # Phone may still emit Feather soft-match while BLE source is Polar H10.
+            if print_to_terminal and self.settings.DEBUG:
+                print(f"status (ignored Feather profile; source={self._phone_bridge_source_device()}): {status}")
+            return
         if feather_status:
             display_status = format_feather_profile_status_message(status)
             self._show_feather_profile_banner(display_status)

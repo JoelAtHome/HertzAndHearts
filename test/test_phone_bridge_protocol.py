@@ -17,8 +17,10 @@ from hnh.sensor import (
     parse_ritual_unavailable,
     format_feather_profile_status_message,
     is_feather_profile_status_message,
+    is_feather_source_device,
     parse_phone_bridge_discover_reply,
     parse_phone_bridge_leads_off_status,
+    suppresses_feather_ui_for_source,
     parse_phone_bridge_rmssd,
     parse_phone_bridge_session_summary,
     saved_hrv_assembly_complete,
@@ -58,6 +60,17 @@ class FeatherProfileStatusMessageTests(unittest.TestCase):
         self.assertFalse(is_feather_profile_status_message("Connected to Phone Bridge."))
         self.assertFalse(is_feather_profile_status_message(""))
         self.assertFalse(is_feather_profile_status_message("Receiving saved HRV…"))
+
+    def test_source_device_gates_feather_ui(self):
+        self.assertTrue(is_feather_source_device("FEATHER"))
+        self.assertTrue(is_feather_source_device("feather"))
+        self.assertFalse(is_feather_source_device("POLAR_H10"))
+        self.assertFalse(is_feather_source_device(""))
+        self.assertFalse(suppresses_feather_ui_for_source(""))
+        self.assertFalse(suppresses_feather_ui_for_source(None))
+        self.assertFalse(suppresses_feather_ui_for_source("FEATHER"))
+        self.assertTrue(suppresses_feather_ui_for_source("POLAR_H10"))
+        self.assertTrue(suppresses_feather_ui_for_source("polar_h10"))
 
     def test_no_match_appends_implications(self):
         text = format_feather_profile_status_message("No Feather profile for Admin")

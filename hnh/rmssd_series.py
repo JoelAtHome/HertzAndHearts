@@ -28,6 +28,26 @@ def series_is_flat(values: list[float], *, tolerance_ms: float = _FLAT_TOLERANCE
     return (max(cleaned) - min(cleaned)) <= tolerance_ms
 
 
+# Live monitor uses the last 30 IBIs for SDNN (see view.py IBI drain).
+_SDNN_WINDOW = 30
+
+
+def _beat_times(
+    ibis_ms: list[float],
+    times_sec: list[float] | None,
+) -> tuple[list[float], list[float]]:
+    ibis = [float(v) for v in ibis_ms]
+    n = len(ibis)
+    if times_sec is None or len(times_sec) != n:
+        elapsed = 0.0
+        times: list[float] = []
+        for ibi in ibis:
+            times.append(elapsed)
+            elapsed += ibi / 1000.0
+        return ibis, times
+    return ibis, [float(t) for t in times_sec]
+
+
 def rolling_rmssd_series(
     ibis_ms: list[float],
     times_sec: list[float] | None = None,
@@ -42,19 +62,10 @@ def rolling_rmssd_series(
     Returns (times_sec, rmssd_ms). Both lists are empty when there are fewer
     than `min_beats` intervals.
     """
-    ibis = [float(v) for v in ibis_ms]
+    ibis, times = _beat_times(ibis_ms, times_sec)
     n = len(ibis)
     if n < min_beats or window < 2:
         return [], []
-
-    if times_sec is None or len(times_sec) != n:
-        elapsed = 0.0
-        times: list[float] = []
-        for ibi in ibis:
-            times.append(elapsed)
-            elapsed += ibi / 1000.0
-    else:
-        times = [float(t) for t in times_sec]
 
     out_times: list[float] = []
     out_values: list[float] = []
@@ -65,6 +76,37 @@ def rolling_rmssd_series(
         if not diffs:
             continue
         out_values.append(math.sqrt(sum(d * d for d in diffs) / len(diffs)))
+        out_times.append(times[end])
+    return out_times, out_values
+
+
+def rolling_sdnn_series(
+    ibis_ms: list[float],
+    times_sec: list[float] | None = None,
+    *,
+    window: int = _SDNN_WINDOW,
+    min_beats: int = _MIN_BEATS,
+) -> tuple[list[float], list[float]]:
+    """SDNN over the last `window` beats, matching the live monitor window.
+
+    Returns (times_sec, sdnn_ms). Empty when there are fewer than `min_beats`
+    intervals.
+    """
+    ibis, times = _beat_times(ibis_ms, times_sec)
+    n = len(ibis)
+    if n < min_beats or window < 2:
+        return [], []
+
+    out_times: list[float] = []
+    out_values: list[float] = []
+    for end in range(min_beats - 1, n):
+        start = max(0, end + 1 - window)
+        segment = ibis[start : end + 1]
+        if len(segment) < 2:
+            continue
+        mean = sum(segment) / len(segment)
+        var = sum((v - mean) ** 2 for v in segment) / (len(segment) - 1)
+        out_values.append(math.sqrt(var))
         out_times.append(times[end])
     return out_times, out_values
 

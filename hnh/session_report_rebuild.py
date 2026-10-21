@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from hnh.config import ECG_SAMPLE_RATE, FEATHER_ECG_SAMPLE_RATE
-from hnh.ecg_stream import read_ecg_stream_samples
+from hnh.ecg_stream import read_ecg_stream_samples, trim_ecg_trailing_padding
 from hnh.qtc import QtcConfig, compute_qtc_payload_from_ecg
 from hnh.report import (
     format_ecg_sensor_display_name,
@@ -116,21 +116,28 @@ def _load_series_from_csv(csv_path: Path) -> dict[str, Any]:
                 last_ts = ts if last_ts is None else max(last_ts, ts)
 
             parsed_elapsed = _to_float(elapsed_raw)
-            if parsed_elapsed is not None:
-                current_elapsed_ms = max(current_elapsed_ms, parsed_elapsed)
-
             value = _to_float(value_raw)
-            t_sec = current_elapsed_ms / 1000.0
 
             if event == "IBI" and value is not None and value > 0:
                 if parsed_elapsed is None:
                     current_elapsed_ms += value
-                    t_sec = current_elapsed_ms / 1000.0
+                else:
+                    # Beat timeline only: clamp monotonic to avoid zig-zag artifacts.
+                    current_elapsed_ms = max(current_elapsed_ms, parsed_elapsed)
+                t_sec = current_elapsed_ms / 1000.0
                 hr_values.append(60000.0 / value)
                 hr_time_seconds.append(t_sec)
                 ibi_ms.append(value)
                 ibi_time_seconds.append(t_sec)
                 continue
+
+            # Phone imports write all IBIs first, then RMSSD/SDNN. Honor each
+            # row's own elapsed_sec so metric times are not collapsed to session end.
+            if parsed_elapsed is not None:
+                t_sec = parsed_elapsed / 1000.0
+                current_elapsed_ms = max(current_elapsed_ms, parsed_elapsed)
+            else:
+                t_sec = current_elapsed_ms / 1000.0
 
             if event == "hrv" and value is not None:
                 rmssd_values.append(value)
@@ -242,19 +249,24 @@ def build_report_data_from_session_dir(
     rmssd_values = list(series.get("rmssd_values") or [])
     rmssd_time_seconds = list(series.get("rmssd_time_seconds") or [])
 
-    from hnh.rmssd_series import rolling_rmssd_series, series_is_flat
+    from hnh.rmssd_series import rolling_rmssd_series, rolling_sdnn_series, series_is_flat
+
+    ibi_ms = list(series.get("ibi_ms") or [])
+    ibi_time_seconds = list(series.get("ibi_time_seconds") or [])
 
     stored_rmssd_was_flat = series_is_flat(rmssd_values)
     if stored_rmssd_was_flat:
-        rolled_times, rolled_values = rolling_rmssd_series(
-            list(series.get("ibi_ms") or []),
-            list(series.get("ibi_time_seconds") or []),
-        )
+        rolled_times, rolled_values = rolling_rmssd_series(ibi_ms, ibi_time_seconds)
         if rolled_values:
             rmssd_values = rolled_values
             rmssd_time_seconds = rolled_times
         else:
             stored_rmssd_was_flat = False
+
+    hrv_values = list(series.get("hrv_values") or [])
+    hrv_time_seconds = list(series.get("hrv_time_seconds") or [])
+    if not hrv_values:
+        hrv_time_seconds, hrv_values = rolling_sdnn_series(ibi_ms, ibi_time_seconds)
 
     baseline_hr = metrics.get("baseline_hr") if isinstance(metrics, dict) else None
     baseline_rmssd = metrics.get("baseline_rmssd") if isinstance(metrics, dict) else None
@@ -290,10 +302,47 @@ def build_report_data_from_session_dir(
             ecg_rate = int(FEATHER_ECG_SAMPLE_RATE)
     else:
         stored_name = ""
+    artifacts = manifest.get("artifacts") if isinstance(manifest, dict) else None
+    phone_pkg = (
+        artifacts.get("phone_bridge_package") if isinstance(artifacts, dict) else None
+    )
+    expected_ecg_count = None
+    if isinstance(phone_pkg, dict):
+        count_raw = _to_float(phone_pkg.get("ecg_sample_count"))
+        if count_raw is not None and count_raw >= 1:
+            expected_ecg_count = int(round(count_raw))
+
     ecg_samples: list[float] = []
     stream_path = session_dir / "session_ecg.f32"
     if stream_path.is_file():
         ecg_samples = read_ecg_stream_samples(stream_path)
+    # Phone-bridge imports historically wrote session.edf without session_ecg.f32.
+    # EDF ECG is zero-padded to wall-clock duration; trim before report/QTc use.
+    if not ecg_samples:
+        edf_path = session_dir / "session.edf"
+        if edf_path.is_file():
+            from hnh.replay_loader import _load_from_edf
+
+            edf_data = _load_from_edf(edf_path)
+            if edf_data:
+                edf_samples = list(edf_data.get("ecg_samples") or [])
+                if edf_samples:
+                    ecg_samples = trim_ecg_trailing_padding(
+                        edf_samples, expected_count=expected_ecg_count
+                    )
+                    edf_rate = _to_float(edf_data.get("ecg_sample_rate_hz"))
+                    if edf_rate is not None and edf_rate >= 1:
+                        ecg_rate = int(round(edf_rate))
+    elif expected_ecg_count is not None and len(ecg_samples) > expected_ecg_count:
+        ecg_samples = trim_ecg_trailing_padding(
+            ecg_samples, expected_count=expected_ecg_count
+        )
+    if isinstance(sensor, dict):
+        # Prefer rate stored on the phone-bridge package when sensor lacks it.
+        if _to_float(sensor.get("ecg_sample_rate_hz")) is None and isinstance(phone_pkg, dict):
+            pkg_rate = _to_float(phone_pkg.get("ecg_sample_rate_hz"))
+            if pkg_rate is not None and pkg_rate >= 1:
+                ecg_rate = int(round(pkg_rate))
     ecg_sensor_name = stored_name or format_ecg_sensor_display_name(
         str(source_device or "").strip() or None,
         selected_device=str(selected_device or "").strip() or None,
@@ -324,8 +373,8 @@ def build_report_data_from_session_dir(
         "hr_time_seconds": list(series.get("hr_time_seconds") or []),
         "rmssd_values": rmssd_values,
         "rmssd_time_seconds": rmssd_time_seconds,
-        "hrv_values": list(series.get("hrv_values") or []),
-        "hrv_time_seconds": list(series.get("hrv_time_seconds") or []),
+        "hrv_values": hrv_values,
+        "hrv_time_seconds": hrv_time_seconds,
         "stress_ratio_values": list(series.get("stress_ratio_values") or []),
         "snr_values": [],
         "ecg_samples": ecg_samples,

@@ -105,6 +105,42 @@ class SessionReportRebuildTests(unittest.TestCase):
             self.assertTrue(docx_path.exists())
             self.assertTrue(pdf_path.exists())
 
+    def test_metric_rows_after_ibis_keep_own_elapsed_times(self):
+        """Phone imports write all IBIs then all hrv/SDNN rows; times must not collapse."""
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp) / "session-metrics-after"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(["event", "value", "timestamp", "elapsed_sec"])
+                w.writerow(["IBI", "800", "2026-01-01T00:00:00", "0"])
+                w.writerow(["IBI", "820", "2026-01-01T00:00:01", "800"])
+                w.writerow(["IBI", "810", "2026-01-01T00:00:02", "1620"])
+                w.writerow(["hrv", "20.0", "2026-01-01T00:00:00", "800"])
+                w.writerow(["hrv", "22.0", "2026-01-01T00:00:01", "1620"])
+                w.writerow(["SDNN", "30.0", "2026-01-01T00:00:00", "800"])
+                w.writerow(["SDNN", "31.0", "2026-01-01T00:00:01", "1620"])
+            manifest = {
+                "session_id": "metrics-after",
+                "profile_id": "Admin",
+                "timing": {
+                    "started_at": "2026-01-01T00:00:00",
+                    "ended_at": "2026-01-01T00:02:00",
+                },
+                "metrics": {"qtc": {"status": "unavailable"}},
+                "artifacts": {"csv": {"path": "session.csv", "exists": True}},
+                "sensor": {"source_device": "POLAR_H10"},
+                "settings_snapshot": {"SETTLING_DURATION": 0},
+            }
+            (session_dir / "session_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            data = build_report_data_from_session_dir(session_dir)
+            self.assertEqual(data["rmssd_time_seconds"], [0.8, 1.62])
+            self.assertEqual(data["hrv_time_seconds"], [0.8, 1.62])
+            self.assertNotEqual(data["rmssd_time_seconds"][0], data["rmssd_time_seconds"][1])
+
     def test_flat_phone_summary_becomes_rolling_series_in_report_data(self):
         with TemporaryDirectory() as tmp:
             session_dir = Path(tmp) / "session-flat"
@@ -144,6 +180,72 @@ class SessionReportRebuildTests(unittest.TestCase):
             self.assertAlmostEqual(data["last_rmssd"], data["rmssd_values"][-1], places=6)
             self.assertAlmostEqual(data["bridge_rmssd_ms"], 41.47, places=2)
             self.assertNotAlmostEqual(data["last_rmssd"], 41.47, places=2)
+            # No SDNN CSV rows: rebuild from IBIs (same as phone imports).
+            self.assertGreater(len(data["hrv_values"]), 1)
+
+    def test_report_loads_ecg_from_edf_when_f32_missing(self):
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp) / "session-edf-only"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(["event", "value", "timestamp", "elapsed_sec"])
+                w.writerow(["IBI", "800", "2026-01-01T00:00:00", "0"])
+                w.writerow(["IBI", "810", "2026-01-01T00:00:01", "800"])
+                w.writerow(["hrv", "20.0", "2026-01-01T00:00:01", "800"])
+            samples = [0.1 * ((i % 10) - 5) for i in range(260)]
+            from hnh.edf_export import export_session_edf_plus
+
+            edf_ok, _ = export_session_edf_plus(
+                str(session_dir / "session.edf"),
+                {
+                    "session_id": "edf-only",
+                    "profile_id": "Admin",
+                    "session_start": __import__("datetime").datetime(2026, 1, 1),
+                    "session_end": __import__("datetime").datetime(2026, 1, 1, 0, 0, 2),
+                    "hr_values": [75.0, 74.0],
+                    "rmssd_values": [20.0, 20.0],
+                    "ecg_samples": samples,
+                    "ecg_sample_rate_hz": 130,
+                    "ecg_is_simulated": False,
+                    "annotations": [],
+                },
+                sample_rate_hz=1,
+            )
+            self.assertTrue(edf_ok)
+            manifest = {
+                "session_id": "edf-only",
+                "profile_id": "Admin",
+                "timing": {
+                    "started_at": "2026-01-01T00:00:00",
+                    "ended_at": "2026-01-01T00:00:02",
+                },
+                "metrics": {"qtc": {"status": "unavailable"}},
+                "artifacts": {
+                    "csv": {"path": "session.csv", "exists": True},
+                    "edf": {"path": "session.edf", "exists": True},
+                    "phone_bridge_package": {
+                        "ecg_sample_count": 260,
+                        "ecg_sample_rate_hz": 130,
+                    },
+                },
+                "sensor": {
+                    "selected_device": "phone_bridge",
+                    "source_device": "FEATHER",
+                    "ecg_sensor_name": "Feather ECG-Box",
+                },
+            }
+            (session_dir / "session_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            self.assertFalse((session_dir / "session_ecg.f32").exists())
+            data = build_report_data_from_session_dir(session_dir)
+            self.assertGreaterEqual(len(data["ecg_samples"]), 50)
+            # EDF may pad zeros to wall duration; rebuild trims to phone sample count.
+            self.assertLessEqual(len(data["ecg_samples"]), 260)
+            self.assertGreater(max(data["ecg_samples"]) - min(data["ecg_samples"]), 0.05)
+            self.assertEqual(data["ecg_sample_rate_hz"], 130)
 
 
 if __name__ == "__main__":

@@ -1,6 +1,12 @@
 # Changelog
 
 ### Unreleased
++ bugfix: Phone-bridge and file imports save under **Session Save Path [Profile]** (same tree as live Stop & Save), not the app Data Folder.
++ bugfix: Imported phone ECG sessions write `session_ecg.f32` and report rebuild falls back to `session.edf`, so History **Generate report** includes the ECG strip.
++ bugfix: Phone imports compute rolling SDNN from beat intervals (and report rebuild fills SDNN when the CSV has none), so the HRV(SDNN) trend is no longer empty.
++ bugfix: When Phone Bridge is linked to Polar H10 (or any non-Feather source), Feather profile and lead-off banners are suppressed.
++ bugfix: Regenerated phone-import reports trim EDF zero-padded ECG tails and pick a strip with real amplitude, so the ECG plot is no longer a flat line; SDNN is filled from IBIs and outlier-filtered like RMSSD.
++ bugfix: Session CSV loaders honor each RMSSD/SDNN row's own elapsed time when metric rows are written after all IBIs (phone imports), so trend plots are no longer collapsed to a single x position.
 
 ### Version 1.0.0-beta.8 (October 19 2026)
 + release: Bumped pre-release version to `1.0.0b8` (public label: `1.0.0-beta.8`).

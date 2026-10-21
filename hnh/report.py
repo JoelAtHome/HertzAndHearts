@@ -413,6 +413,53 @@ def _filter_rmssd_outliers(values: list[float]) -> list[float]:
     return filtered or bounded
 
 
+def _metric_outlier_upper_bound(values: list[float]) -> float | None:
+    """Upper bound used by report outlier filtering, or None when no values keep."""
+    cleaned = [float(v) for v in values if v is not None and float(v) >= 0.0]
+    if not cleaned:
+        return None
+    bounded = [v for v in cleaned if v <= float(RMSSD_NOISY_MS)]
+    if not bounded:
+        return float(min(cleaned))
+    if len(bounded) < 8:
+        return float(RMSSD_NOISY_MS)
+    arr = np.asarray(bounded, dtype=float)
+    q1, q3 = np.percentile(arr, [25, 75])
+    iqr = max(0.0, float(q3 - q1))
+    if iqr <= 0.0:
+        return float(RMSSD_NOISY_MS)
+    return min(float(RMSSD_NOISY_MS), float(q3 + 1.5 * iqr))
+
+
+def _filter_metric_outliers_with_times(
+    values: list[float],
+    times_sec: list[float],
+) -> tuple[list[float], list[float]]:
+    """Apply report outlier filtering while keeping the time axis aligned."""
+    if not values:
+        return [], []
+    if len(values) != len(times_sec):
+        return _filter_rmssd_outliers(values), list(times_sec)
+    upper = _metric_outlier_upper_bound(values)
+    if upper is None:
+        return [], []
+    out_v: list[float] = []
+    out_t: list[float] = []
+    for value, t in zip(values, times_sec):
+        try:
+            sample = float(value)
+        except (TypeError, ValueError):
+            continue
+        if sample >= 0.0 and sample <= upper:
+            out_v.append(sample)
+            out_t.append(float(t))
+    if out_v:
+        return out_v, out_t
+    # Keep the calmest point so the panel is not blank.
+    idx = min(range(len(values)), key=lambda i: float(values[i]))
+    return [float(values[idx])], [float(times_sec[idx])]
+
+
 def _fmt_qtc_session_value(qtc_data: dict) -> str:
     value = qtc_data.get("session_value_ms")
     if value is None:
@@ -591,13 +638,17 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
 
     output_dir.mkdir(parents=True, exist_ok=True)
     hr_values = [float(v) for v in (data.get("hr_values") or []) if v is not None]
-    rmssd_values = _filter_rmssd_outliers(
-        [float(v) for v in (data.get("rmssd_values") or []) if v is not None]
-    )
+    rmssd_values = [float(v) for v in (data.get("rmssd_values") or []) if v is not None]
     hrv_values = [float(v) for v in (data.get("hrv_values") or []) if v is not None]
     hr_time_seconds = [float(v) for v in (data.get("hr_time_seconds") or []) if v is not None]
     rmssd_time_seconds = [float(v) for v in (data.get("rmssd_time_seconds") or []) if v is not None]
     hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
+    rmssd_values, rmssd_time_seconds = _filter_metric_outliers_with_times(
+        rmssd_values, rmssd_time_seconds
+    )
+    hrv_values, hrv_time_seconds = _filter_metric_outliers_with_times(
+        hrv_values, hrv_time_seconds
+    )
     session_reset_markers_seconds = [
         float(v) for v in (data.get("session_reset_markers_seconds") or []) if v is not None
     ]
@@ -707,20 +758,18 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
         visuals["trend"] = trend_path
 
     if len(ecg_values) >= 20:
+        from hnh.ecg_stream import select_ecg_strip_window
+
         strip_path = output_dir / "session_visual_ecg_strip.png"
         window = min(len(ecg_values), max(ecg_rate * 6, 260))
-        selected = ecg_values[-window:]
+        # Prefer a strip with real amplitude — imported EDFs pad zeros after ECG ends.
+        selected, selected_start = select_ecg_strip_window(
+            ecg_values, ecg_rate, window_samples=window
+        )
         fig = Figure(figsize=(7.2, 1.7), dpi=140)
         canvas = FigureCanvas(fig)
         ax = fig.add_subplot(111)
-        session_start = data.get("session_start")
-        session_end = data.get("session_end")
-        if isinstance(session_start, datetime) and isinstance(session_end, datetime):
-            total_sec = max(0.0, (session_end - session_start).total_seconds())
-        else:
-            total_sec = len(ecg_values) / float(ecg_rate)
-        strip_span_sec = len(selected) / float(ecg_rate)
-        strip_start_sec = max(0.0, total_sec - strip_span_sec)
+        strip_start_sec = selected_start / float(ecg_rate)
         t = [strip_start_sec + (idx / float(ecg_rate)) for idx in range(len(selected))]
         ax.plot(t, selected, color="black", linewidth=1.0)
         ax.set_xlabel("Elapsed session time (s)", fontsize=8)

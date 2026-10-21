@@ -67,6 +67,22 @@ def build_phone_bridge_client_info(
     return payload
 
 
+def is_feather_source_device(source: str | None) -> bool:
+    """True when PROTOCOL ``source_device`` is the Feather ECG box."""
+    return str(source or "").strip().upper() == "FEATHER"
+
+
+def suppresses_feather_ui_for_source(source: str | None) -> bool:
+    """True when the bridge source is known and is not Feather (e.g. Polar H10).
+
+    Empty/unknown source does not suppress: soft-match may arrive before the
+    first ``source_device`` tag. Once Polar (or any non-Feather) is known,
+    Feather profile / lead-off UI must stay off.
+    """
+    text = str(source or "").strip().upper()
+    return bool(text) and text != "FEATHER"
+
+
 def is_feather_profile_status_message(message: str) -> bool:
     """True for phone β.59+ Feather soft-match status lines (PROTOCOL §8.2)."""
     text = str(message or "").strip().casefold()

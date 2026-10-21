@@ -36,6 +36,67 @@ def read_ecg_stream_samples(path: Path | str) -> list[float]:
     return [float(x) for x in arr]
 
 
+def trim_ecg_trailing_padding(
+    samples: list[float],
+    *,
+    expected_count: int | None = None,
+    threshold_mv: float = 0.01,
+    min_pad_samples: int = 130,
+) -> list[float]:
+    """Drop EDF duration-fit zero padding after the real ECG.
+
+    Phone imports store ~ecg_sample_count real samples, then EDF pads zeros
+    out to the wall-clock session length. Report strips that used the file
+    tail looked empty. Prefer ``expected_count`` from the phone package when
+    present; otherwise trim a trailing near-zero run of at least
+    ``min_pad_samples``.
+    """
+    if not samples:
+        return samples
+    if expected_count is not None:
+        n = int(expected_count)
+        if 0 < n < len(samples):
+            return list(samples[:n])
+        return list(samples)
+
+    last = len(samples) - 1
+    while last >= 0 and abs(float(samples[last])) <= threshold_mv:
+        last -= 1
+    trimmed_len = last + 1
+    pad = len(samples) - trimmed_len
+    if pad < int(min_pad_samples) or trimmed_len <= 0:
+        return list(samples)
+    return list(samples[:trimmed_len])
+
+
+def select_ecg_strip_window(
+    samples: list[float],
+    sample_rate_hz: int,
+    *,
+    window_samples: int | None = None,
+    min_peak_to_peak_mv: float = 0.05,
+) -> tuple[list[float], int]:
+    """Pick a report ECG strip with visible amplitude (skip zero-padded tails).
+
+    Returns ``(strip_samples, start_index)`` within ``samples``.
+    """
+    if not samples:
+        return [], 0
+    rate = max(1, int(sample_rate_hz) or 130)
+    window = int(window_samples) if window_samples is not None else min(len(samples), max(rate * 6, 260))
+    window = max(20, min(window, len(samples)))
+    if len(samples) <= window:
+        return list(samples), 0
+
+    step = max(1, rate // 2)
+    for start in range(len(samples) - window, -1, -step):
+        chunk = samples[start : start + window]
+        if max(chunk) - min(chunk) >= min_peak_to_peak_mv:
+            return list(chunk), start
+    start = len(samples) - window
+    return list(samples[start:]), start
+
+
 def ecg_stream_sample_count(path: Path | str) -> int:
     file_path = Path(path)
     if not file_path.is_file():
