@@ -8109,34 +8109,77 @@ class View(QMainWindow):
         plots_column.addWidget(self.hrv_widget, stretch=1)
         self.content_row.addLayout(plots_column, stretch=1)
 
+        # Side metrics mirror plots_column stretches. Baseline HR / Baseline RMSSD
+        # sit near mid-plot (where the established baseline traces usually sit).
         metrics_column = QVBoxLayout()
         metrics_column.setContentsMargins(0, 0, 0, 0)
-        metrics_column.setSpacing(12)
-        metrics_column.addStretch(1)
+        metrics_column.setSpacing(2)
 
         _stat_style = (
             "font-size: 11px; color: #2c3e50; "
             "border: 1px solid #bdc3c7; border-radius: 3px; "
             "padding: 4px 6px; background: #f8f9fa;"
         )
-        for lbl in (
-            self.baseline_hr_label,
-            self.baseline_rmssd_label,
-            self.current_hr_label,
-            self.rmssd_label,
-            self.bridge_rmssd_label,
-            self.sdnn_label,
-            self.stress_ratio_label,
-            self.qrs_label,
-        ):
-            lbl.setFixedWidth(SIDE_METRICS_COLUMN_WIDTH - 8)
+        _metric_w = SIDE_METRICS_COLUMN_WIDTH - 8
+
+        def _style_metric_label(lbl: QLabel) -> None:
+            lbl.setFixedWidth(_metric_w)
             lbl.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
             lbl.setStyleSheet(_stat_style)
-            metrics_column.addWidget(lbl, alignment=Qt.AlignHCenter)
-        metrics_column.addStretch(1)
+
+        def _metrics_divider() -> QFrame:
+            line = QFrame()
+            line.setFixedWidth(_metric_w)
+            line.setFixedHeight(2)
+            line.setStyleSheet("background: #95a5a6; border: none;")
+            return line
+
+        def _add_metric(layout: QVBoxLayout, lbl: QLabel) -> None:
+            _style_metric_label(lbl)
+            layout.addWidget(lbl, alignment=Qt.AlignHCenter)
+
+        # Top plot band: HR + Baseline HR centered (~halfway up the upper plot).
+        top_metrics = QWidget()
+        top_metrics.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        top_lay = QVBoxLayout(top_metrics)
+        top_lay.setContentsMargins(0, 0, 0, 0)
+        top_lay.setSpacing(8)
+        top_lay.addStretch(1)
+        _add_metric(top_lay, self.current_hr_label)
+        _add_metric(top_lay, self.baseline_hr_label)
+        top_lay.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
+        top_lay.addStretch(1)
+        metrics_column.addWidget(top_metrics, stretch=1)
+
+        # Freeze-row band: SDNN / LF/HF / QRS.
+        mid_metrics = QWidget()
+        mid_metrics.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Maximum)
+        mid_lay = QVBoxLayout(mid_metrics)
+        mid_lay.setContentsMargins(0, 0, 0, 0)
+        mid_lay.setSpacing(8)
+        _add_metric(mid_lay, self.sdnn_label)
+        _add_metric(mid_lay, self.stress_ratio_label)
+        _add_metric(mid_lay, self.qrs_label)
+        mid_lay.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
+        metrics_column.addWidget(mid_metrics, stretch=0)
+
+        # Bottom plot band: RMSSD cluster + Baseline RMSSD centered mid-plot.
+        bot_metrics = QWidget()
+        bot_metrics.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        bot_lay = QVBoxLayout(bot_metrics)
+        bot_lay.setContentsMargins(0, 0, 0, 0)
+        bot_lay.setSpacing(8)
+        bot_lay.addStretch(1)
+        _add_metric(bot_lay, self.rmssd_label)
+        _add_metric(bot_lay, self.bridge_rmssd_label)
+        bot_lay.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
+        _add_metric(bot_lay, self.baseline_rmssd_label)
+        bot_lay.addStretch(1)
+        metrics_column.addWidget(bot_metrics, stretch=1)
 
         metrics_container = QWidget()
         metrics_container.setFixedWidth(SIDE_METRICS_COLUMN_WIDTH)
+        metrics_container.setStyleSheet("background: #eceff1;")
         metrics_container.setLayout(metrics_column)
         self.content_row.addWidget(metrics_container, stretch=0)
         self.vlayout0.addLayout(self.content_row, stretch=90)
