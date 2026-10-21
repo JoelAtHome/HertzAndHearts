@@ -2,6 +2,13 @@
 
 ### Unreleased
 
+### Version 1.0.0-beta.10 (October 21 2026)
++ release: Bumped pre-release version to `1.0.0b10` (public label: `1.0.0-beta.10`).
++ enhancement: **More → Merge Profiles…** (Admin) merges a duplicate profile into a master name, moves sessions/folders, keeps master settings, then deletes the duplicate.
++ bugfix: Session History / Integrity now attribute folders under a profile’s Session Save Path to that profile when the manifest still names a retired profile (e.g. `Sandy` → `Sandy Koblich`), and prefer the local `session.csv` over stale absolute paths.
++ enhancement: Opening History (and Integrity repair) adopts orphan session folders that have EDF/CSV but no manifest, rebuilding CSV/manifest in place for the owning profile.
++ test: Added coverage for save-path attribution, profile merge, and orphan-folder adoption.
+
 ### Version 1.0.0-beta.9 (October 20 2026)
 + release: Bumped pre-release version to `1.0.0b9` (public label: `1.0.0-beta.9`).
 + bugfix: Polar H10 saved-HRV imports no longer append the phone's Feather demo profile name (e.g. "Typical patch torso") to the session annotation.

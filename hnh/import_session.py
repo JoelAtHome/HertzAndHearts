@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import csv
+import re
 import shutil
 import struct
 from datetime import datetime, timedelta
@@ -99,6 +100,12 @@ def _parse_edf(path: Path) -> dict[str, Any] | None:
         if ecg_samples and not duration:
             duration = len(ecg_samples) / ecg_rate
 
+        started_at: datetime | None = None
+        try:
+            started_at = reader.getStartdatetime()
+        except Exception:
+            started_at = None
+
         return {
             "hr_times": hr_times,
             "hr_values": hr_values,
@@ -110,6 +117,7 @@ def _parse_edf(path: Path) -> dict[str, Any] | None:
             "ecg_samples": ecg_samples,
             "ecg_sample_rate_hz": ecg_rate,
             "duration_seconds": duration,
+            "started_at": started_at.isoformat() if isinstance(started_at, datetime) else None,
         }
     finally:
         try:
@@ -191,7 +199,8 @@ def write_session_csv(csv_path: Path, data: dict[str, Any]) -> None:
     with open(csv_path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["event", "value", "timestamp", "elapsed_sec"])
-        base_ts = datetime.now().isoformat()
+        base_raw = str(data.get("started_at") or "").strip()
+        base_ts = base_raw if base_raw else datetime.now().isoformat()
         hr_times = data.get("hr_times") or []
         hr_values = data.get("hr_values") or []
         rmssd_times = list(data.get("rmssd_times") or [])
@@ -346,6 +355,204 @@ def import_file_as_session(
     )
 
     return bundle
+
+
+_SESSION_DIR_NAME_RE = re.compile(r"^(\d{8}-\d{6})(?:_\d{2})?$")
+
+
+def discover_orphan_session_dirs(root: Path) -> list[Path]:
+    """
+    Session folders under root that have session.edf and/or session.csv but no manifest.
+
+    These are invisible to the normal integrity scan, which only walks manifests.
+    """
+    root = Path(root)
+    found: list[Path] = []
+    seen: set[str] = set()
+    try:
+        if not root.exists():
+            return found
+    except OSError:
+        return found
+
+    def _add(session_dir: Path) -> None:
+        try:
+            key = str(session_dir.resolve()).casefold()
+        except OSError:
+            key = str(session_dir).casefold()
+        if key in seen:
+            return
+        if (session_dir / "session_manifest.json").is_file():
+            return
+        has_edf = (session_dir / "session.edf").is_file()
+        has_csv = (session_dir / "session.csv").is_file()
+        if not has_edf and not has_csv:
+            return
+        seen.add(key)
+        found.append(session_dir)
+
+    try:
+        for edf_path in root.rglob("session.edf"):
+            _add(edf_path.parent)
+        for csv_path in root.rglob("session.csv"):
+            _add(csv_path.parent)
+    except OSError:
+        pass
+    return found
+
+
+def _started_at_from_session_id(session_id: str) -> datetime | None:
+    match = _SESSION_DIR_NAME_RE.match(str(session_id or "").strip())
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return None
+
+
+def adopt_existing_session_folder(
+    session_dir: Path,
+    profile_id: str,
+    profile_store: ProfileStore,
+) -> dict[str, str | None] | None:
+    """
+    Rebuild missing session.csv / session_manifest.json in place and index the folder.
+
+    Used when a session folder was copied under a profile's Session Save Path without
+    a manifest (EDF/report only). The folder stays where it is; profile_id becomes the
+    history owner regardless of any old name embedded in the EDF patient field.
+    """
+    session_dir = Path(session_dir)
+    try:
+        if not session_dir.is_dir():
+            return None
+    except OSError:
+        return None
+
+    profile = str(profile_id or "").strip() or "Admin"
+    edf_path = session_dir / "session.edf"
+    csv_path = session_dir / "session.csv"
+    manifest_path = session_dir / "session_manifest.json"
+    has_edf = edf_path.is_file()
+    has_csv = csv_path.is_file()
+    if not has_edf and not has_csv:
+        return None
+
+    data: dict[str, Any] | None = None
+    if has_edf:
+        data = parse_external_file(edf_path)
+    if data is None and has_csv:
+        data = parse_external_file(csv_path)
+    if data is None or not data.get("hr_times"):
+        return None
+
+    session_id = session_dir.name.strip() or "imported"
+    sid_match = _SESSION_DIR_NAME_RE.match(session_id)
+    if sid_match:
+        session_id = sid_match.group(1)
+
+    started = naive_local_from_iso(str(data.get("started_at") or ""))
+    if started is None:
+        started = _started_at_from_session_id(session_id)
+    if started is None:
+        started = datetime.now()
+    duration = float(data.get("duration_seconds") or 0.0)
+    if duration <= 0 and data.get("hr_times"):
+        try:
+            duration = float(max(data["hr_times"]))
+        except (TypeError, ValueError):
+            duration = 0.0
+    ended = started + timedelta(seconds=max(0.0, duration))
+    data["started_at"] = started.isoformat()
+
+    if not has_csv:
+        write_session_csv(csv_path, data)
+        has_csv = csv_path.is_file()
+    if not has_csv:
+        return None
+
+    ecg_samples = list(data.get("ecg_samples") or [])
+    ecg_rate = int(data.get("ecg_sample_rate_hz") or 130)
+    ecg_stream_path = session_dir / "session_ecg.f32"
+    ecg_stream_ok = False
+    if ecg_samples and not ecg_stream_path.is_file():
+        ecg_stream_ok = _write_ecg_stream(ecg_stream_path, ecg_samples, ecg_rate)
+    elif ecg_stream_path.is_file():
+        ecg_stream_ok = True
+
+    has_report = (session_dir / "session_report.docx").is_file()
+    state = "finalized" if has_report else "imported"
+    now = datetime.now()
+    artifacts: dict[str, Any] = {
+        "csv": {"path": "session.csv", "exists": True},
+    }
+    if has_edf:
+        artifacts["edf"] = {"path": "session.edf", "exists": True}
+    if ecg_stream_ok:
+        artifacts["ecg_stream"] = {"path": "session_ecg.f32", "exists": True}
+    if has_report:
+        artifacts["docx_final"] = {"path": "session_report.docx", "exists": True}
+    if (session_dir / "session_share.pdf").is_file():
+        artifacts["share_pdf_final"] = {"path": "session_share.pdf", "exists": True}
+
+    payload = {
+        "schema_version": 1,
+        "updated_at": now.isoformat(),
+        "session_id": session_id,
+        "profile_id": profile,
+        "state": state,
+        "report_stage": "final" if has_report else "draft",
+        "sensor": {
+            "selected_device": "adopted",
+            "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
+        },
+        "timing": {
+            "started_at": started.isoformat(),
+            "first_data_at": started.isoformat(),
+            "ended_at": ended.isoformat(),
+        },
+        "metrics": {
+            "baseline_hr": None,
+            "baseline_rmssd": None,
+            "last_hr": data.get("hr_values", [])[-1] if data.get("hr_values") else None,
+            "last_rmssd": data.get("rmssd_values", [])[-1] if data.get("rmssd_values") else None,
+            "qtc": {"status": "unavailable"},
+            "annotation_count": len(data.get("annotations") or []),
+        },
+        "disconnect_intervals": [],
+        "disconnect_total_seconds": 0,
+        "disclaimer": {},
+        "artifacts": artifacts,
+        "adoption": {
+            "reason": "orphan_folder_without_manifest",
+            "adopted_at": now.isoformat(),
+        },
+    }
+    write_manifest(manifest_path, payload)
+
+    profile_store.ensure_profile(profile)
+    record = {
+        "session_id": session_id,
+        "profile_name": profile,
+        "started_at": started.isoformat(),
+        "ended_at": ended.isoformat(),
+        "state": state,
+        "session_dir": str(session_dir),
+        "csv_path": str(csv_path),
+    }
+    profile_store._upsert_session_history_rows([record])
+    hr_vals = list(data.get("hr_values") or [])
+    rmssd_vals = list(data.get("rmssd_values") or [])
+    avg_hr = sum(hr_vals) / len(hr_vals) if hr_vals else None
+    profile_store.record_session_trend(
+        profile_name=profile,
+        session_id=session_id,
+        ended_at=ended,
+        avg_hr=avg_hr,
+        avg_rmssd=_rmssd_trend_average(rmssd_vals),
+    )
+    return record
 
 
 def replay_data_from_ibi_ms(

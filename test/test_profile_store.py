@@ -366,6 +366,221 @@ class ProfileStoreTests(unittest.TestCase):
 
             self.assertEqual(store.fill_missing_session_trends_from_manifests(), 0)
 
+    def _write_copied_session(
+        self,
+        session_dir: Path,
+        *,
+        session_id: str,
+        profile_id: str,
+        stale_csv: Path,
+    ) -> None:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        (session_dir / "session.csv").write_text("t,hr\n", encoding="utf-8")
+        (session_dir / "session_manifest.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "session_id": session_id,
+                    "profile_id": profile_id,
+                    "state": "finalized",
+                    "timing": {
+                        "started_at": "2026-04-05T21:06:27",
+                        "ended_at": "2026-04-05T21:10:00",
+                    },
+                    "metrics": {"last_hr": 71.0, "last_rmssd": 28.0},
+                    "artifacts": {"csv": {"path": str(stale_csv), "exists": True}},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_save_path_audit_adopts_renamed_profile_and_local_csv(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Sandy Koblich")
+            store.ensure_profile("Joel Koblich")
+            save_path = root / "Sessions" / "Sandy Koblich"
+            stale_csv = Path(r"C:\missing\Sessions\Sandy\2026\2026-04-05\sess\session.csv")
+            copied = save_path / "2026" / "2026-04-05" / "20260405-210627"
+            kept = save_path / "2026" / "2026-04-06" / "20260406-223113"
+            self._write_copied_session(
+                copied,
+                session_id="20260405-210627",
+                profile_id="Sandy",
+                stale_csv=stale_csv,
+            )
+            self._write_copied_session(
+                kept,
+                session_id="20260406-223113",
+                profile_id="Joel Koblich",
+                stale_csv=stale_csv,
+            )
+
+            audit = store.audit_session_history_integrity(
+                scan_roots=[save_path],
+                owned_roots=[(save_path, "Sandy Koblich")],
+            )
+            by_id = {row["session_id"]: row for row in audit["missing_in_db"]}
+            adopted = by_id["20260405-210627"]
+            self.assertEqual(adopted["profile_name"], "Sandy Koblich")
+            self.assertEqual(Path(adopted["csv_path"]), copied / "session.csv")
+            self.assertEqual(by_id["20260406-223113"]["profile_name"], "Joel Koblich")
+
+            store.repair_session_history_integrity(audit=audit, fill_missing_session_trends=False)
+            sandy = store.list_sessions("Sandy Koblich", include_hidden=True)
+            joel = store.list_sessions("Joel Koblich", include_hidden=True)
+            self.assertEqual([row["session_id"] for row in sandy], ["20260405-210627"])
+            self.assertEqual([row["session_id"] for row in joel], ["20260406-223113"])
+            self.assertNotIn("Sandy", store.list_profiles(include_archived=True))
+
+    def test_index_save_path_adds_session_once(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Sandy Koblich")
+            save_path = root / "Sessions" / "Sandy Koblich"
+            session_dir = save_path / "2026" / "2026-04-16" / "20260416-182402"
+            self._write_copied_session(
+                session_dir,
+                session_id="20260416-182402",
+                profile_id="Sandy",
+                stale_csv=root / "gone" / "session.csv",
+            )
+            store.set_profile_pref(
+                "Sandy Koblich",
+                "setting:SESSION_SAVE_PATH",
+                str(save_path),
+            )
+
+            added = store.index_profile_save_path_sessions("Sandy Koblich")
+            self.assertEqual(added, 1)
+            rows = store.list_sessions("Sandy Koblich", include_hidden=True)
+            self.assertEqual(rows[0]["session_id"], "20260416-182402")
+            self.assertEqual(Path(rows[0]["csv_path"]), session_dir / "session.csv")
+            self.assertEqual(store.index_profile_save_path_sessions("Sandy Koblich"), 0)
+            trends = store.list_session_trends("Sandy Koblich", span="year")
+            self.assertEqual([row["session_id"] for row in trends], ["20260416-182402"])
+
+    def test_merge_profiles_keeps_master_and_moves_sessions(self):
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Sandy")
+            store.ensure_profile("Sandy Koblich")
+            store.set_last_active_profile("Sandy")
+            store.set_profile_pref("Sandy", "hide_disclaimer", "1")
+            store.set_profile_pref("Sandy", "setting:SESSION_SAVE_PATH", str(root / "Sessions" / "Sandy"))
+            store.set_profile_pref("Sandy Koblich", "connection_mode", "phone")
+            store.update_profile_details("Sandy", dob="1980-01-15", notes="from sandy")
+            store.update_profile_details("Sandy Koblich", gender="F")
+
+            sandy_dir = root / "Sessions" / "Sandy" / "2026" / "2026-04-05" / "20260405-210627"
+            sandy_dir.mkdir(parents=True, exist_ok=True)
+            (sandy_dir / "session.csv").write_text("t,hr\n", encoding="utf-8")
+            b = _bundle(root, "20260405-210627")
+            b.session_dir = sandy_dir
+            b.csv_path = sandy_dir / "session.csv"
+            b.started_at = datetime.fromisoformat("2026-04-05T21:06:27")
+            store.record_session_started("Sandy", b)
+            store.record_session_finished("20260405-210627", "finalized")
+            store.record_session_trend(
+                "Sandy",
+                "20260405-210627",
+                "2026-04-05T21:10:00",
+                avg_hr=71.0,
+                avg_rmssd=28.0,
+            )
+            store.remember_phone_bridge_import("Sandy", "phone-1", "20260405-210627")
+
+            master_dir = (
+                root / "Sessions" / "Sandy Koblich" / "2026" / "2026-04-05" / "20260405-210627"
+            )
+            master_dir.parent.mkdir(parents=True, exist_ok=True)
+            sandy_dir.rename(master_dir)
+            result = store.merge_profiles(
+                "Sandy",
+                "Sandy Koblich",
+                session_updates=[
+                    {
+                        "session_id": "20260405-210627",
+                        "session_dir": str(master_dir),
+                        "csv_path": str(master_dir / "session.csv"),
+                    }
+                ],
+            )
+
+            self.assertEqual(result["reassigned_with_path"], 1)
+            self.assertNotIn("Sandy", store.list_profiles(include_archived=True))
+            self.assertIn("Sandy Koblich", store.list_profiles())
+            self.assertEqual(store.get_last_active_profile(), "Sandy Koblich")
+            rows = store.list_sessions("Sandy Koblich", include_hidden=True)
+            self.assertEqual([row["session_id"] for row in rows], ["20260405-210627"])
+            self.assertEqual(Path(rows[0]["session_dir"]), master_dir)
+            trends = store.list_session_trends("Sandy Koblich", span="year")
+            self.assertEqual([row["session_id"] for row in trends], ["20260405-210627"])
+            self.assertEqual(store.get_profile_pref("Sandy Koblich", "hide_disclaimer"), "1")
+            self.assertEqual(store.get_profile_pref("Sandy Koblich", "connection_mode"), "phone")
+            self.assertEqual(
+                store.get_profile_pref("Sandy Koblich", "setting:SESSION_SAVE_PATH", ""),
+                "",
+            )
+            details = store.get_profile_details("Sandy Koblich")
+            self.assertEqual(details["dob"], "1980-01-15")
+            self.assertEqual(details["gender"], "F")
+            self.assertEqual(details["notes"], "from sandy")
+            self.assertEqual(
+                store.get_phone_bridge_imported_session_id("Sandy Koblich", "phone-1"),
+                "20260405-210627",
+            )
+
+    def test_merge_profiles_rejects_same_name(self):
+        with TemporaryDirectory() as tmp:
+            store = ProfileStore(Path(tmp))
+            store.ensure_profile("Sandy Koblich")
+            with self.assertRaises(ValueError):
+                store.merge_profiles("Sandy Koblich", "Sandy Koblich")
+
+    def test_index_adopts_orphan_edf_folder_without_manifest(self):
+        from hnh.import_session import write_session_csv
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            store.ensure_profile("Sandy Koblich")
+            save_path = root / "Sessions" / "Sandy Koblich"
+            session_dir = save_path / "2026" / "2023-02-27" / "20260227-094043"
+            session_dir.mkdir(parents=True)
+            # Orphan folder: CSV only, no manifest (same discovery path as EDF-only).
+            write_session_csv(
+                session_dir / "session.csv",
+                {
+                    "started_at": "2026-02-27T09:40:43",
+                    "hr_times": [0.0, 1.0, 2.0],
+                    "hr_values": [70.0, 72.0, 71.0],
+                    "rmssd_times": [1.0, 2.0],
+                    "rmssd_values": [25.0, 27.0],
+                    "hrv_times": [],
+                    "hrv_values": [],
+                    "annotations": [],
+                },
+            )
+            (session_dir / "session_report.docx").write_bytes(b"PK\x03\x04fake")
+            store.set_profile_pref(
+                "Sandy Koblich",
+                "setting:SESSION_SAVE_PATH",
+                str(save_path),
+            )
+
+            added = store.index_profile_save_path_sessions("Sandy Koblich")
+            self.assertGreaterEqual(added, 1)
+            self.assertTrue((session_dir / "session_manifest.json").is_file())
+            rows = store.list_sessions("Sandy Koblich", include_hidden=True)
+            self.assertEqual(rows[0]["session_id"], "20260227-094043")
+            self.assertEqual(rows[0]["profile_name"], "Sandy Koblich")
+            self.assertEqual(rows[0]["state"], "finalized")
+            self.assertEqual(store.index_profile_save_path_sessions("Sandy Koblich"), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

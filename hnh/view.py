@@ -1751,6 +1751,7 @@ class SessionHistoryDialog(QDialog):
     def _reload_history(self):
         if self._profile_store is None:
             return
+        self._profile_store.index_profile_save_path_sessions(self._profile_name)
         sessions = self._profile_store.list_sessions(
             profile_name=self._profile_name,
             include_hidden=True,
@@ -2592,6 +2593,7 @@ class TrendsWindow(QMainWindow):
 
     def _refresh_plot(self):
         profile = self._profile_combo.currentText().strip() or self._active_profile
+        self._profile_store.index_profile_save_path_sessions(profile)
         raw_rs = self._profile_store.get_profile_pref(
             profile, TIER1_PREF_RECOVERY_SESSIONS, "14"
         )
@@ -2924,6 +2926,7 @@ class TrendsWindow(QMainWindow):
     def _refresh_compare_session_list(self):
         """Load session list from profile_store. Build trends lookup for table data."""
         profile = self._compare_profile_combo.currentText().strip() or self._active_profile
+        self._profile_store.index_profile_save_path_sessions(profile)
         sessions = self._profile_store.list_sessions(
             profile,
             include_hidden=self._show_hidden_sessions,
@@ -3454,6 +3457,106 @@ class SessionReassignDialog(QDialog):
         self.accept()
 
 
+class MergeProfilesDialog(QDialog):
+    """Admin utility: merge one profile into another and delete the duplicate."""
+
+    def __init__(self, store: ProfileStore, active_profile: str, parent=None):
+        super().__init__(parent)
+        self._store = store
+        self._active_profile = str(active_profile or "").strip() or "Admin"
+        self._source_profile = self._active_profile
+        self._master_profile = self._active_profile
+        self.setModal(True)
+        self.setWindowTitle("Merge Profiles")
+        self.resize(640, 320)
+
+        root = QVBoxLayout(self)
+        intro = QLabel(
+            "Merge a duplicate profile into a master profile. All sessions and trends "
+            "move to the master name, folders are relocated when possible, and the "
+            "duplicate profile is deleted. Master settings and password are kept; "
+            "missing master fields and prefs are filled from the duplicate."
+        )
+        intro.setWordWrap(True)
+        root.addWidget(intro)
+
+        controls = QFormLayout()
+        self._source_combo = QComboBox()
+        self._master_combo = QComboBox()
+        for name in self._store.list_profiles(include_archived=True):
+            self._source_combo.addItem(name)
+            self._master_combo.addItem(name)
+        src_idx = self._source_combo.findText(self._active_profile, Qt.MatchFixedString)
+        if src_idx >= 0:
+            self._source_combo.setCurrentIndex(src_idx)
+        master_idx = self._master_combo.findText(self._active_profile, Qt.MatchFixedString)
+        if master_idx >= 0:
+            self._master_combo.setCurrentIndex(master_idx)
+        controls.addRow("Merge from (duplicate):", self._source_combo)
+        controls.addRow("Keep as master:", self._master_combo)
+        root.addLayout(controls)
+
+        self._preview = QLabel("")
+        self._preview.setWordWrap(True)
+        self._preview.setStyleSheet("font-size: 11px; color: #495057;")
+        root.addWidget(self._preview)
+
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        self._run_btn = QPushButton("Merge profiles…")
+        self._run_btn.clicked.connect(self._accept_with_validation)
+        buttons.addWidget(self._run_btn)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(cancel_btn)
+        root.addLayout(buttons)
+
+        self._source_combo.currentIndexChanged.connect(self._update_preview)
+        self._master_combo.currentIndexChanged.connect(self._update_preview)
+        self._update_preview()
+
+    @property
+    def source_profile(self) -> str:
+        return self._source_profile
+
+    @property
+    def master_profile(self) -> str:
+        return self._master_profile
+
+    def _update_preview(self):
+        source = str(self._source_combo.currentText() or "").strip()
+        master = str(self._master_combo.currentText() or "").strip()
+        if not source or not master or source.casefold() == master.casefold():
+            self._preview.setText("Choose two different profiles.")
+            self._run_btn.setEnabled(False)
+            return
+        source_sessions = self._store.list_sessions(
+            profile_name=source, include_hidden=True, limit=5000
+        )
+        master_sessions = self._store.list_sessions(
+            profile_name=master, include_hidden=True, limit=5000
+        )
+        self._preview.setText(
+            f"'{source}' has {len(source_sessions)} session(s). "
+            f"'{master}' currently has {len(master_sessions)} session(s).\n"
+            f"After merge, everything stays under '{master}' and '{source}' is removed."
+        )
+        self._run_btn.setEnabled(True)
+
+    def _accept_with_validation(self):
+        source = str(self._source_combo.currentText() or "").strip()
+        master = str(self._master_combo.currentText() or "").strip()
+        if not source or not master:
+            _warning_ok(self, "Merge Profiles", "Select both profiles.")
+            return
+        if source.casefold() == master.casefold():
+            _warning_ok(self, "Merge Profiles", "Source and master profiles must differ.")
+            return
+        self._source_profile = source
+        self._master_profile = master
+        self.accept()
+
+
 class DuplicateSessionResolveDialog(QDialog):
     """Explorer-style resolution for duplicate session folders sharing one session ID."""
 
@@ -3619,6 +3722,7 @@ class SessionIntegrityDialog(QDialog):
         self,
         store: ProfileStore,
         scan_root_entries: list[tuple[str, Path]],
+        owned_roots: list[tuple[Path, str]] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -3626,6 +3730,11 @@ class SessionIntegrityDialog(QDialog):
         # (label, path, removable)
         self._root_entries: list[tuple[str, Path, bool]] = [
             (str(label), Path(path), False) for label, path in scan_root_entries
+        ]
+        self._owned_roots: list[tuple[Path, str]] = [
+            (Path(path), str(profile))
+            for path, profile in (owned_roots or [])
+            if str(profile or "").strip()
         ]
         self._last_audit: dict | None = None
 
@@ -3637,7 +3746,9 @@ class SessionIntegrityDialog(QDialog):
         intro = QLabel(
             "Audit DB session history vs session folders on disk, then apply targeted repairs.\n"
             "Scan roots always include App Data Sessions plus each profile’s Session Save Path "
-            "(when set). Add any other folder tree that contains sessions (e.g. a copied Sessions folder)."
+            "(when set). Add any other folder tree that contains sessions (e.g. a copied Sessions folder).\n"
+            "A folder under a profile’s Session Save Path is assigned to that profile when the "
+            "manifest profile name is not an existing profile (for example after a rename)."
         )
         intro.setWordWrap(True)
         root.addWidget(intro)
@@ -3854,9 +3965,10 @@ class SessionIntegrityDialog(QDialog):
         missing_in_db = list(audit.get("missing_in_db") or [])
         path_mismatch = list(audit.get("path_mismatch") or [])
         profile_mismatch = list(audit.get("profile_mismatch") or [])
+        orphan_folders = list(audit.get("orphan_folders") or [])
         if rm and missing_on_disk:
             return True
-        if ad and missing_in_db:
+        if ad and (missing_in_db or orphan_folders):
             return True
         if rp and (path_mismatch or profile_mismatch):
             return True
@@ -3882,6 +3994,7 @@ class SessionIntegrityDialog(QDialog):
         missing_in_db = list(audit.get("missing_in_db") or [])
         path_mismatch = list(audit.get("path_mismatch") or [])
         profile_mismatch = list(audit.get("profile_mismatch") or [])
+        orphan_folders = list(audit.get("orphan_folders") or [])
         dup_ids = list(audit.get("duplicate_disk_session_ids") or [])
         lines: list[str] = [
             "Session integrity audit",
@@ -3892,6 +4005,7 @@ class SessionIntegrityDialog(QDialog):
             "",
             f"Missing on disk (DB-only): {len(missing_on_disk)}",
             f"Missing in DB (disk-only): {len(missing_in_db)}",
+            f"Orphan folders (EDF/CSV, no manifest): {len(orphan_folders)}",
             f"Path mismatches: {len(path_mismatch)}",
             f"Profile mismatches: {len(profile_mismatch)}",
             f"Duplicate session IDs (folders) on disk: {len(dup_ids)}",
@@ -3906,7 +4020,26 @@ class SessionIntegrityDialog(QDialog):
             lines.append("")
         if missing_in_db:
             lines.append("Sample missing in DB:")
-            lines.extend(self._sample_lines(missing_in_db, "session_dir"))
+            for row in missing_in_db[:10]:
+                sid = str(row.get("session_id") or "").strip()
+                profile = str(row.get("profile_name") or "").strip() or "?"
+                folder = str(row.get("session_dir") or "").strip()
+                if sid and folder:
+                    lines.append(f"  - {sid} [{profile}]: {folder}")
+                elif sid:
+                    lines.append(f"  - {sid} [{profile}]")
+            lines.append("")
+        if orphan_folders:
+            lines.append(
+                "Orphan folders (copied under a Session Save Path without a manifest). "
+                "Repair will rebuild session.csv/manifest and add them to history:"
+            )
+            for row in orphan_folders[:10]:
+                sid = str(row.get("session_id") or "").strip()
+                owner = str(row.get("owner_profile") or "").strip() or "(no owner)"
+                folder = str(row.get("session_dir") or "").strip()
+                if sid and folder:
+                    lines.append(f"  - {sid} → {owner}: {folder}")
             lines.append("")
         if path_mismatch:
             lines.append("Sample path mismatches:")
@@ -4086,6 +4219,10 @@ class SessionIntegrityDialog(QDialog):
                     result = self._store.resolve_disk_duplicate_session(
                         keep_session_dir=keep_dir,
                         remove_session_dirs=remove_dirs,
+                        owner_profile=ProfileStore.owner_profile_for_path(
+                            Path(keep_dir),
+                            self._owned_roots,
+                        ),
                     )
                     removed_folders += int(result.get("removed_folders") or 0)
                     upserted += int(result.get("upserted_rows") or 0)
@@ -4101,9 +4238,7 @@ class SessionIntegrityDialog(QDialog):
 
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            refreshed = self._store.audit_session_history_integrity(
-                scan_roots=self._current_scan_roots()
-            )
+            refreshed = self._run_audit()
         finally:
             QApplication.restoreOverrideCursor()
         self._last_audit = refreshed
@@ -4120,12 +4255,16 @@ class SessionIntegrityDialog(QDialog):
         self._refresh_duplicate_ui(refreshed)
         self._update_apply_enabled()
 
+    def _run_audit(self) -> dict:
+        return self._store.audit_session_history_integrity(
+            scan_roots=self._current_scan_roots(),
+            owned_roots=self._owned_roots,
+        )
+
     def _analyze(self):
         QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            audit = self._store.audit_session_history_integrity(
-                scan_roots=self._current_scan_roots()
-            )
+            audit = self._run_audit()
         finally:
             QApplication.restoreOverrideCursor()
         self._last_audit = audit
@@ -4158,9 +4297,7 @@ class SessionIntegrityDialog(QDialog):
                 repair_mismatched_rows=bool(self._repair_mismatch_cb.isChecked()),
                 fill_missing_session_trends=bool(self._fill_trends_cb.isChecked()),
             )
-            refreshed = self._store.audit_session_history_integrity(
-                scan_roots=self._current_scan_roots()
-            )
+            refreshed = self._run_audit()
         finally:
             QApplication.restoreOverrideCursor()
         self._last_audit = refreshed
@@ -4170,6 +4307,7 @@ class SessionIntegrityDialog(QDialog):
             + f"  Removed DB rows: {int(result.get('removed_rows') or 0)}\n"
             + f"  Removed trends rows: {int(result.get('removed_trends') or 0)}\n"
             + f"  Upserted DB rows: {int(result.get('upserted_rows') or 0)}\n"
+            + f"  Adopted orphan folders: {int(result.get('adopted_orphans') or 0)}\n"
             + f"  Filled Trends rows: {int(result.get('filled_trends_rows') or 0)}"
         )
         self._refresh_duplicate_ui(refreshed)
@@ -7779,7 +7917,8 @@ class View(QMainWindow):
         self._more_button.setText("More")
         self._more_button.setToolTip(
             "Additional actions: Session History, Session Replay, Trends, Profiles, "
-            "Session Admin, Support Development, Import, Help, Legal Disclaimer."
+            "Reassign, Merge Profiles, Session Integrity, Support Development, Import, "
+            "Help, Legal Disclaimer."
         )
         self._more_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._more_menu = QMenu()
@@ -7792,6 +7931,9 @@ class View(QMainWindow):
         )
         self._more_reassign_action = self._more_menu.addAction(
             "Reassign Session(s)…", self._open_session_reassign_utility
+        )
+        self._more_merge_action = self._more_menu.addAction(
+            "Merge Profiles…", self._open_merge_profiles_utility
         )
         self._more_integrity_action = self._more_menu.addAction(
             "Session Integrity Audit…", self._open_session_integrity_utility
@@ -11396,6 +11538,7 @@ class View(QMainWindow):
         self._refresh_annotation_list()
 
     def _open_history(self, tab: str = "history"):
+        self._profile_store.index_profile_save_path_sessions(self._session_profile_id)
         sessions = self._profile_store.list_sessions(
             profile_name=self._session_profile_id,
             include_hidden=True,
@@ -11582,6 +11725,35 @@ class View(QMainWindow):
             _add(f"Session Save Path [{active}] (current UI)", Path(current_path))
         return entries
 
+    def _session_integrity_owned_roots(self) -> list[tuple[Path, str]]:
+        """Profile that owns each Session Save Path, including paths nested under App Data."""
+        owned: list[tuple[Path, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def _add(path: Path, profile: str) -> None:
+            label = str(profile or "").strip()
+            key = (str(path).strip().casefold(), label.casefold())
+            if not label or not key[0] or key in seen:
+                return
+            seen.add(key)
+            owned.append((Path(path), label))
+
+        save_key = self._profile_setting_pref_key("SESSION_SAVE_PATH")
+        for profile in self._profile_store.list_profiles(include_archived=True):
+            raw = str(self._profile_store.get_profile_pref(profile, save_key, "") or "").strip()
+            if raw:
+                _add(Path(raw), profile)
+            else:
+                _add(
+                    self._session_root / "Sessions" / _slugify_profile(profile),
+                    profile,
+                )
+        current_path = str(getattr(self.settings, "SESSION_SAVE_PATH", "") or "").strip()
+        active = str(self._session_profile_id or "").strip()
+        if current_path and active:
+            _add(Path(current_path), active)
+        return owned
+
     def _session_integrity_scan_roots(self) -> list[Path]:
         """Nest-deduped paths used for disk scans."""
         exact = [path for _label, path in self._session_integrity_scan_root_entries()]
@@ -11607,9 +11779,163 @@ class View(QMainWindow):
         dlg = SessionIntegrityDialog(
             store=self._profile_store,
             scan_root_entries=self._session_integrity_scan_root_entries(),
+            owned_roots=self._session_integrity_owned_roots(),
             parent=self,
         )
         dlg.exec()
+
+    def _open_merge_profiles_utility(self):
+        if self._session_state == "recording":
+            self.show_status("Profile merge is unavailable during an active recording.")
+            return
+        if not self._profile_store.profile_is_admin(self._session_profile_id):
+            _warning_ok(
+                self,
+                "Admin Only",
+                "Profile merge is available to Admin profiles only.",
+            )
+            return
+        if len(self._profile_store.list_profiles(include_archived=True)) < 2:
+            _warning_ok(self, "Merge Profiles", "At least two profiles are required to merge.")
+            return
+        dlg = MergeProfilesDialog(
+            store=self._profile_store,
+            active_profile=self._session_profile_id,
+            parent=self,
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        source = dlg.source_profile
+        master = dlg.master_profile
+        confirm = QMessageBox.question(
+            self,
+            "Confirm Profile Merge",
+            (
+                f"Merge '{source}' into '{master}'?\n\n"
+                f"• All sessions and trends from '{source}' move to '{master}'\n"
+                f"• Session folders are relocated when possible\n"
+                f"• '{master}' settings and password are kept\n"
+                f"• '{source}' is deleted after the merge\n\n"
+                "This cannot be undone."
+            ),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        # Pick up disk-only sessions under the duplicate save path before retargeting.
+        self._profile_store.index_profile_save_path_sessions(source)
+        rows = self._profile_store.list_sessions(
+            profile_name=source,
+            include_hidden=True,
+            limit=5000,
+        )
+        moved_updates: list[dict[str, str]] = []
+        failed: list[tuple[str, str]] = []
+        rebuilt = 0
+        self.show_status(f"Merging '{source}' into '{master}'...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            for row in rows:
+                sid = str(row.get("session_id") or "").strip()
+                src_dir = Path(str(row.get("session_dir") or "").strip())
+                src_csv = Path(str(row.get("csv_path") or "").strip())
+                if not sid:
+                    failed.append(("(unknown)", "Missing session_id in history row."))
+                    continue
+                if not src_dir.exists():
+                    # Still retarget in DB; report the missing folder.
+                    moved_updates.append(
+                        {
+                            "session_id": sid,
+                            "session_dir": str(src_dir),
+                            "csv_path": str(
+                                src_csv if str(src_csv).strip() else (src_dir / "session.csv")
+                            ),
+                        }
+                    )
+                    failed.append((sid, f"Session folder not found: {src_dir}"))
+                    continue
+                try:
+                    target_dir = self._derive_target_session_dir(src_dir, master)
+                    target_dir.parent.mkdir(parents=True, exist_ok=True)
+                    if src_dir.resolve() != target_dir.resolve():
+                        shutil.move(str(src_dir), str(target_dir))
+                    else:
+                        target_dir = src_dir
+                    local_csv = target_dir / "session.csv"
+                    if local_csv.is_file():
+                        target_csv = local_csv
+                    elif src_csv.name:
+                        target_csv = target_dir / src_csv.name
+                    else:
+                        target_csv = local_csv
+                    moved_updates.append(
+                        {
+                            "session_id": sid,
+                            "session_dir": str(target_dir),
+                            "csv_path": str(target_csv),
+                        }
+                    )
+                    self._rewrite_manifest_profile_id(target_dir, master)
+                    try:
+                        generate_reports_for_session_dir(target_dir, profile_name=master)
+                        rebuilt += 1
+                    except Exception:
+                        pass
+                except Exception as exc:
+                    failed.append((sid, str(exc) or "Unknown merge error."))
+
+            result = self._profile_store.merge_profiles(
+                source,
+                master,
+                session_updates=moved_updates,
+            )
+            self._profile_store.index_profile_save_path_sessions(master)
+        except Exception as exc:
+            _warning_ok(self, "Merge Profiles", f"Merge failed:\n\n{exc}")
+            self.show_status(f"Profile merge failed: {exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        was_active_source = self._session_profile_id.casefold() == source.casefold()
+        if was_active_source:
+            self._set_active_profile(master, announce=True)
+
+        details = (
+            f"Merged '{source}' into '{master}'.\n\n"
+            f"Sessions considered: {len(rows)}\n"
+            f"Path updates applied: {int(result.get('reassigned_with_path') or 0)}\n"
+            f"Reports rebuilt: {rebuilt}\n"
+            f"Prefs copied to master: {int(result.get('prefs_copied') or 0)}\n"
+            f"Folder issues: {len(failed)}"
+        )
+        if failed:
+            failed_lines = [f"{sid}: {reason}" for sid, reason in failed[:25]]
+            QMessageBox.warning(
+                self,
+                "Profile Merge Completed with Issues",
+                details + "\n\nFolder issues:\n" + "\n".join(failed_lines),
+            )
+            self.show_status(
+                f"Merged '{source}' into '{master}' with {len(failed)} folder issue(s)."
+            )
+        else:
+            QMessageBox.information(self, "Profile Merge Complete", details)
+            self.show_status(f"Merged '{source}' into '{master}'.")
+
+        if getattr(self, "_history_window", None) is not None:
+            sessions = self._profile_store.list_sessions(
+                profile_name=self._session_profile_id,
+                include_hidden=True,
+                limit=200,
+            )
+            self._history_window.set_context(self._session_profile_id, sessions)
+        if getattr(self, "_trends_window", None) is not None:
+            self._trends_window.set_active_profile(self._session_profile_id)
 
     def _open_session_reassign_utility(self):
         if self._session_state == "recording":
@@ -11821,6 +12147,20 @@ class View(QMainWindow):
             else:
                 reassign.setEnabled(True)
                 reassign.setToolTip("")
+
+        merge_profiles = getattr(self, "_more_merge_action", None)
+        if merge_profiles is not None:
+            if is_recording:
+                merge_profiles.setEnabled(False)
+                merge_profiles.setToolTip(recording_tip)
+            elif not is_admin:
+                merge_profiles.setEnabled(False)
+                merge_profiles.setToolTip("Available to Admin profiles only")
+            else:
+                merge_profiles.setEnabled(True)
+                merge_profiles.setToolTip(
+                    "Combine a duplicate profile into a master profile, then delete the duplicate."
+                )
 
         integrity = getattr(self, "_more_integrity_action", None)
         if integrity is not None:

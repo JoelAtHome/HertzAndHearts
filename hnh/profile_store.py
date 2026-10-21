@@ -12,7 +12,12 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from typing import Any
 
-from hnh.session_artifacts import SessionBundle, canonicalize_disk_profile_label, write_manifest
+from hnh.session_artifacts import (
+    SessionBundle,
+    _slugify,
+    canonicalize_disk_profile_label,
+    write_manifest,
+)
 
 
 def _float_or_none(value) -> float | None:
@@ -1321,12 +1326,155 @@ class ProfileStore:
             )
         return out
 
+    def profile_session_save_path(self, profile_name: str) -> Path:
+        """Configured Session Save Path, or App Data Sessions/{profile} when unset."""
+        profile = self._normalize_profile(profile_name)
+        raw = str(self.get_profile_pref(profile, "setting:SESSION_SAVE_PATH", "") or "").strip()
+        if raw:
+            return Path(raw)
+        return self._root / "Sessions" / _slugify(profile)
+
+    def _profile_names_by_casefold(self) -> dict[str, str]:
+        with self._db() as conn:
+            rows = conn.execute("SELECT name FROM profiles").fetchall()
+        out: dict[str, str] = {}
+        for row in rows:
+            name = str(row["name"] or "").strip()
+            if name:
+                out[name.casefold()] = name
+        return out
+
+    @staticmethod
+    def owner_profile_for_path(
+        path: Path,
+        owned_roots: list[tuple[Path, str]] | None,
+    ) -> str | None:
+        """Most specific Session Save Path owner that contains path, if any."""
+        if not owned_roots:
+            return None
+        try:
+            target = Path(path).resolve()
+        except OSError:
+            target = Path(path)
+        best: str | None = None
+        best_len = -1
+        for root, profile in owned_roots:
+            label = str(profile or "").strip()
+            if not label:
+                continue
+            try:
+                root_resolved = Path(root).resolve()
+            except OSError:
+                root_resolved = Path(root)
+            try:
+                target.relative_to(root_resolved)
+            except ValueError:
+                continue
+            length = len(str(root_resolved))
+            if length > best_len:
+                best = label
+                best_len = length
+        return best
+
+    def _attribute_profile_name(
+        self,
+        manifest_profile: str,
+        *,
+        owner_profile: str | None,
+        known_profiles: dict[str, str],
+        inferred_profile: str,
+    ) -> str:
+        """
+        History profile for a session folder.
+
+        The Session Save Path owner wins when manifest profile_id is blank or is not
+        an existing profile. That covers a rename: the folder lives under
+        "Sandy Koblich" while the manifest still says "Sandy". A manifest that names
+        a different existing profile is left alone.
+        """
+        owner = str(owner_profile or "").strip()
+        owner_canonical = known_profiles.get(owner.casefold(), owner) if owner else ""
+        raw = str(manifest_profile or "").strip()
+        if owner_canonical:
+            if not raw:
+                return owner_canonical
+            canon = canonicalize_disk_profile_label(raw)
+            known = known_profiles.get(canon.casefold())
+            if known is not None and known.casefold() != owner_canonical.casefold():
+                return known
+            return known if known is not None else owner_canonical
+        fallback = raw or inferred_profile or self._LEGACY_PROFILE_NAME
+        return canonicalize_disk_profile_label(self._normalize_profile(fallback))
+
+    @staticmethod
+    def _resolve_manifest_csv_path(session_dir: Path, payload: dict[str, Any]) -> Path:
+        """
+        Prefer a CSV that is actually on disk.
+
+        Older manifests store an absolute path from the machine that recorded the
+        session. After the folder is copied, that path is stale while session.csv
+        sits next to the manifest.
+        """
+        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
+        csv_meta = artifacts.get("csv") if isinstance(artifacts, dict) else {}
+        csv_raw = csv_meta.get("path") if isinstance(csv_meta, dict) else None
+        candidates: list[Path] = []
+        if csv_raw:
+            recorded = Path(str(csv_raw))
+            if not recorded.is_absolute():
+                recorded = session_dir / recorded
+            candidates.append(recorded)
+            named = session_dir / Path(str(csv_raw)).name
+            if named not in candidates:
+                candidates.append(named)
+        local = session_dir / "session.csv"
+        if local not in candidates:
+            candidates.append(local)
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate
+            except OSError:
+                continue
+        return candidates[0] if candidates else local
+
+    @staticmethod
+    def _path_identity(value: str | None) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return ""
+        try:
+            return str(Path(raw).resolve()).casefold()
+        except OSError:
+            return raw.casefold()
+
+    def _history_row_matches_disk(
+        self,
+        current: dict[str, str | None],
+        disk: dict[str, str | None],
+    ) -> bool:
+        if str(current.get("profile_name") or "").casefold() != str(disk.get("profile_name") or "").casefold():
+            return False
+        if str(current.get("state") or "") != str(disk.get("state") or ""):
+            return False
+        if str(current.get("started_at") or "") != str(disk.get("started_at") or ""):
+            return False
+        if str(current.get("ended_at") or "") != str(disk.get("ended_at") or ""):
+            return False
+        if self._path_identity(current.get("session_dir")) != self._path_identity(disk.get("session_dir")):
+            return False
+        if self._path_identity(current.get("csv_path")) != self._path_identity(disk.get("csv_path")):
+            return False
+        return True
+
     def _session_record_from_manifest(
         self,
         *,
         manifest_path: Path,
         scan_root: Path,
         fallback_now: datetime,
+        owner_profile: str | None = None,
+        known_profiles: dict[str, str] | None = None,
     ) -> dict[str, str | None] | None:
         session_dir = manifest_path.parent
         payload: dict[str, Any] = {}
@@ -1345,22 +1493,14 @@ class ProfileStore:
         ended_at_val = timing.get("ended_at") if isinstance(timing, dict) else None
         ended_at = str(ended_at_val).strip() if ended_at_val else None
         state = str(payload.get("state") or "finalized").strip() or "finalized"
-        profile_name = str(payload.get("profile_id") or "").strip()
-        if not profile_name:
-            profile_name = self._infer_profile_name(session_dir, scan_root)
-        profile_name = canonicalize_disk_profile_label(
-            self._normalize_profile(profile_name or self._LEGACY_PROFILE_NAME)
+        known = known_profiles if known_profiles is not None else self._profile_names_by_casefold()
+        profile_name = self._attribute_profile_name(
+            str(payload.get("profile_id") or "").strip(),
+            owner_profile=owner_profile,
+            known_profiles=known,
+            inferred_profile=self._infer_profile_name(session_dir, scan_root),
         )
-
-        artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
-        csv_meta = artifacts.get("csv") if isinstance(artifacts, dict) else {}
-        csv_raw = csv_meta.get("path") if isinstance(csv_meta, dict) else None
-        if csv_raw:
-            csv_path = Path(str(csv_raw))
-            if not csv_path.is_absolute():
-                csv_path = session_dir / csv_path
-        else:
-            csv_path = session_dir / "session.csv"
+        csv_path = self._resolve_manifest_csv_path(session_dir, payload)
 
         return {
             "session_id": session_id,
@@ -1389,6 +1529,7 @@ class ProfileStore:
         *,
         keep_session_dir: str,
         remove_session_dirs: list[str],
+        owner_profile: str | None = None,
     ) -> dict[str, int]:
         """
         Keep one session folder and delete other duplicate locations on disk, then upsert DB from the kept manifest.
@@ -1415,6 +1556,7 @@ class ProfileStore:
             manifest_path=manifest_keep,
             scan_root=self._root / "Sessions",
             fallback_now=datetime.now(),
+            owner_profile=owner_profile,
         )
         if rec is None:
             raise ValueError("Could not read kept session manifest.")
@@ -1500,6 +1642,7 @@ class ProfileStore:
         self,
         *,
         scan_roots: list[Path],
+        owned_roots: list[tuple[Path, str]] | None = None,
     ) -> dict[str, Any]:
         roots: list[Path] = []
         seen_roots: set[str] = set()
@@ -1512,6 +1655,8 @@ class ProfileStore:
             roots.append(p)
 
         now = datetime.now()
+        known_profiles = self._profile_names_by_casefold()
+        owned = list(owned_roots or [])
         entries_by_sid: dict[str, list[dict[str, Any]]] = defaultdict(list)
         manifest_count = 0
         for root in roots:
@@ -1523,6 +1668,8 @@ class ProfileStore:
                     manifest_path=manifest_path,
                     scan_root=root,
                     fallback_now=now,
+                    owner_profile=self.owner_profile_for_path(manifest_path.parent, owned),
+                    known_profiles=known_profiles,
                 )
                 if rec is None:
                     continue
@@ -1645,6 +1792,28 @@ class ProfileStore:
             if sid not in db_by_id:
                 missing_in_db.append(disk_row)
 
+        from hnh.import_session import discover_orphan_session_dirs
+
+        orphan_folders: list[dict[str, str]] = []
+        seen_orphans: set[str] = set()
+        for root in roots:
+            for session_dir in discover_orphan_session_dirs(root):
+                try:
+                    key = str(session_dir.resolve()).casefold()
+                except OSError:
+                    key = str(session_dir).casefold()
+                if key in seen_orphans:
+                    continue
+                seen_orphans.add(key)
+                owner = self.owner_profile_for_path(session_dir, owned) or ""
+                orphan_folders.append(
+                    {
+                        "session_id": session_dir.name,
+                        "session_dir": str(session_dir),
+                        "owner_profile": owner,
+                    }
+                )
+
         return {
             "scan_roots": [str(p) for p in roots],
             "db_rows": len(db_by_id),
@@ -1655,6 +1824,7 @@ class ProfileStore:
             "missing_in_db": missing_in_db,
             "path_mismatch": path_mismatch,
             "profile_mismatch": profile_mismatch,
+            "orphan_folders": orphan_folders,
             "duplicate_disk_groups": duplicate_disk_groups,
             "duplicate_disk_session_ids": sorted(
                 {str(g.get("session_id") or "").strip() for g in duplicate_disk_groups if str(g.get("session_id") or "").strip()}
@@ -1665,6 +1835,7 @@ class ProfileStore:
                 or path_mismatch
                 or profile_mismatch
                 or duplicate_disk_groups
+                or orphan_folders
             ),
         }
 
@@ -1681,6 +1852,7 @@ class ProfileStore:
         removed_trends = 0
         upserted_rows = 0
         filled_trends_rows = 0
+        adopted_orphans = 0
 
         if remove_missing_on_disk:
             ids = [
@@ -1694,6 +1866,20 @@ class ProfileStore:
                 removed_trends = int(deleted.get("removed_trends") or 0)
 
         if add_missing_in_db:
+            from hnh.import_session import adopt_existing_session_folder
+
+            for row in list(audit.get("orphan_folders") or []):
+                if not isinstance(row, dict):
+                    continue
+                owner = str(row.get("owner_profile") or "").strip()
+                session_dir = Path(str(row.get("session_dir") or "").strip())
+                if not owner or not str(session_dir):
+                    continue
+                try:
+                    if adopt_existing_session_folder(session_dir, owner, self) is not None:
+                        adopted_orphans += 1
+                except Exception:
+                    continue
             rows = [r for r in list(audit.get("missing_in_db") or []) if isinstance(r, dict)]
             upserted_rows += self._upsert_session_history_rows(rows)
 
@@ -1727,6 +1913,269 @@ class ProfileStore:
             "removed_trends": removed_trends,
             "upserted_rows": upserted_rows,
             "filled_trends_rows": filled_trends_rows,
+            "adopted_orphans": adopted_orphans,
+        }
+
+    def index_profile_save_path_sessions(
+        self,
+        profile_name: str,
+        save_path: Path | None = None,
+    ) -> int:
+        """
+        Add session folders under this profile's Session Save Path to history.
+
+        Manifest profile ids that are not an existing profile are attributed to this
+        profile, and CSV paths that no longer exist fall back to the session.csv in
+        the folder. Rows currently recording are left unchanged.
+        """
+        profile = str(profile_name or "").strip()
+        if not profile:
+            return 0
+        profile = self._normalize_profile(profile)
+        path = Path(save_path) if save_path is not None else self.profile_session_save_path(profile)
+        try:
+            if not path.exists():
+                return 0
+        except OSError:
+            return 0
+
+        # Folders with EDF/CSV but no manifest are invisible until adopted in place.
+        adopted = self.adopt_orphan_session_folders(path, profile)
+
+        try:
+            audit = self.audit_session_history_integrity(
+                scan_roots=[path],
+                owned_roots=[(path, profile)],
+            )
+        except OSError:
+            return adopted
+        disk_rows = [
+            row
+            for row in list(audit.get("disk_records") or [])
+            if isinstance(row, dict)
+            and str(row.get("profile_name") or "").casefold() == profile.casefold()
+        ]
+        if not disk_rows:
+            return adopted
+        ids = [str(row.get("session_id") or "").strip() for row in disk_rows if str(row.get("session_id") or "").strip()]
+        existing = {
+            str(row.get("session_id") or ""): row
+            for row in self.get_sessions_by_ids(ids)
+        }
+        to_write: list[dict[str, str | None]] = []
+        for row in disk_rows:
+            sid = str(row.get("session_id") or "").strip()
+            if not sid:
+                continue
+            current = existing.get(sid)
+            if current is not None and str(current.get("state") or "") == "recording":
+                continue
+            if current is not None and self._history_row_matches_disk(current, row):
+                continue
+            to_write.append(row)
+        if not to_write:
+            return adopted
+        written = self._upsert_session_history_rows(to_write)
+        for row in to_write:
+            ended = row.get("ended_at")
+            if not ended:
+                continue
+            self._ingest_session_trend_from_manifest(
+                session_id=str(row.get("session_id") or ""),
+                profile_name=str(row.get("profile_name") or profile),
+                ended_at=str(ended),
+                session_dir=str(row.get("session_dir") or ""),
+            )
+        return adopted + written
+
+    def adopt_orphan_session_folders(self, root: Path, profile_name: str) -> int:
+        """Rebuild manifests/CSVs for orphan session folders under root; return count adopted."""
+        from hnh.import_session import adopt_existing_session_folder, discover_orphan_session_dirs
+
+        profile = self._normalize_profile(profile_name)
+        adopted = 0
+        for session_dir in discover_orphan_session_dirs(root):
+            try:
+                if adopt_existing_session_folder(session_dir, profile, self) is not None:
+                    adopted += 1
+            except Exception:
+                continue
+        return adopted
+
+    def _resolve_existing_profile_name(self, name: str) -> str:
+        profile = self._normalize_profile(name)
+        with self._db() as conn:
+            row = conn.execute(
+                "SELECT name FROM profiles WHERE name = ? COLLATE NOCASE",
+                (profile,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Profile not found: {profile}")
+        return str(row["name"])
+
+    def merge_profiles(
+        self,
+        source_profile: str,
+        master_profile: str,
+        *,
+        session_updates: list[dict[str, str]] | None = None,
+    ) -> dict[str, int]:
+        """
+        Merge source into master, keep the master name, then delete the source profile.
+
+        session_updates are optional path rewrites for moved folders (same shape as
+        reassign_sessions). Any remaining source history/trend rows are retargeted to
+        master with their existing paths. Master prefs and password win; source prefs
+        fill only keys the master does not already have (except Session Save Path).
+        """
+        source = self._resolve_existing_profile_name(source_profile)
+        master = self._resolve_existing_profile_name(master_profile)
+        if source.casefold() == master.casefold():
+            raise ValueError("Source and master profiles must differ.")
+
+        updates = list(session_updates or [])
+        reassigned = self.reassign_sessions(target_profile=master, updates=updates)
+        updated_ids = {
+            str(row.get("session_id") or "").strip()
+            for row in updates
+            if str(row.get("session_id") or "").strip()
+        }
+
+        remaining_rows = 0
+        remaining_trends = 0
+        prefs_copied = 0
+        with self._db() as conn:
+            cur_hist = conn.execute(
+                """
+                UPDATE session_history
+                SET profile_name = ?
+                WHERE profile_name = ? COLLATE NOCASE
+                """,
+                (master, source),
+            )
+            remaining_rows = int(cur_hist.rowcount or 0)
+            cur_trends = conn.execute(
+                """
+                UPDATE session_trends
+                SET profile_name = ?
+                WHERE profile_name = ? COLLATE NOCASE
+                """,
+                (master, source),
+            )
+            remaining_trends = int(cur_trends.rowcount or 0)
+
+            src_prefs = conn.execute(
+                """
+                SELECT key, value FROM profile_preferences
+                WHERE profile_name = ? COLLATE NOCASE
+                """,
+                (source,),
+            ).fetchall()
+            master_keys = {
+                str(row["key"])
+                for row in conn.execute(
+                    """
+                    SELECT key FROM profile_preferences
+                    WHERE profile_name = ? COLLATE NOCASE
+                    """,
+                    (master,),
+                ).fetchall()
+            }
+            skip_pref_keys = {"setting:SESSION_SAVE_PATH"}
+            for row in src_prefs:
+                key = str(row["key"] or "").strip()
+                if not key or key in skip_pref_keys or key in master_keys:
+                    continue
+                conn.execute(
+                    """
+                    INSERT INTO profile_preferences (profile_name, key, value)
+                    VALUES (?, ?, ?)
+                    ON CONFLICT(profile_name, key) DO NOTHING
+                    """,
+                    (master, key, str(row["value"])),
+                )
+                prefs_copied += 1
+                master_keys.add(key)
+
+            src_details = conn.execute(
+                """
+                SELECT age, dob, gender, notes, role, password_hash, archived_at
+                FROM profiles
+                WHERE name = ? COLLATE NOCASE
+                """,
+                (source,),
+            ).fetchone()
+            master_details = conn.execute(
+                """
+                SELECT age, dob, gender, notes, role, password_hash, archived_at
+                FROM profiles
+                WHERE name = ? COLLATE NOCASE
+                """,
+                (master,),
+            ).fetchone()
+            if src_details is not None and master_details is not None:
+                new_dob = master_details["dob"] or src_details["dob"]
+                new_age = master_details["age"]
+                if new_age is None:
+                    new_age = src_details["age"]
+                if new_dob and (master_details["dob"] is None or not str(master_details["dob"]).strip()):
+                    computed = self._age_from_dob(str(new_dob).strip()[:10])
+                    if computed is not None:
+                        new_age = computed
+                new_gender = master_details["gender"] or src_details["gender"]
+                new_notes = master_details["notes"] or src_details["notes"]
+                master_role = str(master_details["role"] or "").strip().lower()
+                source_role = str(src_details["role"] or "").strip().lower()
+                new_role = "admin" if master_role == "admin" or source_role == "admin" else "user"
+                conn.execute(
+                    """
+                    UPDATE profiles
+                    SET dob = ?, age = ?, gender = ?, notes = ?, role = ?, archived_at = NULL
+                    WHERE name = ? COLLATE NOCASE
+                    """,
+                    (
+                        new_dob,
+                        new_age,
+                        new_gender,
+                        new_notes,
+                        new_role,
+                        master,
+                    ),
+                )
+
+            conn.execute(
+                "DELETE FROM profile_preferences WHERE profile_name = ? COLLATE NOCASE",
+                (source,),
+            )
+            conn.execute(
+                "DELETE FROM profiles WHERE name = ? COLLATE NOCASE",
+                (source,),
+            )
+            conn.execute(
+                """
+                UPDATE app_state
+                SET value = ?
+                WHERE key = ? AND lower(value) = lower(?)
+                """,
+                (master, "last_active_profile", source),
+            )
+
+        # Merge phone-bridge import maps (master wins on duplicate phone session ids).
+        source_key = self._phone_bridge_import_key(source)
+        master_key = self._phone_bridge_import_key(master)
+        source_map = self._load_phone_bridge_import_map(source_key)
+        master_map = self._load_phone_bridge_import_map(master_key)
+        merged_map = dict(source_map)
+        merged_map.update(master_map)
+        self._save_phone_bridge_import_map(master_key, merged_map)
+        self._save_phone_bridge_import_map(source_key, {})
+
+        return {
+            "reassigned_with_path": reassigned,
+            "retargeted_history_rows": remaining_rows,
+            "retargeted_trend_rows": remaining_trends,
+            "prefs_copied": prefs_copied,
+            "updated_session_ids": len(updated_ids),
         }
 
     def reassign_sessions(
