@@ -103,6 +103,7 @@ from hnh.tag_insights import describe_tag_insights_method, summarize_tag_correla
 from hnh.perf_probe import get_perf_probe
 from hnh.data_paths import app_data_root
 from hnh.session_report_rebuild import generate_reports_for_session_dir
+from hnh.hr_series import is_relative_ibi_outlier
 from hnh import __version__ as version, resources  # noqa
 from hnh import update_check
 import warnings
@@ -13669,28 +13670,39 @@ class View(QMainWindow):
 
                 # LEVEL 3 FAULT: Adaptive deviation vs median of prior beats
                 if not self._fault_active:
-                    prior_ibis = list(data.value[1])[:-1][-self.settings.DEVIATION_WINDOW:]
-                    if len(prior_ibis) >= self.settings.DEVIATION_MIN_SAMPLES:
-                        ref_ibi = statistics.median(prior_ibis)
-                        if ref_ibi > 0:
-                            deviation = abs(last_ibi_ms - ref_ibi) / ref_ibi
-                            if deviation > self.settings.DEVIATION_THRESHOLD:
-                                self._fault_active = True
-                                self._consecutive_good = 0
-                                self._record_disconnect_start("Erratic signal")
-                                self._update_disconnect_overlay(True)
-                                self._set_signal_indicator("ERRATIC \u2014 irregular beat", "red")
-                                recent = list(data.value[1])[-10:]
-                                self._log_signal_fault(
-                                    "L3_ERRATIC", "Erratic heart rate",
-                                    last_ibi_ms=int(last_ibi_ms),
-                                    avg_ibi_ms=int(ref_ibi),
-                                    deviation_pct=round(deviation * 100, 1),
-                                    threshold_pct=int(self.settings.DEVIATION_THRESHOLD * 100),
-                                    recent_ibis=recent,
-                                )
-                                self._show_signal_degraded_popup("Erratic heart rate")
-                                return
+                    prior_ibis = list(data.value[1])[:-1]
+                    if is_relative_ibi_outlier(
+                        last_ibi_ms,
+                        prior_ibis,
+                        deviation_threshold=self.settings.DEVIATION_THRESHOLD,
+                        deviation_window=self.settings.DEVIATION_WINDOW,
+                        deviation_min_samples=self.settings.DEVIATION_MIN_SAMPLES,
+                        max_hr_delta_bpm=float(
+                            getattr(self.settings, "MAX_BEAT_HR_DELTA_BPM", 15.0)
+                        ),
+                    ):
+                        ref_ibi = statistics.median(
+                            prior_ibis[-self.settings.DEVIATION_WINDOW:]
+                        )
+                        deviation = (
+                            abs(last_ibi_ms - ref_ibi) / ref_ibi if ref_ibi > 0 else 0.0
+                        )
+                        self._fault_active = True
+                        self._consecutive_good = 0
+                        self._record_disconnect_start("Erratic signal")
+                        self._update_disconnect_overlay(True)
+                        self._set_signal_indicator("ERRATIC \u2014 irregular beat", "red")
+                        recent = list(data.value[1])[-10:]
+                        self._log_signal_fault(
+                            "L3_ERRATIC", "Erratic heart rate",
+                            last_ibi_ms=int(last_ibi_ms),
+                            avg_ibi_ms=int(ref_ibi),
+                            deviation_pct=round(deviation * 100, 1),
+                            threshold_pct=int(self.settings.DEVIATION_THRESHOLD * 100),
+                            recent_ibis=recent,
+                        )
+                        self._show_signal_degraded_popup("Erratic heart rate")
+                        return
 
                 # Normal beat — count towards recovery
                 if self._fault_active:
@@ -13782,11 +13794,17 @@ class View(QMainWindow):
                 return
 
             # Relative outlier vs median of prior beats (same rule as report cleaner).
-            prior_ibis = list(data.value[1])[:-1][-self.settings.DEVIATION_WINDOW:]
-            if len(prior_ibis) >= self.settings.DEVIATION_MIN_SAMPLES:
-                ref_ibi = statistics.median(prior_ibis)
-                if ref_ibi > 0 and abs(last_ibi_ms - ref_ibi) / ref_ibi > self.settings.DEVIATION_THRESHOLD:
-                    return
+            if is_relative_ibi_outlier(
+                last_ibi_ms,
+                list(data.value[1])[:-1],
+                deviation_threshold=self.settings.DEVIATION_THRESHOLD,
+                deviation_window=self.settings.DEVIATION_WINDOW,
+                deviation_min_samples=self.settings.DEVIATION_MIN_SAMPLES,
+                max_hr_delta_bpm=float(
+                    getattr(self.settings, "MAX_BEAT_HR_DELTA_BPM", 15.0)
+                ),
+            ):
+                return
 
             hr = 60000.0 / last_ibi_ms
 

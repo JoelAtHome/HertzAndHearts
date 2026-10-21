@@ -29,6 +29,24 @@ class DisplayHrTests(unittest.TestCase):
         self.assertGreater(min(hr), 60.0)
         self.assertLess(max(hr), 90.0)
 
+    def test_mild_contact_dip_under_percent_threshold_is_replaced(self):
+        # ~80 → 64 bpm (~25% IBI) slips under DEVIATION_THRESHOLD but exceeds
+        # MAX_BEAT_HR_DELTA_BPM — the needle that skewed Low HR on reports.
+        intervals = [750.0] * 20 + [937.5] + [750.0] * 10
+        _times, cleaned, corrections = clean_ibi_series(intervals)
+        self.assertGreaterEqual(corrections, 1)
+        self.assertAlmostEqual(cleaned[20], 750.0, delta=1.0)
+        hr_values = [60000.0 / ibi for ibi in cleaned]
+        self.assertGreater(min(hr_values), 70.0)
+
+    def test_gradual_hr_climb_is_preserved(self):
+        # Slow drift (~0.4 bpm/beat) must not be treated as contact spikes.
+        intervals = [800.0 - i * 2.0 for i in range(40)]
+        _times, cleaned, corrections = clean_ibi_series(intervals)
+        self.assertEqual(corrections, 0)
+        self.assertEqual(len(cleaned), len(intervals))
+        self.assertLess(cleaned[-1], cleaned[0] - 50.0)
+
     def test_smooth_dampens_a_single_fast_beat(self):
         steady = [800.0] * 30
         bumped = [800.0] * 15 + [650.0] + [800.0] * 14

@@ -179,15 +179,20 @@ SIGNAL_DEGRADE_POPUP_COUNT: Final[int] = 12  # consecutive RMSSD breaches before
 SIGNAL_POPUP_AUTO_DISMISS_MS: Final[int] = 5500  # ~5.5 s for readable transient notices
 
 # Level 3 fault (adaptive): percentage deviation from the rolling
-# average that triggers an "ERRATIC" warning.  0.35 = 35%.
+# median that triggers an "ERRATIC" warning.  0.35 = 35%.
 DEVIATION_THRESHOLD: Final[float] = 0.35
 
-# Number of recent IBIs used to compute the Level 3 rolling average.
+# Number of recent IBIs used to compute the Level 3 rolling median.
 DEVIATION_WINDOW: Final[int] = 30
 
 # Minimum IBIs in the rolling window before Level 3 check activates.
 # Prevents false faults during the first few seconds of a session.
 DEVIATION_MIN_SAMPLES: Final[int] = 10
+
+# Complementary outlier rule: max |ΔHR| (bpm) vs the rolling median HR.
+# Catches needle contact dips that are under the % threshold (e.g. 80→64)
+# while leaving gradual trends alone — real HR rarely jumps this far in one beat.
+MAX_BEAT_HR_DELTA_BPM: Final[float] = 15.0
 
 # Number of consecutive normal beats required to clear an active fault
 # and restore "Signal: GOOD".  Higher = more cautious recovery.

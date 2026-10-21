@@ -14,6 +14,7 @@ from hnh.config import (
     IBI_MEDIAN_WINDOW,
     MAIN_PLOT_START_SECONDS,
     MAIN_PLOT_SYNC_MIN_IBIS,
+    MAX_BEAT_HR_DELTA_BPM,
     MAX_IBI,
     MIN_IBI,
     NOISE_IBI_HIGH_MS,
@@ -28,14 +29,18 @@ def is_relative_ibi_outlier(
     deviation_threshold: float = DEVIATION_THRESHOLD,
     deviation_window: int = DEVIATION_WINDOW,
     deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
+    max_hr_delta_bpm: float = MAX_BEAT_HR_DELTA_BPM,
 ) -> bool:
-    """True when *ibi_ms* is far from the median of recent prior beats.
+    """True when *ibi_ms* is an artifact vs the median of recent prior beats.
 
-    Uses the median of up to ``deviation_window`` prior samples so a single
-    spike cannot pull the reference the way a mean would.
+    Flags a beat when either:
+    - fractional IBI deviation exceeds ``deviation_threshold``, or
+    - implied HR differs from the median HR by more than ``max_hr_delta_bpm``.
+
+    The absolute bpm rule catches short contact needles (e.g. 80→64 bpm) that
+    stay under the percentage threshold. Gradual trends survive because
+    successive beats move only a fraction of a bpm.
     """
-    if deviation_threshold <= 0.0:
-        return False
     window = max(1, int(deviation_window))
     min_samples = max(1, int(deviation_min_samples))
     sample = [float(v) for v in prior_ibis_ms[-window:] if float(v) > 0.0]
@@ -44,7 +49,19 @@ def is_relative_ibi_outlier(
     median_ibi = statistics.median(sample)
     if median_ibi <= 0.0:
         return False
-    return abs(float(ibi_ms) - median_ibi) / median_ibi > float(deviation_threshold)
+    candidate = float(ibi_ms)
+    if candidate <= 0.0:
+        return True
+    if deviation_threshold > 0.0 and abs(candidate - median_ibi) / median_ibi > float(
+        deviation_threshold
+    ):
+        return True
+    if max_hr_delta_bpm > 0.0:
+        median_hr = 60000.0 / median_ibi
+        candidate_hr = 60000.0 / candidate
+        if abs(candidate_hr - median_hr) > float(max_hr_delta_bpm):
+            return True
+    return False
 
 
 def clean_ibi_series(
@@ -60,13 +77,14 @@ def clean_ibi_series(
     deviation_threshold: float = DEVIATION_THRESHOLD,
     deviation_window: int = DEVIATION_WINDOW,
     deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
+    max_hr_delta_bpm: float = MAX_BEAT_HR_DELTA_BPM,
 ) -> tuple[list[float], list[float], int]:
     """Clean beat intervals with absolute bounds and relative median outliers.
 
     Absolute out-of-range intervals are median-replaced when the local window
-    is full. Relative outliers (L3-style deviation from the rolling median of
-    already-accepted beats) are replaced with that median so successive HRV
-    diffs stay sane. Intervals that still fail dropout/noise limits are
+    is full. Relative outliers (percent or absolute bpm vs the rolling median
+    of already-accepted beats) are replaced with that median so successive
+    HRV diffs stay sane. Intervals that still fail dropout/noise limits are
     dropped.
 
     Returns ``(times_sec, cleaned_ibi_ms, corrections)`` where *corrections*
@@ -107,6 +125,7 @@ def clean_ibi_series(
             deviation_threshold=deviation_threshold,
             deviation_window=deviation_window,
             deviation_min_samples=deviation_min_samples,
+            max_hr_delta_bpm=max_hr_delta_bpm,
         ):
             ref = history[-max(1, int(deviation_window)) :]
             validated = float(statistics.median(ref))
@@ -137,6 +156,7 @@ def display_hr_from_ibis(
     deviation_threshold: float = DEVIATION_THRESHOLD,
     deviation_window: int = DEVIATION_WINDOW,
     deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
+    max_hr_delta_bpm: float = MAX_BEAT_HR_DELTA_BPM,
     plot_start_sec: float = MAIN_PLOT_START_SECONDS,
     min_beats: int = MAIN_PLOT_SYNC_MIN_IBIS,
 ) -> tuple[list[float], list[float]]:
@@ -160,6 +180,7 @@ def display_hr_from_ibis(
         deviation_threshold=deviation_threshold,
         deviation_window=deviation_window,
         deviation_min_samples=deviation_min_samples,
+        max_hr_delta_bpm=max_hr_delta_bpm,
     )
     if not cleaned_ibis:
         return [], []

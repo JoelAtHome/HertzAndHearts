@@ -180,6 +180,18 @@ REGISTRY = OrderedDict([
         "section": "Signal Quality",
         "scope": "global",
     }),
+    ("MAX_BEAT_HR_DELTA_BPM", {
+        "display": "Max Beat HR Jump",
+        "tooltip": (
+            "Maximum allowed heart-rate change (bpm) from the rolling "
+            "median of prior beats.  Catches short contact dips that stay "
+            "under the deviation percentage (e.g. 80\u219264 bpm) without "
+            "flattening gradual trends.  Lower = more aggressive."
+        ),
+        "type": float, "min": 5.0, "max": 40.0, "step": 1.0,
+        "decimals": 1, "unit": "bpm", "section": "Signal Quality",
+        "scope": "global",
+    }),
     ("RECOVERY_BEATS", {
         "display": "Recovery Beats",
         "tooltip": (
