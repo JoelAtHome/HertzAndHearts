@@ -12,6 +12,7 @@ from pathlib import Path
 from hnh.import_session import (
     decode_ritual_ecg_chunks,
     import_saved_hrv_package,
+    phone_bridge_import_annotation,
     replay_data_from_ibi_ms,
 )
 from hnh.profile_store import ProfileStore
@@ -19,6 +20,25 @@ from hnh.report import naive_local_from_iso
 
 
 class SavedHrvImportTests(unittest.TestCase):
+    def test_polar_import_annotation_omits_feather_demo_display_name(self):
+        polar = phone_bridge_import_annotation(
+            transfer_reason="delayed_push",
+            source_device="POLAR_H10",
+            profile_display_name="Typical patch torso",
+        )
+        self.assertEqual(polar, "[Phone Bridge] Saved HRV (delayed_push)")
+        self.assertNotIn("Typical patch torso", polar)
+
+        feather = phone_bridge_import_annotation(
+            transfer_reason="delayed_push",
+            source_device="FEATHER",
+            profile_display_name="Typical patch torso",
+        )
+        self.assertEqual(
+            feather,
+            "[Phone Bridge] Saved HRV (delayed_push) · Typical patch torso",
+        )
+
     def test_replay_data_uses_rolling_rmssd_not_phone_summary(self):
         data = replay_data_from_ibi_ms(
             [800, 820, 810],

@@ -22,6 +22,27 @@ def _rmssd_trend_average(values: list[float]) -> float | None:
     return sum(values) / len(values)
 
 
+def phone_bridge_import_annotation(
+    *,
+    transfer_reason: str,
+    source_device: str | None,
+    profile_display_name: str | None,
+) -> str:
+    """Build the CSV/report annotation for a saved-HRV phone import.
+
+    Feather torso profile display names are useful context. Polar H10 (and other
+    non-Feather) packages may still carry a leftover phone demo name such as
+    "Typical patch torso" — omit that suffix so the annotation stays meaningful.
+    """
+    reason = str(transfer_reason or "").strip() or "saved"
+    note = f"[Phone Bridge] Saved HRV ({reason})"
+    patient = str(profile_display_name or "").strip()
+    source = str(source_device or "").strip().upper()
+    if patient and source == "FEATHER":
+        note = f"{note} · {patient}"
+    return note
+
+
 def parse_external_file(path: Path) -> dict[str, Any] | None:
     """
     Parse CSV or EDF file into normalized replay data.
@@ -477,9 +498,11 @@ def import_saved_hrv_package(
     source = str(package.get("source_device") or "").strip() or "phone_bridge"
     patient = str(package.get("profile_display_name") or "").strip()
     phone_profile_id = str(package.get("profile_id") or "").strip()
-    note = f"[Phone Bridge] Saved HRV ({reason})"
-    if patient:
-        note = f"{note} · {patient}"
+    note = phone_bridge_import_annotation(
+        transfer_reason=reason,
+        source_device=source,
+        profile_display_name=patient,
+    )
     data = replay_data_from_ibi_ms(
         ibi_raw,
         bridge_rmssd_ms=bridge_rmssd_f,
