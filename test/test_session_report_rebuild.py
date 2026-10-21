@@ -141,6 +141,44 @@ class SessionReportRebuildTests(unittest.TestCase):
             self.assertEqual(data["hrv_time_seconds"], [0.8, 1.62])
             self.assertNotEqual(data["rmssd_time_seconds"][0], data["rmssd_time_seconds"][1])
 
+    def test_relative_hr_artifact_spikes_are_cleaned_in_report_data(self):
+        """Contact-style dips (~45 bpm) are replaced before HR/HRV trends."""
+        with TemporaryDirectory() as tmp:
+            session_dir = Path(tmp) / "session-spikes"
+            session_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = session_dir / "session.csv"
+            with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+                w = csv.writer(fh)
+                w.writerow(["event", "value", "timestamp", "elapsed_sec"])
+                elapsed = 0.0
+                ibis = [800.0] * 20 + [1333.0, 1400.0] + [800.0] * 10
+                for ibi in ibis:
+                    w.writerow(
+                        ["IBI", f"{ibi:.1f}", "2026-01-01T00:00:00", f"{elapsed:.3f}"]
+                    )
+                    elapsed += ibi
+            manifest = {
+                "session_id": "spikes",
+                "profile_id": "Admin",
+                "timing": {
+                    "started_at": "2026-01-01T00:00:00",
+                    "ended_at": "2026-01-01T00:05:00",
+                },
+                "metrics": {"qtc": {"status": "unavailable"}},
+                "artifacts": {"csv": {"path": "session.csv", "exists": True}},
+                "sensor": {"source_device": "POLAR_H10"},
+                "settings_snapshot": {"SETTLING_DURATION": 0},
+            }
+            (session_dir / "session_manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            data = build_report_data_from_session_dir(session_dir)
+            self.assertGreater(len(data["hr_values"]), 10)
+            self.assertGreater(min(data["hr_values"]), 60.0)
+            self.assertLess(max(data["hr_values"]), 90.0)
+            self.assertGreater(len(data["rmssd_values"]), 1)
+            self.assertGreater(len(data["hrv_values"]), 1)
+
     def test_flat_phone_summary_becomes_rolling_series_in_report_data(self):
         with TemporaryDirectory() as tmp:
             session_dir = Path(tmp) / "session-flat"

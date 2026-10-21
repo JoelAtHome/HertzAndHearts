@@ -245,28 +245,48 @@ def build_report_data_from_session_dir(
     if isinstance(metrics, dict) and isinstance(metrics.get("qtc"), dict):
         qtc_payload.update(metrics["qtc"])
 
-    hr_values = list(series.get("hr_values") or [])
     rmssd_values = list(series.get("rmssd_values") or [])
     rmssd_time_seconds = list(series.get("rmssd_time_seconds") or [])
 
+    from hnh.hr_series import clean_ibi_series
     from hnh.rmssd_series import rolling_rmssd_series, rolling_sdnn_series, series_is_flat
 
     ibi_ms = list(series.get("ibi_ms") or [])
     ibi_time_seconds = list(series.get("ibi_time_seconds") or [])
 
+    # Absolute + relative artifact cleaning shared with replay/live HR rules.
+    # When beats were corrected, rebuild HR / RMSSD / SDNN from cleaned IBIs.
+    hr_time_seconds = list(series.get("hr_time_seconds") or [])
+    hr_values = list(series.get("hr_values") or [])
+    cleaned_times, cleaned_ibis, ibi_corrections = clean_ibi_series(
+        ibi_ms, ibi_time_seconds
+    )
+    if cleaned_ibis:
+        ibi_ms = cleaned_ibis
+        ibi_time_seconds = cleaned_times
+        hr_time_seconds = cleaned_times
+        hr_values = [60000.0 / ibi for ibi in cleaned_ibis]
+
     stored_rmssd_was_flat = series_is_flat(rmssd_values)
-    if stored_rmssd_was_flat:
+    recomputed_rmssd = False
+    if ibi_corrections > 0 or stored_rmssd_was_flat:
         rolled_times, rolled_values = rolling_rmssd_series(ibi_ms, ibi_time_seconds)
         if rolled_values:
             rmssd_values = rolled_values
             rmssd_time_seconds = rolled_times
+            recomputed_rmssd = True
         else:
             stored_rmssd_was_flat = False
 
     hrv_values = list(series.get("hrv_values") or [])
     hrv_time_seconds = list(series.get("hrv_time_seconds") or [])
-    if not hrv_values:
-        hrv_time_seconds, hrv_values = rolling_sdnn_series(ibi_ms, ibi_time_seconds)
+    if ibi_corrections > 0 or not hrv_values:
+        rolled_sdnn_times, rolled_sdnn_values = rolling_sdnn_series(
+            ibi_ms, ibi_time_seconds
+        )
+        if rolled_sdnn_values:
+            hrv_time_seconds = rolled_sdnn_times
+            hrv_values = rolled_sdnn_values
 
     baseline_hr = metrics.get("baseline_hr") if isinstance(metrics, dict) else None
     baseline_rmssd = metrics.get("baseline_rmssd") if isinstance(metrics, dict) else None
@@ -274,7 +294,7 @@ def build_report_data_from_session_dir(
     last_rmssd = metrics.get("last_rmssd") if isinstance(metrics, dict) else None
     if last_hr is None and hr_values:
         last_hr = hr_values[-1]
-    if stored_rmssd_was_flat and rmssd_values:
+    if (recomputed_rmssd or stored_rmssd_was_flat) and rmssd_values:
         last_rmssd = rmssd_values[-1]
     elif last_rmssd is None and rmssd_values:
         last_rmssd = rmssd_values[-1]
@@ -370,7 +390,7 @@ def build_report_data_from_session_dir(
             else []
         ),
         "hr_values": hr_values,
-        "hr_time_seconds": list(series.get("hr_time_seconds") or []),
+        "hr_time_seconds": hr_time_seconds,
         "rmssd_values": rmssd_values,
         "rmssd_time_seconds": rmssd_time_seconds,
         "hrv_values": hrv_values,

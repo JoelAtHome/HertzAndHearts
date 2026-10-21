@@ -165,7 +165,7 @@ DROPOUT_IBI_MS: Final[int] = 3000
 # Level 2 fault: hard IBI limits for noise/artifact detection.
 # These are tighter than MIN_IBI/MAX_IBI to catch borderline garbage.
 NOISE_IBI_LOW_MS: Final[int] = 300    # < 300 ms ≈ HR > 200 bpm
-NOISE_IBI_HIGH_MS: Final[int] = 2000  # > 2000 ms ≈ HR < 30 bpm
+NOISE_IBI_HIGH_MS: Final[int] = 1800  # > 1800 ms ≈ HR < 33 bpm
 
 # RMSSD thresholds for signal-quality status (ms).
 # Above NOISY: status shows orange "NOISY"; above POOR: red "POOR (Dry?)".

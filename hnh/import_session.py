@@ -133,17 +133,21 @@ def _parse_rr_only(path: Path) -> dict[str, Any] | None:
     if not ibis_ms:
         return None
 
+    from hnh.hr_series import clean_ibi_series
+
     elapsed_ms = 0.0
-    hr_times: list[float] = []
-    hr_values: list[float] = []
+    raw_times: list[float] = []
     for ibi in ibis_ms:
-        hr_bpm = 60000.0 / ibi
-        hr_times.append(elapsed_ms / 1000.0)
-        hr_values.append(hr_bpm)
+        raw_times.append(elapsed_ms / 1000.0)
         elapsed_ms += ibi
 
-    rmssd_times, rmssd_values = rolling_rmssd_series(ibis_ms, hr_times)
-    hrv_times, hrv_values = rolling_sdnn_series(ibis_ms, hr_times)
+    hr_times, cleaned_ibis, _corrections = clean_ibi_series(ibis_ms, raw_times)
+    if not cleaned_ibis:
+        return None
+    hr_values = [60000.0 / ibi for ibi in cleaned_ibis]
+
+    rmssd_times, rmssd_values = rolling_rmssd_series(cleaned_ibis, hr_times)
+    hrv_times, hrv_values = rolling_sdnn_series(cleaned_ibis, hr_times)
 
     duration = max(hr_times) if hr_times else 0.0
     return {
@@ -330,24 +334,30 @@ def replay_data_from_ibi_ms(
     annotation: str | None = None,
 ) -> dict[str, Any] | None:
     """Build normalized replay data from phone-bridge IBI list (ms)."""
-    cleaned: list[float] = []
+    from hnh.hr_series import clean_ibi_series
+
+    raw_cleaned: list[float] = []
     for raw in ibi_ms:
         try:
             value = float(raw)
         except (TypeError, ValueError):
             continue
         if 200 < value < 3000:
-            cleaned.append(value)
-    if not cleaned:
+            raw_cleaned.append(value)
+    if not raw_cleaned:
         return None
 
     elapsed_ms = 0.0
-    hr_times: list[float] = []
-    hr_values: list[float] = []
-    for ibi in cleaned:
-        hr_times.append(elapsed_ms / 1000.0)
-        hr_values.append(60000.0 / ibi)
+    raw_times: list[float] = []
+    for ibi in raw_cleaned:
+        raw_times.append(elapsed_ms / 1000.0)
         elapsed_ms += ibi
+
+    hr_times, cleaned, _corrections = clean_ibi_series(raw_cleaned, raw_times)
+    if not cleaned:
+        return None
+
+    hr_values = [60000.0 / ibi for ibi in cleaned]
 
     # bridge_rmssd_ms is the phone's session summary. The chart uses the live
     # monitor's rolling window so that one number is not drawn across the session.

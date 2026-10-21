@@ -150,8 +150,9 @@ REGISTRY = OrderedDict([
     ("DEVIATION_THRESHOLD", {
         "display": "Deviation Threshold",
         "tooltip": (
-            "How far a heartbeat can deviate from the rolling average "
-            "before triggering an \u2018Erratic\u2019 warning.  "
+            "How far a heartbeat can deviate from the rolling median of "
+            "prior beats before triggering an \u2018Erratic\u2019 warning "
+            "and being replaced in reports.  "
             "0.30 = 30%.  Lower = more sensitive to irregularities."
         ),
         "type": float, "min": 0.10, "max": 1.00, "step": 0.05,
@@ -161,8 +162,8 @@ REGISTRY = OrderedDict([
     ("DEVIATION_WINDOW", {
         "display": "Deviation Window",
         "tooltip": (
-            "Number of recent heartbeats used to compute the rolling "
-            "average for the adaptive signal quality check."
+            "Number of recent prior heartbeats used to compute the rolling "
+            "median for the adaptive signal quality check."
         ),
         "type": int, "min": 5, "max": 120, "unit": "beats",
         "section": "Signal Quality",
@@ -335,7 +336,7 @@ REGISTRY = OrderedDict([
         "display": "Noise Ceiling IBI",
         "tooltip": (
             "IBI (ms) above which a Level 2 noise fault is triggered.  "
-            "2000 ms \u2248 HR < 30 bpm, almost certainly artifact."
+            "1800 ms \u2248 HR < 33 bpm, almost certainly artifact."
         ),
         "type": int, "min": 1500, "max": 5000, "unit": "ms",
         "section": "Advanced",

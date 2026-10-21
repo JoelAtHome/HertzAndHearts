@@ -5,7 +5,7 @@ import unittest
 import numpy as np
 
 from hnh.ecg_display import display_ecg
-from hnh.hr_series import display_hr_from_ibis
+from hnh.hr_series import clean_ibi_series, display_hr_from_ibis
 
 
 class DisplayHrTests(unittest.TestCase):
@@ -17,6 +17,17 @@ class DisplayHrTests(unittest.TestCase):
         self.assertGreater(min(hr), 60.0)
         self.assertGreaterEqual(times[0], 3.0)
         self.assertLess(times[0], 4.0)
+
+    def test_relative_outlier_spike_is_replaced(self):
+        # ~45 bpm spike while baseline is 75 bpm — passes absolute noise bounds.
+        intervals = [800.0] * 20 + [1333.0] + [800.0] * 10
+        _times, cleaned, corrections = clean_ibi_series(intervals)
+        self.assertGreaterEqual(corrections, 1)
+        self.assertEqual(len(cleaned), len(intervals))
+        self.assertAlmostEqual(cleaned[20], 800.0, delta=1.0)
+        _t, hr = display_hr_from_ibis(intervals)
+        self.assertGreater(min(hr), 60.0)
+        self.assertLess(max(hr), 90.0)
 
     def test_smooth_dampens_a_single_fast_beat(self):
         steady = [800.0] * 30

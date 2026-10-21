@@ -1,6 +1,7 @@
 # Changelog
 
 ### Unreleased
++ enhancement: Session reports (and imports/replay) clean beat intervals with relative median outlier replacement plus a tighter default noise ceiling (`NOISE_IBI_HIGH_MS` 1800 ms), so Polar contact spikes no longer dent the HR/RMSSD/SDNN trends.
 + bugfix: Phone-bridge and file imports save under **Session Save Path [Profile]** (same tree as live Stop & Save), not the app Data Folder.
 + bugfix: Imported phone ECG sessions write `session_ecg.f32` and report rebuild falls back to `session.edf`, so History **Generate report** includes the ECG strip.
 + bugfix: Phone imports compute rolling SDNN from beat intervals (and report rebuild fills SDNN when the CSV has none), so the HRV(SDNN) trend is no longer empty.

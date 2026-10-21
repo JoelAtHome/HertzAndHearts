@@ -6,6 +6,9 @@ import math
 import statistics
 
 from hnh.config import (
+    DEVIATION_MIN_SAMPLES,
+    DEVIATION_THRESHOLD,
+    DEVIATION_WINDOW,
     DROPOUT_IBI_MS,
     HR_EWMA_WEIGHT,
     IBI_MEDIAN_WINDOW,
@@ -16,6 +19,108 @@ from hnh.config import (
     NOISE_IBI_HIGH_MS,
     NOISE_IBI_LOW_MS,
 )
+
+
+def is_relative_ibi_outlier(
+    ibi_ms: float,
+    prior_ibis_ms: list[float],
+    *,
+    deviation_threshold: float = DEVIATION_THRESHOLD,
+    deviation_window: int = DEVIATION_WINDOW,
+    deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
+) -> bool:
+    """True when *ibi_ms* is far from the median of recent prior beats.
+
+    Uses the median of up to ``deviation_window`` prior samples so a single
+    spike cannot pull the reference the way a mean would.
+    """
+    if deviation_threshold <= 0.0:
+        return False
+    window = max(1, int(deviation_window))
+    min_samples = max(1, int(deviation_min_samples))
+    sample = [float(v) for v in prior_ibis_ms[-window:] if float(v) > 0.0]
+    if len(sample) < min_samples:
+        return False
+    median_ibi = statistics.median(sample)
+    if median_ibi <= 0.0:
+        return False
+    return abs(float(ibi_ms) - median_ibi) / median_ibi > float(deviation_threshold)
+
+
+def clean_ibi_series(
+    ibis_ms: list[float],
+    times_sec: list[float] | None = None,
+    *,
+    median_window: int = IBI_MEDIAN_WINDOW,
+    min_ibi_ms: int = MIN_IBI,
+    max_ibi_ms: int = MAX_IBI,
+    dropout_ms: float = DROPOUT_IBI_MS,
+    noise_low_ms: float = NOISE_IBI_LOW_MS,
+    noise_high_ms: float = NOISE_IBI_HIGH_MS,
+    deviation_threshold: float = DEVIATION_THRESHOLD,
+    deviation_window: int = DEVIATION_WINDOW,
+    deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
+) -> tuple[list[float], list[float], int]:
+    """Clean beat intervals with absolute bounds and relative median outliers.
+
+    Absolute out-of-range intervals are median-replaced when the local window
+    is full. Relative outliers (L3-style deviation from the rolling median of
+    already-accepted beats) are replaced with that median so successive HRV
+    diffs stay sane. Intervals that still fail dropout/noise limits are
+    dropped.
+
+    Returns ``(times_sec, cleaned_ibi_ms, corrections)`` where *corrections*
+    counts replaced or dropped beats.
+    """
+    ibis = [float(v) for v in ibis_ms]
+    n = len(ibis)
+    if n == 0:
+        return [], [], 0
+    if times_sec is None or len(times_sec) != n:
+        elapsed = 0.0
+        times: list[float] = []
+        for ibi in ibis:
+            times.append(elapsed)
+            elapsed += max(ibi, 0.0) / 1000.0
+    else:
+        times = [float(t) for t in times_sec]
+
+    window = max(1, int(median_window))
+    history: list[float] = []
+    out_times: list[float] = []
+    out_ibis: list[float] = []
+    corrections = 0
+
+    for ibi, t in zip(ibis, times):
+        validated = _median_replace(
+            ibi,
+            history,
+            window=window,
+            min_ibi_ms=min_ibi_ms,
+            max_ibi_ms=max_ibi_ms,
+        )
+        if validated != ibi:
+            corrections += 1
+        if is_relative_ibi_outlier(
+            validated,
+            history,
+            deviation_threshold=deviation_threshold,
+            deviation_window=deviation_window,
+            deviation_min_samples=deviation_min_samples,
+        ):
+            ref = history[-max(1, int(deviation_window)) :]
+            validated = float(statistics.median(ref))
+            corrections += 1
+        if validated > dropout_ms or validated > noise_high_ms or validated < noise_low_ms:
+            corrections += 1
+            continue
+        if validated <= 0.0:
+            corrections += 1
+            continue
+        history.append(validated)
+        out_times.append(t)
+        out_ibis.append(validated)
+    return out_times, out_ibis, corrections
 
 
 def display_hr_from_ibis(
@@ -29,58 +134,49 @@ def display_hr_from_ibis(
     dropout_ms: float = DROPOUT_IBI_MS,
     noise_low_ms: float = NOISE_IBI_LOW_MS,
     noise_high_ms: float = NOISE_IBI_HIGH_MS,
+    deviation_threshold: float = DEVIATION_THRESHOLD,
+    deviation_window: int = DEVIATION_WINDOW,
+    deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
     plot_start_sec: float = MAIN_PLOT_START_SECONDS,
     min_beats: int = MAIN_PLOT_SYNC_MIN_IBIS,
 ) -> tuple[list[float], list[float]]:
     """Beat times and smoothed heart rate, matching the live HR chart.
 
     Out-of-range intervals are replaced with the local median once the
-    median window is full. Intervals that still fail the dropout or noise
-    limits are omitted. The plotted value is the same exponential smooth
-    as the live chart, and the line starts after the same warmup.
+    median window is full. Relative outliers are replaced the same way.
+    Intervals that still fail the dropout or noise limits are omitted. The
+    plotted value is the same exponential smooth as the live chart, and the
+    line starts after the same warmup.
     """
-    ibis = [float(v) for v in ibis_ms]
-    n = len(ibis)
-    if n == 0:
+    cleaned_times, cleaned_ibis, _corrections = clean_ibi_series(
+        ibis_ms,
+        times_sec,
+        median_window=median_window,
+        min_ibi_ms=min_ibi_ms,
+        max_ibi_ms=max_ibi_ms,
+        dropout_ms=dropout_ms,
+        noise_low_ms=noise_low_ms,
+        noise_high_ms=noise_high_ms,
+        deviation_threshold=deviation_threshold,
+        deviation_window=deviation_window,
+        deviation_min_samples=deviation_min_samples,
+    )
+    if not cleaned_ibis:
         return [], []
-    if times_sec is None or len(times_sec) != n:
-        elapsed = 0.0
-        times: list[float] = []
-        for ibi in ibis:
-            times.append(elapsed)
-            elapsed += max(ibi, 0.0) / 1000.0
-    else:
-        times = [float(t) for t in times_sec]
 
     weight = float(ewma_weight)
     if weight <= 0.0 or weight > 1.0:
         weight = HR_EWMA_WEIGHT
-    window = max(1, int(median_window))
 
-    history: list[float] = []
     out_times: list[float] = []
     out_values: list[float] = []
     ewma: float | None = None
-    t0: float | None = None
+    t0 = cleaned_times[0]
     post_warmup = False
 
-    for ibi, t in zip(ibis, times):
-        validated = _median_replace(
-            ibi,
-            history,
-            window=window,
-            min_ibi_ms=min_ibi_ms,
-            max_ibi_ms=max_ibi_ms,
-        )
-        history.append(validated)
-        if validated > dropout_ms or validated > noise_high_ms or validated < noise_low_ms:
-            continue
-        if validated <= 0.0:
-            continue
-        if t0 is None:
-            t0 = t
+    for idx, (ibi, t) in enumerate(zip(cleaned_ibis, cleaned_times)):
         elapsed = t - t0
-        hr = 60000.0 / validated
+        hr = 60000.0 / ibi
         if ewma is None:
             ewma = hr
         elif elapsed >= plot_start_sec and not post_warmup:
@@ -90,7 +186,7 @@ def display_hr_from_ibis(
             ewma = weight * hr + (1.0 - weight) * ewma
         if not out_values:
             ewma = hr
-        if elapsed < plot_start_sec or len(history) < min_beats:
+        if elapsed < plot_start_sec or (idx + 1) < min_beats:
             continue
         out_times.append(t)
         out_values.append(ewma)
