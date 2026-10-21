@@ -8110,10 +8110,11 @@ class View(QMainWindow):
         self.content_row.addLayout(plots_column, stretch=1)
 
         # Side metrics mirror plots_column stretches. Baseline HR / Baseline RMSSD
-        # sit near mid-plot (where the established baseline traces usually sit).
+        # sit mid-plot (where established baseline traces usually sit). Thin
+        # dividers sit between groups only — not inside the RMSSD cluster.
         metrics_column = QVBoxLayout()
         metrics_column.setContentsMargins(0, 0, 0, 0)
-        metrics_column.setSpacing(2)
+        metrics_column.setSpacing(6)
 
         _stat_style = (
             "font-size: 11px; color: #2c3e50; "
@@ -8138,7 +8139,7 @@ class View(QMainWindow):
             _style_metric_label(lbl)
             layout.addWidget(lbl, alignment=Qt.AlignHCenter)
 
-        # Top plot band: HR + Baseline HR centered (~halfway up the upper plot).
+        # Top plot band: HR + Baseline HR centered mid upper plot.
         top_metrics = QWidget()
         top_metrics.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         top_lay = QVBoxLayout(top_metrics)
@@ -8147,9 +8148,9 @@ class View(QMainWindow):
         top_lay.addStretch(1)
         _add_metric(top_lay, self.current_hr_label)
         _add_metric(top_lay, self.baseline_hr_label)
-        top_lay.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
         top_lay.addStretch(1)
         metrics_column.addWidget(top_metrics, stretch=1)
+        metrics_column.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
 
         # Freeze-row band: SDNN / LF/HF / QRS.
         mid_metrics = QWidget()
@@ -8160,10 +8161,10 @@ class View(QMainWindow):
         _add_metric(mid_lay, self.sdnn_label)
         _add_metric(mid_lay, self.stress_ratio_label)
         _add_metric(mid_lay, self.qrs_label)
-        mid_lay.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
         metrics_column.addWidget(mid_metrics, stretch=0)
+        metrics_column.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
 
-        # Bottom plot band: RMSSD cluster + Baseline RMSSD centered mid-plot.
+        # Bottom plot band: RMSSD + Bridge + Baseline RMSSD centered mid plot.
         bot_metrics = QWidget()
         bot_metrics.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         bot_lay = QVBoxLayout(bot_metrics)
@@ -8172,7 +8173,6 @@ class View(QMainWindow):
         bot_lay.addStretch(1)
         _add_metric(bot_lay, self.rmssd_label)
         _add_metric(bot_lay, self.bridge_rmssd_label)
-        bot_lay.addWidget(_metrics_divider(), alignment=Qt.AlignHCenter)
         _add_metric(bot_lay, self.baseline_rmssd_label)
         bot_lay.addStretch(1)
         metrics_column.addWidget(bot_metrics, stretch=1)
