@@ -9832,6 +9832,8 @@ class View(QMainWindow):
             "settling_duration_seconds": getattr(
                 self.settings, "SETTLING_DURATION", 15
             ),
+            "disconnect_intervals": list(self._disconnect_intervals or []),
+            "disconnect_intervals_seconds": self._disconnect_intervals_as_elapsed(),
         }
 
     def _export_optional_edf_plus(self, report_data: dict):
@@ -13408,6 +13410,23 @@ class View(QMainWindow):
             self.hrv_widget.x_axis, self.hrv_y_axis_right,
         )
         self._apply_sdnn_plot_visibility()
+
+    def _disconnect_intervals_as_elapsed(self) -> list[tuple[float, float]]:
+        """Wall-clock disconnect intervals expressed as session-elapsed seconds."""
+        from hnh.trend_quality import disconnect_intervals_to_elapsed
+
+        origin = self.start_time
+        if origin is None and self._session_bundle is not None:
+            started = getattr(self._session_bundle, "started_at", None)
+            if isinstance(started, datetime):
+                try:
+                    origin = started.timestamp()
+                except (OSError, OverflowError, ValueError):
+                    origin = None
+        return disconnect_intervals_to_elapsed(
+            self._disconnect_intervals or [],
+            session_origin_ts=origin,
+        )
 
     def _record_disconnect_start(self, reason: str):
         """Record start of disconnect interval; used for manifest/CSV/report."""

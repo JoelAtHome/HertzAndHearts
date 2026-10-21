@@ -4,6 +4,10 @@
 + enhancement: Live side metrics group HR/baseline mid upper plot, SDNN·LF/HF·QRS beside the freeze row, and RMSSD·Bridge·baseline mid lower plot, with thin dividers only between those groups.
 + enhancement: Session reports (and imports/replay) clean beat intervals with relative median outlier replacement plus a tighter default noise ceiling (`NOISE_IBI_HIGH_MS` 1800 ms), so Polar contact spikes no longer dent the HR/RMSSD/SDNN trends.
 + enhancement: IBI cleaning also caps beat-to-beat HR jumps vs the rolling median (`MAX_BEAT_HR_DELTA_BPM` 15), so milder H10 contact needles (e.g. 80→64 bpm) no longer skew Low HR while gradual trends stay intact.
++ enhancement: Session report trends mark unreliable spans (disconnects, large gaps, held/flat plateaus including RMSSD≈0) as dotted gray while trusted samples stay solid; report rebuild drops outlier beats instead of median-filling; Min/Max/Avg exclude those spans.
++ bugfix: Report trend gaps no longer draw a solid/dotted bridge that looked like a fake flat shelf; unreliable windows use a light band plus broken dotted segments, and plateau detection uses a rolling value-range window.
++ bugfix: Trend gap breaking now treats the x-axis as minutes, so multi-minute dropouts are left empty instead of being stroked across.
++ cleanup: Report trend unreliable segments no longer paint gray background bands; broken/dotted gray line alone marks poor-quality spans.
 + bugfix: Phone-bridge and file imports save under **Session Save Path [Profile]** (same tree as live Stop & Save), not the app Data Folder.
 + bugfix: Imported phone ECG sessions write `session_ecg.f32` and report rebuild falls back to `session.edf`, so History **Generate report** includes the ECG strip.
 + bugfix: Phone imports compute rolling SDNN from beat intervals (and report rebuild fills SDNN when the CSV has none), so the HRV(SDNN) trend is no longer empty.

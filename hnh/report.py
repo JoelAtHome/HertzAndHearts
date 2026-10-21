@@ -344,17 +344,17 @@ def _fmt_signed(val, precision: int = 1) -> str:
     return f"{num:+.{precision}f}"
 
 
-def _values_after_settling(
+def _series_after_settling(
     values: list[float],
     times_sec: list[float],
     settling_sec: float,
     reset_markers_sec: list[float] | None = None,
-) -> list[float]:
-    """Return values outside settling windows at session start and resets."""
+) -> tuple[list[float], list[float]]:
+    """Return values/times outside settling windows at session start and resets."""
     if settling_sec <= 0:
-        return list(values)
+        return list(values), list(times_sec)
     if not values:
-        return []
+        return [], []
     if len(values) == len(times_sec) and times_sec:
         segment_starts = [0.0]
         if reset_markers_sec:
@@ -362,7 +362,8 @@ def _values_after_settling(
                 sorted({float(t) for t in reset_markers_sec if t is not None and float(t) >= 0.0})
             )
 
-        kept: list[float] = []
+        kept_v: list[float] = []
+        kept_t: list[float] = []
         for value, t in zip(values, times_sec):
             in_settling = False
             for start in segment_starts:
@@ -370,10 +371,24 @@ def _values_after_settling(
                     in_settling = True
                     break
             if not in_settling:
-                kept.append(value)
-        return kept
+                kept_v.append(value)
+                kept_t.append(float(t))
+        return kept_v, kept_t
     # If timing metadata is unavailable/misaligned, keep original values.
-    return list(values)
+    return list(values), list(times_sec)
+
+
+def _values_after_settling(
+    values: list[float],
+    times_sec: list[float],
+    settling_sec: float,
+    reset_markers_sec: list[float] | None = None,
+) -> list[float]:
+    """Return values outside settling windows at session start and resets."""
+    kept, _times = _series_after_settling(
+        values, times_sec, settling_sec, reset_markers_sec
+    )
+    return kept
 
 
 def _report_metric_settling_seconds(metric: str, base_settling_sec: float) -> float:
@@ -382,6 +397,56 @@ def _report_metric_settling_seconds(metric: str, base_settling_sec: float) -> fl
     if metric in {"rmssd", "hrv"}:
         return max(base, _REPORT_RMSSD_HRV_STABILIZE_SECONDS)
     return base
+
+
+def _disconnect_elapsed_from_data(data: dict[str, Any]) -> list[tuple[float, float]]:
+    """Session-elapsed disconnect windows from report payload."""
+    from hnh.trend_quality import (
+        disconnect_intervals_to_elapsed,
+        merge_intervals,
+        session_origin_timestamp,
+    )
+
+    direct = data.get("disconnect_intervals_seconds") or []
+    parsed: list[tuple[float, float]] = []
+    for item in direct:
+        try:
+            if isinstance(item, (list, tuple)) and len(item) >= 2:
+                parsed.append((float(item[0]), float(item[1])))
+        except (TypeError, ValueError):
+            continue
+    if parsed:
+        return merge_intervals(parsed)
+    return disconnect_intervals_to_elapsed(
+        data.get("disconnect_intervals") or [],
+        session_origin_ts=session_origin_timestamp(data.get("session_start")),
+    )
+
+
+def _reliable_metric_values(
+    values: list[float],
+    times_sec: list[float],
+    *,
+    metric: str,
+    disconnect_elapsed: list[tuple[float, float]],
+) -> list[float]:
+    """Settled metric values with unreliable segments excluded for stats."""
+    from hnh.trend_quality import (
+        filter_values_excluding_intervals,
+        unreliable_intervals_for_series,
+    )
+
+    if not values:
+        return []
+    if len(values) != len(times_sec) or not times_sec:
+        return list(values)
+    intervals = unreliable_intervals_for_series(
+        values,
+        times_sec,
+        disconnect_elapsed=disconnect_elapsed,
+        metric=metric,
+    )
+    return filter_values_excluding_intervals(values, times_sec, intervals)
 
 
 def _filter_rmssd_outliers(values: list[float]) -> list[float]:
@@ -687,6 +752,14 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
             t for t in session_reset_markers_seconds if t >= truncate_sec
         ]
 
+    disconnect_elapsed = _disconnect_elapsed_from_data(data)
+    if truncate_sec > 0 and disconnect_elapsed:
+        disconnect_elapsed = [
+            (max(float(a), truncate_sec), float(b))
+            for a, b in disconnect_elapsed
+            if float(b) >= truncate_sec
+        ]
+
     ecg_values = [float(v) for v in (data.get("ecg_samples") or []) if v is not None]
     ecg_rate = int(data.get("ecg_sample_rate_hz") or 130)
 
@@ -707,6 +780,50 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
             return [float(t) / 60.0 for t in np.linspace(0.0, session_duration_sec, num=values_len)]
         return [float(i) for i in range(1, values_len + 1)]
 
+    def _plot_metric_with_quality(
+        axis,
+        values: list[float],
+        times_sec: list[float],
+        *,
+        metric: str,
+        ylabel: str,
+        xlabel: str | None = None,
+        empty_text: str,
+    ) -> None:
+        from hnh.trend_quality import (
+            plot_quality_series,
+            point_unreliable_mask,
+            unreliable_intervals_for_series,
+        )
+
+        if not values:
+            axis.text(0.02, 0.5, empty_text, transform=axis.transAxes, fontsize=8)
+            if xlabel:
+                axis.set_xlabel(xlabel, fontsize=8)
+            return
+        x_min = _time_axis_minutes(len(values), times_sec)
+        if len(times_sec) == len(values) and times_sec:
+            intervals = unreliable_intervals_for_series(
+                values,
+                times_sec,
+                disconnect_elapsed=disconnect_elapsed,
+                metric=metric,
+            )
+            bad_mask = point_unreliable_mask(times_sec, intervals)
+            plot_quality_series(
+                axis,
+                x_min,
+                values,
+                bad_mask,
+                unreliable_intervals_sec=intervals,
+            )
+        else:
+            axis.plot(x_min, values, color="black", linewidth=1.0)
+        axis.set_ylabel(ylabel, fontsize=8)
+        axis.grid(alpha=0.25)
+        if xlabel:
+            axis.set_xlabel(xlabel, fontsize=8)
+
     if hr_values or rmssd_values or hrv_values:
         trend_path = output_dir / "session_visual_trend.png"
         fig = Figure(figsize=(7.2, 4.2), dpi=140)
@@ -714,29 +831,31 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
         ax_hr = fig.add_subplot(311)
         ax_rmssd = fig.add_subplot(312)
         ax_hrv = fig.add_subplot(313)
-        if hr_values:
-            x_hr = _time_axis_minutes(len(hr_values), hr_time_seconds)
-            ax_hr.plot(x_hr, hr_values, color="black", linewidth=1.0)
-            ax_hr.set_ylabel("HR (bpm)", fontsize=8)
-            ax_hr.grid(alpha=0.25)
-        else:
-            ax_hr.text(0.02, 0.5, "No HR trend data", transform=ax_hr.transAxes, fontsize=8)
-        if rmssd_values:
-            x_rmssd = _time_axis_minutes(len(rmssd_values), rmssd_time_seconds)
-            ax_rmssd.plot(x_rmssd, rmssd_values, color="black", linewidth=1.0)
-            ax_rmssd.set_ylabel("RMSSD (ms)", fontsize=8)
-            ax_rmssd.grid(alpha=0.25)
-        else:
-            ax_rmssd.text(0.02, 0.5, "No RMSSD trend data", transform=ax_rmssd.transAxes, fontsize=8)
-        if hrv_values:
-            x_hrv = _time_axis_minutes(len(hrv_values), hrv_time_seconds)
-            ax_hrv.plot(x_hrv, hrv_values, color="black", linewidth=1.0)
-            ax_hrv.set_ylabel("HRV(SDNN) (ms)", fontsize=8)
-            ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
-            ax_hrv.grid(alpha=0.25)
-        else:
-            ax_hrv.text(0.02, 0.5, "No HRV(SDNN) trend data", transform=ax_hrv.transAxes, fontsize=8)
-            ax_hrv.set_xlabel("Elapsed session time (min)", fontsize=8)
+        _plot_metric_with_quality(
+            ax_hr,
+            hr_values,
+            hr_time_seconds,
+            metric="hr",
+            ylabel="HR (bpm)",
+            empty_text="No HR trend data",
+        )
+        _plot_metric_with_quality(
+            ax_rmssd,
+            rmssd_values,
+            rmssd_time_seconds,
+            metric="rmssd",
+            ylabel="RMSSD (ms)",
+            empty_text="No RMSSD trend data",
+        )
+        _plot_metric_with_quality(
+            ax_hrv,
+            hrv_values,
+            hrv_time_seconds,
+            metric="hrv",
+            ylabel="HRV(SDNN) (ms)",
+            xlabel="Elapsed session time (min)",
+            empty_text="No HRV(SDNN) trend data",
+        )
         for axis in (ax_hr, ax_rmssd, ax_hrv):
             axis.tick_params(axis="both", labelsize=7)
         for idx, t_reset in enumerate(session_reset_markers_seconds):
@@ -881,11 +1000,17 @@ def generate_session_share_pdf(path: str, data: dict) -> None:
     ]
 
     hrv_time_seconds = [float(v) for v in (data.get("hrv_time_seconds") or []) if v is not None]
-    hrv_vals = _values_after_settling(
+    hrv_vals, hrv_times = _series_after_settling(
         [float(v) for v in (data.get("hrv_values") or []) if v is not None],
         hrv_time_seconds,
         hrv_settling_sec,
         reset_markers_sec,
+    )
+    hrv_vals = _reliable_metric_values(
+        hrv_vals,
+        hrv_times,
+        metric="hrv",
+        disconnect_elapsed=_disconnect_elapsed_from_data(data),
     )
     hrv_avg = f"{sum(hrv_vals)/len(hrv_vals):.1f} ms" if hrv_vals else "--"
     delta_hrv = "--"
@@ -1160,24 +1285,45 @@ def generate_session_report(path: str, data: dict) -> None:
     stress_time_seconds = [
         float(v) for v in (data.get("stress_ratio_time_seconds") or []) if v is not None
     ]
-    hr_vals_settled = _values_after_settling(
+    disconnect_elapsed = _disconnect_elapsed_from_data(data)
+    hr_vals_settled, hr_times_settled = _series_after_settling(
         [float(v) for v in (data.get("hr_values") or []) if v is not None],
         hr_time_seconds,
         settling_sec,
         reset_markers_sec,
     )
-    rmssd_vals_settled = _values_after_settling(
+    hr_vals_settled = _reliable_metric_values(
+        hr_vals_settled,
+        hr_times_settled,
+        metric="hr",
+        disconnect_elapsed=disconnect_elapsed,
+    )
+    rmssd_vals_settled, rmssd_times_settled = _series_after_settling(
         [float(v) for v in (data.get("rmssd_values") or []) if v is not None],
         rmssd_time_seconds,
         rmssd_settling_sec,
         reset_markers_sec,
     )
-    rmssd_vals_settled = _filter_rmssd_outliers(rmssd_vals_settled)
-    hrv_vals_settled = _values_after_settling(
+    rmssd_vals_settled, rmssd_times_settled = _filter_metric_outliers_with_times(
+        rmssd_vals_settled, rmssd_times_settled
+    )
+    rmssd_vals_settled = _reliable_metric_values(
+        rmssd_vals_settled,
+        rmssd_times_settled,
+        metric="rmssd",
+        disconnect_elapsed=disconnect_elapsed,
+    )
+    hrv_vals_settled, hrv_times_settled = _series_after_settling(
         [float(v) for v in (data.get("hrv_values") or []) if v is not None],
         hrv_time_seconds,
         hrv_settling_sec,
         reset_markers_sec,
+    )
+    hrv_vals_settled = _reliable_metric_values(
+        hrv_vals_settled,
+        hrv_times_settled,
+        metric="hrv",
+        disconnect_elapsed=disconnect_elapsed,
     )
     stress_vals_settled = _values_after_settling(
         [float(v) for v in (data.get("stress_ratio_values") or []) if v is not None],

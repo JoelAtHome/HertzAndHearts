@@ -78,18 +78,22 @@ def clean_ibi_series(
     deviation_window: int = DEVIATION_WINDOW,
     deviation_min_samples: int = DEVIATION_MIN_SAMPLES,
     max_hr_delta_bpm: float = MAX_BEAT_HR_DELTA_BPM,
+    outlier_mode: str = "replace",
 ) -> tuple[list[float], list[float], int]:
     """Clean beat intervals with absolute bounds and relative median outliers.
 
     Absolute out-of-range intervals are median-replaced when the local window
-    is full. Relative outliers (percent or absolute bpm vs the rolling median
-    of already-accepted beats) are replaced with that median so successive
-    HRV diffs stay sane. Intervals that still fail dropout/noise limits are
-    dropped.
+    is full (or dropped when ``outlier_mode='drop'``). Relative outliers
+    (percent or absolute bpm vs the rolling median of already-accepted beats)
+    are replaced with that median by default so successive HRV diffs stay
+    sane; ``outlier_mode='drop'`` omits them instead (preferred for reports,
+    so flats/zero-RMSSD plateaus are not invented). Intervals that still fail
+    dropout/noise limits are dropped.
 
     Returns ``(times_sec, cleaned_ibi_ms, corrections)`` where *corrections*
     counts replaced or dropped beats.
     """
+    drop_outliers = str(outlier_mode or "replace").casefold() == "drop"
     ibis = [float(v) for v in ibis_ms]
     n = len(ibis)
     if n == 0:
@@ -110,6 +114,9 @@ def clean_ibi_series(
     corrections = 0
 
     for ibi, t in zip(ibis, times):
+        if drop_outliers and (ibi < min_ibi_ms or ibi > max_ibi_ms):
+            corrections += 1
+            continue
         validated = _median_replace(
             ibi,
             history,
@@ -127,6 +134,9 @@ def clean_ibi_series(
             deviation_min_samples=deviation_min_samples,
             max_hr_delta_bpm=max_hr_delta_bpm,
         ):
+            if drop_outliers:
+                corrections += 1
+                continue
             ref = history[-max(1, int(deviation_window)) :]
             validated = float(statistics.median(ref))
             corrections += 1

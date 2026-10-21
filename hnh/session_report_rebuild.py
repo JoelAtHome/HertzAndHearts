@@ -258,8 +258,9 @@ def build_report_data_from_session_dir(
     # When beats were corrected, rebuild HR / RMSSD / SDNN from cleaned IBIs.
     hr_time_seconds = list(series.get("hr_time_seconds") or [])
     hr_values = list(series.get("hr_values") or [])
+    # Drop relative outliers for reports (do not median-fill — that invents flats).
     cleaned_times, cleaned_ibis, ibi_corrections = clean_ibi_series(
-        ibi_ms, ibi_time_seconds
+        ibi_ms, ibi_time_seconds, outlier_mode="drop"
     )
     if cleaned_ibis:
         ibi_ms = cleaned_ibis
@@ -371,6 +372,18 @@ def build_report_data_from_session_dir(
     if recomputed_qtc is not None:
         qtc_payload = recomputed_qtc
 
+    from hnh.trend_quality import disconnect_intervals_to_elapsed, session_origin_timestamp
+
+    disconnect_raw = (
+        list(manifest.get("disconnect_intervals") or [])
+        if isinstance(manifest, dict)
+        else []
+    )
+    disconnect_elapsed = disconnect_intervals_to_elapsed(
+        disconnect_raw,
+        session_origin_ts=session_origin_timestamp(started_at),
+    )
+
     return {
         "session_id": str(manifest.get("session_id") or session_dir.name),
         "profile_id": profile_id,
@@ -408,6 +421,8 @@ def build_report_data_from_session_dir(
         "annotation_associations_method": "",
         "disclaimer": manifest.get("disclaimer") if isinstance(manifest, dict) else {},
         "settling_duration_seconds": settling_duration,
+        "disconnect_intervals": disconnect_raw,
+        "disconnect_intervals_seconds": disconnect_elapsed,
     }
 
 
