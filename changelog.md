@@ -1,6 +1,9 @@
 # Changelog
 
 ### Unreleased
+
+### Version 1.0.0-beta.9 (October 20 2026)
++ release: Bumped pre-release version to `1.0.0b9` (public label: `1.0.0-beta.9`).
 + bugfix: Polar H10 saved-HRV imports no longer append the phone's Feather demo profile name (e.g. "Typical patch torso") to the session annotation.
 + enhancement: Live side metrics group HR/baseline mid upper plot, SDNN·LF/HF·QRS beside the freeze row, and RMSSD·Bridge·baseline mid lower plot, with thin dividers only between those groups.
 + enhancement: Session reports (and imports/replay) clean beat intervals with relative median outlier replacement plus a tighter default noise ceiling (`NOISE_IBI_HIGH_MS` 1800 ms), so Polar contact spikes no longer dent the HR/RMSSD/SDNN trends.
