@@ -1,6 +1,8 @@
 # Changelog
 
 ### Unreleased
++ bugfix: Report HR flat detection only flags near-identical held shelves (~0.15 bpm), so clean resting traces are no longer painted dotted gray.
++ bugfix: Short sessions (< RMSSD/SDNN 60s stabilize) fall back to the base settling cut for those trends instead of a single leftover point.
 
 ### Version 1.0.0-beta.10 (October 21 2026)
 + release: Bumped pre-release version to `1.0.0b10` (public label: `1.0.0-beta.10`).

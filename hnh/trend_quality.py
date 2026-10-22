@@ -6,11 +6,13 @@ from datetime import datetime
 from typing import Any, Sequence
 
 
-# Rolling-window plateau: low value range over several seconds = held/fake.
-_FLAT_WINDOW_SECONDS = 5.0
+# Rolling-window plateau: near-zero range over several seconds = held/fake.
+# HR must stay almost identical — resting sinus often moves only 1–2 bpm in
+# a few seconds, so a 1.5 bpm threshold falsely paints clean traces as bad.
+_FLAT_WINDOW_SECONDS = 8.0
 _FLAT_WINDOW_SECONDS_MS = 8.0
-_FLAT_MIN_SAMPLES = 6
-_FLAT_RANGE_HR_BPM = 1.5
+_FLAT_MIN_SAMPLES = 8
+_FLAT_RANGE_HR_BPM = 0.15
 _FLAT_RANGE_MS = 0.6  # true held shelf; normal RMSSD wobble stays above this
 _FLAT_NEAR_ZERO_MS = 1.0
 

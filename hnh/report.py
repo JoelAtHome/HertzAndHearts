@@ -399,6 +399,35 @@ def _report_metric_settling_seconds(metric: str, base_settling_sec: float) -> fl
     return base
 
 
+def _truncate_trend_after_settling(
+    values: list[float],
+    times_sec: list[float],
+    min_sec: float,
+    *,
+    fallback_sec: float | None = None,
+) -> tuple[list[float], list[float]]:
+    """Drop early settling samples; fall back on short sessions.
+
+    RMSSD/SDNN use a longer stabilize window than HR. When a phone import
+    (or any short recording) is shorter than that window, keeping only the
+    last sample made the trend look like a single point — prefer the base
+    settling cut so the available post-warmup samples still plot.
+    """
+    if not values or not times_sec or len(values) != len(times_sec):
+        return values, times_sec
+
+    def _keep_from(cut: float) -> list[tuple[float, float]]:
+        return [(v, t) for v, t in zip(values, times_sec) if t >= cut]
+
+    kept = _keep_from(min_sec)
+    if len(kept) < 2 and fallback_sec is not None and fallback_sec < min_sec:
+        kept = _keep_from(fallback_sec)
+    if not kept:
+        return values[-1:], times_sec[-1:]  # keep at least one point
+    vs, ts = zip(*kept)
+    return list(vs), list(ts)
+
+
 def _disconnect_elapsed_from_data(data: dict[str, Any]) -> list[tuple[float, float]]:
     """Session-elapsed disconnect windows from report payload."""
     from hnh.trend_quality import (
@@ -724,28 +753,23 @@ def _build_visual_images(data: dict[str, Any], output_dir: Path) -> dict[str, Pa
     rmssd_truncate_sec = _report_metric_settling_seconds("rmssd", truncate_sec)
     hrv_truncate_sec = _report_metric_settling_seconds("hrv", truncate_sec)
 
-    def _truncate_settling(
-        values: list[float], times_sec: list[float], min_sec: float
-    ) -> tuple[list[float], list[float]]:
-        if not values or not times_sec or len(values) != len(times_sec):
-            return values, times_sec
-        kept = [(v, t) for v, t in zip(values, times_sec) if t >= min_sec]
-        if not kept:
-            return values[-1:], times_sec[-1:]  # keep at least one point
-        vs, ts = zip(*kept)
-        return list(vs), list(ts)
-
     if truncate_sec > 0:
-        hr_values, hr_time_seconds = _truncate_settling(
+        hr_values, hr_time_seconds = _truncate_trend_after_settling(
             hr_values, hr_time_seconds, truncate_sec
         )
     if rmssd_truncate_sec > 0:
-        rmssd_values, rmssd_time_seconds = _truncate_settling(
-            rmssd_values, rmssd_time_seconds, rmssd_truncate_sec
+        rmssd_values, rmssd_time_seconds = _truncate_trend_after_settling(
+            rmssd_values,
+            rmssd_time_seconds,
+            rmssd_truncate_sec,
+            fallback_sec=truncate_sec,
         )
     if hrv_truncate_sec > 0:
-        hrv_values, hrv_time_seconds = _truncate_settling(
-            hrv_values, hrv_time_seconds, hrv_truncate_sec
+        hrv_values, hrv_time_seconds = _truncate_trend_after_settling(
+            hrv_values,
+            hrv_time_seconds,
+            hrv_truncate_sec,
+            fallback_sec=truncate_sec,
         )
     if truncate_sec > 0:
         session_reset_markers_seconds = [

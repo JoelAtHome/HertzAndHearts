@@ -25,6 +25,25 @@ class TrendQualityTests(unittest.TestCase):
         gaps = gap_intervals(gap_times, gap_seconds=3.0)
         self.assertEqual(gaps, [(1.6, 6.0)])
 
+    def test_stable_resting_hr_not_marked_flat(self):
+        # Clean resting HR wobbles ~1–2 bpm; that must stay solid, not dotted.
+        times = [float(i) * 0.5 for i in range(40)]
+        values = [118.0 + (0.6 if i % 2 else -0.5) for i in range(40)]
+        intervals = unreliable_intervals_for_series(
+            values, times, disconnect_elapsed=[], metric="hr"
+        )
+        mask = point_unreliable_mask(times, intervals)
+        self.assertFalse(any(mask))
+
+    def test_held_identical_hr_shelf_still_marked(self):
+        times = [float(i) * 0.75 for i in range(24)]
+        values = [80.0] * 24
+        intervals = unreliable_intervals_for_series(
+            values, times, disconnect_elapsed=[], metric="hr"
+        )
+        mask = point_unreliable_mask(times, intervals)
+        self.assertTrue(all(mask))
+
     def test_rmssd_near_zero_plateau_marked(self):
         times = [float(i) for i in range(15)]
         values = [12.0] * 3 + [0.0] * 9 + [11.0] * 3
