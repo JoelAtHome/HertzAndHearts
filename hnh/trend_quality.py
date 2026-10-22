@@ -13,7 +13,9 @@ _FLAT_WINDOW_SECONDS = 8.0
 _FLAT_WINDOW_SECONDS_MS = 8.0
 _FLAT_MIN_SAMPLES = 8
 _FLAT_RANGE_HR_BPM = 0.15
-_FLAT_RANGE_MS = 0.6  # true held shelf; normal RMSSD wobble stays above this
+# RMSSD often drifts slowly (<1 ms over several seconds) even when clean;
+# only treat near-identical shelves (or near-zero) as held/fake.
+_FLAT_RANGE_MS = 0.05
 _FLAT_NEAR_ZERO_MS = 1.0
 
 # Beat-to-beat silence longer than this is a signal gap (matches dropout scale).

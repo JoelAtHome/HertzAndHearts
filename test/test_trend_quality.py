@@ -55,6 +55,16 @@ class TrendQualityTests(unittest.TestCase):
         kept = filter_values_excluding_intervals(values, times, intervals)
         self.assertGreater(min(kept), 0.5)
 
+    def test_slowly_drifting_rmssd_not_marked_flat(self):
+        # Real resting RMSSD can move <1 ms over an 8s window; that is not a hold.
+        times = [float(i) * 0.5 for i in range(40)]
+        values = [12.0 + (i * 0.02) for i in range(40)]  # +0.8 ms over 20s
+        intervals = unreliable_intervals_for_series(
+            values, times, disconnect_elapsed=[], metric="rmssd"
+        )
+        mask = point_unreliable_mask(times, intervals)
+        self.assertFalse(any(mask))
+
     def test_split_runs_breaks_across_time_gaps(self):
         times = [0.0, 0.8, 1.6, 10.0, 10.8]
         values = [80.0, 81.0, 80.5, 82.0, 81.5]
