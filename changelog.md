@@ -1,6 +1,7 @@
 # Changelog
 
 ### Unreleased
++ enhancement: **Stop & Abandon** (right of Stop & Save) ends the session without a final report after a confirmation; the recording stays in history as abandoned.
 + bugfix: Report HR flat detection only flags near-identical held shelves (~0.15 bpm), so clean resting traces are no longer painted dotted gray.
 + bugfix: Short sessions (< RMSSD/SDNN 60s stabilize) fall back to the base settling cut for those trends instead of a single leftover point.
 + bugfix: Report RMSSD flat detection no longer treats slow <1 ms drifts as held shelves; only near-identical or near-zero plateaus are dotted.

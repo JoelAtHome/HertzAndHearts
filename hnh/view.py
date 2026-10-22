@@ -7905,6 +7905,9 @@ class View(QMainWindow):
         self.start_recording_button.clicked.connect(self.start_session)
         self.stop_save_button = QPushButton("Stop && Save")
         self.stop_save_button.clicked.connect(self._stop_and_save)
+        self.stop_abandon_button = QPushButton("Stop && Abandon")
+        self.stop_abandon_button.setEnabled(False)
+        self.stop_abandon_button.clicked.connect(self._stop_and_abandon)
         self.restart_no_save_button = QPushButton("Restart (no save)")
         self.restart_no_save_button.setEnabled(False)
         self.restart_no_save_button.clicked.connect(self._restart_session_without_save)
@@ -8047,6 +8050,10 @@ class View(QMainWindow):
         self.start_recording_button.setToolTip("Start a new session and begin recording.")
         self.stop_save_button.setToolTip(
             "Stop recording and save session (CSV, report, EDF+) to the path configured in Settings."
+        )
+        self.stop_abandon_button.setToolTip(
+            "Stop recording without a final report. The session stays in history as abandoned "
+            "and can be removed later with Purge abandoned."
         )
         self.restart_no_save_button.setToolTip(
             "Discard the current recording (delete session folder), clear charts, "
@@ -8385,6 +8392,8 @@ class View(QMainWindow):
         self.start_recording_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.stop_save_button.setMaximumWidth(110)
         self.stop_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
+        self.stop_abandon_button.setMaximumWidth(130)
+        self.stop_abandon_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self.restart_no_save_button.setMaximumWidth(130)
         self.restart_no_save_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
         self._more_button.setStyleSheet("font-size: 11px; padding: 2px 6px;")
@@ -8411,6 +8420,7 @@ class View(QMainWindow):
         toolbar_top.addWidget(self.battery_label)
         toolbar_top.addWidget(self.start_recording_button)
         toolbar_top.addWidget(self.stop_save_button)
+        toolbar_top.addWidget(self.stop_abandon_button)
         toolbar_top.addWidget(self.restart_no_save_button)
         self._morning_baseline_cb = QCheckBox("Morning baseline")
         self._morning_baseline_cb.setToolTip(
@@ -9630,6 +9640,7 @@ class View(QMainWindow):
             connected and not is_recording and not profile_switch_cooldown
         )
         self.stop_save_button.setEnabled(is_recording)
+        self.stop_abandon_button.setEnabled(is_recording)
         self.restart_no_save_button.setEnabled(is_recording)
         if getattr(self, "_morning_baseline_cb", None):
             self._morning_baseline_cb.setEnabled(True)
@@ -10231,6 +10242,29 @@ class View(QMainWindow):
     def _stop_and_save(self):
         """Stop recording and save session (CSV, report, EDF+) to Session Save Path."""
         self.finalize_session(show_message=True, build_final_report=True)
+
+    def _stop_and_abandon(self):
+        """Stop recording without a final report and mark the session abandoned."""
+        if self._session_state != "recording":
+            self.show_status("No active session to abandon.")
+            return
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("Stop & Abandon")
+        msg.setText("Stop this session without saving a final report?")
+        msg.setInformativeText(
+            "The recording stays in Session History as abandoned. "
+            "No final report is created, and nothing is copied to your Session Save Path.\n\n"
+            "Abandoned sessions can be removed later with Purge abandoned in Session History."
+        )
+        abandon_btn = msg.addButton("Stop && Abandon", QMessageBox.ButtonRole.DestructiveRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+        msg.setDefaultButton(QMessageBox.StandardButton.Cancel)
+        msg.exec()
+        if msg.clickedButton() != abandon_btn:
+            return
+        self._abandon_active_session()
+        self.show_status("Session stopped and marked abandoned.")
 
     def _restart_session_without_save(self):
         """Discard the active recording, clear charts, and start a fresh session."""

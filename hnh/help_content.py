@@ -97,7 +97,9 @@ HELP_TOPICS: dict[str, HelpTopic] = {
                 items=(
                     "<b>Scan / Connect</b>: find the Android Phone Bridge on Wi‑Fi, then Connect.",
                     "<b>Start New</b>: begin recording for the active profile.",
-                    "<b>Stop / Stop &amp; Save</b>: end the session; Save finalizes reports.",
+                    "<b>Stop &amp; Save</b>: end the session and write the final report.",
+                    "<b>Stop &amp; Abandon</b>: end without a final report; the session stays in history as abandoned.",
+                    "<b>Restart (no save)</b>: delete the current recording and start a fresh session.",
                     "<b>ECG / QTc / Poincare / PSD</b>: open popup analysis windows.",
                     "<b>More</b>: History, Trends, Profiles, Import, Saved Phone Recordings, Help (incl. About).",
                     "<b>Settings (gear)</b>: preferences and data folder (also Ctrl+,).",
