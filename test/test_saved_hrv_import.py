@@ -10,7 +10,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from hnh.import_session import (
+    adopt_existing_session_folder,
     decode_ritual_ecg_chunks,
+    import_file_as_session,
     import_saved_hrv_package,
     phone_bridge_import_annotation,
     replay_data_from_ibi_ms,
@@ -119,10 +121,12 @@ class SavedHrvImportTests(unittest.TestCase):
             self.assertIsNotNone(expected_start)
             assert expected_start is not None
             self.assertEqual(manifest["timing"]["started_at"], expected_start.isoformat())
-            self.assertEqual(
-                manifest["timing"]["ended_at"],
-                (expected_start + timedelta(seconds=120)).isoformat(),
-            )
+            expected_end = expected_start + timedelta(seconds=120)
+            self.assertEqual(manifest["timing"]["ended_at"], expected_end.isoformat())
+            self.assertEqual(bundle.session_id, expected_end.strftime("%Y%m%d-%H%M%S"))
+            self.assertEqual(bundle.session_dir.name, expected_end.strftime("%Y%m%d-%H%M%S"))
+            self.assertEqual(bundle.session_dir.parent.name, expected_end.strftime("%Y-%m-%d"))
+            self.assertEqual(bundle.session_dir.parent.parent.name, expected_end.strftime("%Y"))
             self.assertEqual(manifest["timing"]["emitted_at"], "2026-09-15T12:03:00Z")
             stored = datetime.fromisoformat(manifest["timing"]["started_at"])
             local_tz = datetime.now().astimezone().tzinfo
@@ -408,6 +412,83 @@ class SavedHrvImportTests(unittest.TestCase):
             self.assertEqual(len(trends), 1)
             self.assertNotAlmostEqual(trends[0]["avg_rmssd"], 41.47, places=2)
             self.assertAlmostEqual(trends[0]["avg_hr"], 95.0, places=3)
+
+    def test_file_import_names_folder_for_recording_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            source = root / "incoming.csv"
+            source.write_text(
+                "event,value,timestamp,elapsed_sec\n"
+                "IBI,800.0,2026-09-15T12:00:00,0.000\n"
+                "IBI,800.0,2026-09-15T12:00:00,120000.000\n",
+                encoding="utf-8",
+            )
+            bundle = import_file_as_session(source, root / "sessions", "Admin", store)
+            self.assertIsNotNone(bundle)
+            assert bundle is not None
+            started = datetime.fromisoformat("2026-09-15T12:00:00")
+            ended = started + timedelta(seconds=120)
+            self.assertEqual(bundle.session_id, ended.strftime("%Y%m%d-%H%M%S"))
+            self.assertEqual(bundle.session_dir.parent.name, ended.strftime("%Y-%m-%d"))
+            manifest = json.loads(bundle.manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["timing"]["started_at"], started.isoformat())
+            self.assertEqual(manifest["timing"]["ended_at"], ended.isoformat())
+
+    def test_reindex_walks_back_from_end_named_session_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            ended = datetime(2026, 9, 15, 12, 5, 0)
+            session_dir = root / ended.strftime("%Y%m%d-%H%M%S")
+            session_dir.mkdir()
+            (session_dir / "session_manifest.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": ended.strftime("%Y%m%d-%H%M%S"),
+                        "profile_id": "Admin",
+                        "state": "imported",
+                        "timing": {
+                            "ended_at": ended.isoformat(),
+                            "duration_s": 120.0,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            record = store._session_record_from_manifest(
+                manifest_path=session_dir / "session_manifest.json",
+                scan_root=root,
+                fallback_now=datetime(2026, 10, 25, 20, 0, 0),
+                owner_profile="Admin",
+            )
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(
+                record["started_at"],
+                (ended - timedelta(seconds=120)).isoformat(),
+            )
+            self.assertEqual(record["ended_at"], ended.isoformat())
+
+    def test_adopt_keeps_file_start_when_folder_is_the_end(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = ProfileStore(root)
+            started = datetime(2026, 9, 15, 12, 0, 0)
+            ended = started + timedelta(seconds=120)
+            session_dir = root / ended.strftime("%Y%m%d-%H%M%S")
+            session_dir.mkdir()
+            (session_dir / "session.csv").write_text(
+                "event,value,timestamp,elapsed_sec\n"
+                "IBI,800.0,2026-09-15T12:00:00,0.000\n"
+                "IBI,800.0,2026-09-15T12:00:00,120000.000\n",
+                encoding="utf-8",
+            )
+            record = adopt_existing_session_folder(session_dir, "Admin", store)
+            self.assertIsNotNone(record)
+            assert record is not None
+            self.assertEqual(record["started_at"], started.isoformat())
+            self.assertEqual(record["ended_at"], ended.isoformat())
 
 
 if __name__ == "__main__":

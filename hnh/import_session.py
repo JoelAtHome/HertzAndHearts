@@ -11,7 +11,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from hnh.session_artifacts import SessionBundle, create_session_bundle, write_manifest
+from hnh.session_artifacts import (
+    SessionBundle,
+    create_session_bundle,
+    session_id_clock,
+    write_manifest,
+)
 from hnh.profile_store import ProfileStore
 from hnh.report import format_ecg_sensor_display_name, naive_local_from_iso
 from hnh.rmssd_series import rolling_rmssd_series, rolling_sdnn_series
@@ -246,6 +251,25 @@ def _write_ecg_stream(path: Path, samples: list[float], sample_rate_hz: int) -> 
         return False
 
 
+def _recording_window(data: dict[str, Any]) -> tuple[datetime, datetime] | None:
+    """Wall-clock start and end from a parsed file, or None when it has no clock."""
+    started = naive_local_from_iso(str(data.get("started_at") or ""))
+    if started is None:
+        return None
+    try:
+        duration = float(data.get("duration_seconds") or 0.0)
+    except (TypeError, ValueError):
+        duration = 0.0
+    if duration != duration or duration < 0:
+        duration = 0.0
+    if duration <= 0 and data.get("hr_times"):
+        try:
+            duration = float(max(data["hr_times"]))
+        except (TypeError, ValueError):
+            duration = 0.0
+    return started, started + timedelta(seconds=max(0.0, duration))
+
+
 def import_file_as_session(
     source_path: Path,
     session_root: Path,
@@ -264,8 +288,21 @@ def import_file_as_session(
     if not data or not data.get("hr_times"):
         return None
 
+    window = _recording_window(data)
+    if window is not None:
+        started, ended = window
+        data["started_at"] = started.isoformat()
+        named_at = ended
+    else:
+        started = None
+        ended = None
+        named_at = None
+
     bundle = create_session_bundle(
-        session_root, profile_id, include_profile_subpath=include_profile_subpath
+        session_root,
+        profile_id,
+        include_profile_subpath=include_profile_subpath,
+        named_at=named_at,
     )
     write_session_csv(bundle.csv_path, data)
 
@@ -292,6 +329,9 @@ def import_file_as_session(
         artifacts["ecg_stream"] = {"path": str(bundle.ecg_stream_path.name), "exists": True}
 
     now = datetime.now()
+    if started is None or ended is None:
+        started = bundle.started_at
+        ended = started
     payload = {
         "schema_version": 1,
         "updated_at": now.isoformat(),
@@ -304,9 +344,10 @@ def import_file_as_session(
             "ecg_sample_rate_hz": ecg_rate if ecg_samples else None,
         },
         "timing": {
-            "started_at": bundle.started_at.isoformat(),
-            "first_data_at": None,
-            "ended_at": now.isoformat(),
+            "started_at": started.isoformat(),
+            "first_data_at": started.isoformat(),
+            "ended_at": ended.isoformat(),
+            "duration_s": max(0.0, (ended - started).total_seconds()),
         },
         "metrics": {
             "baseline_hr": None,
@@ -335,8 +376,8 @@ def import_file_as_session(
             (
                 bundle.session_id,
                 profile_id,
-                bundle.started_at.isoformat(),
-                now.isoformat(),
+                started.isoformat(),
+                ended.isoformat(),
                 "imported",
                 str(bundle.session_dir),
                 str(bundle.csv_path),
@@ -349,7 +390,7 @@ def import_file_as_session(
     profile_store.record_session_trend(
         profile_name=profile_id,
         session_id=bundle.session_id,
-        ended_at=now,
+        ended_at=ended,
         avg_hr=last_hr,
         avg_rmssd=_rmssd_trend_average(rmssd_values),
     )
@@ -402,13 +443,7 @@ def discover_orphan_session_dirs(root: Path) -> list[Path]:
 
 
 def _started_at_from_session_id(session_id: str) -> datetime | None:
-    match = _SESSION_DIR_NAME_RE.match(str(session_id or "").strip())
-    if not match:
-        return None
-    try:
-        return datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
-    except ValueError:
-        return None
+    return session_id_clock(session_id)
 
 
 def adopt_existing_session_folder(
@@ -452,18 +487,31 @@ def adopt_existing_session_folder(
     if sid_match:
         session_id = sid_match.group(1)
 
-    started = naive_local_from_iso(str(data.get("started_at") or ""))
-    if started is None:
-        started = _started_at_from_session_id(session_id)
-    if started is None:
-        started = datetime.now()
+    file_started = naive_local_from_iso(str(data.get("started_at") or ""))
+    folder_clock = _started_at_from_session_id(session_id)
     duration = float(data.get("duration_seconds") or 0.0)
     if duration <= 0 and data.get("hr_times"):
         try:
             duration = float(max(data["hr_times"]))
         except (TypeError, ValueError):
             duration = 0.0
-    ended = started + timedelta(seconds=max(0.0, duration))
+    duration = max(0.0, duration)
+    if file_started is not None:
+        # CSV timestamp or EDF header. End-named imports keep the recording
+        # start here, so the folder stamp (the end) is not added on again.
+        started = file_started
+        ended = started + timedelta(seconds=duration)
+    elif folder_clock is not None:
+        # No clock in the file. Live folders and clockless imports are stamped
+        # at creation. Use that instant as the end of the span we can see so a
+        # folder named for the recording end cannot be pushed forward by its
+        # duration. Clockless imports have no true end, and this keeps the
+        # stamp as the later bound.
+        ended = folder_clock
+        started = folder_clock - timedelta(seconds=duration)
+    else:
+        started = datetime.now()
+        ended = started
     data["started_at"] = started.isoformat()
 
     if not has_csv:
@@ -731,11 +779,6 @@ def import_saved_hrv_package(
             if ecg_dur > float(data.get("duration_seconds") or 0):
                 data["duration_seconds"] = ecg_dur
 
-    bundle = create_session_bundle(
-        session_root, profile_id, include_profile_subpath=include_profile_subpath
-    )
-    write_session_csv(bundle.csv_path, data)
-
     emitted_at = str(package.get("emitted_at") or "").strip() or None
     duration_s = package.get("duration_s")
     try:
@@ -747,7 +790,7 @@ def import_saved_hrv_package(
     if duration_f != duration_f or duration_f < 0:
         duration_f = 0.0
 
-    start_dt = bundle.started_at
+    start_dt = datetime.now()
     # Phone emit time is Zulu. History stores naive local clocks, same as live sessions.
     if emitted_at:
         parsed_emit = naive_local_from_iso(emitted_at)
@@ -756,6 +799,15 @@ def import_saved_hrv_package(
     end_dt = start_dt + timedelta(seconds=max(1.0, duration_f or 1.0))
     started_at = start_dt.isoformat()
     ended_at = end_dt.isoformat()
+    data["started_at"] = started_at
+
+    bundle = create_session_bundle(
+        session_root,
+        profile_id,
+        include_profile_subpath=include_profile_subpath,
+        named_at=end_dt,
+    )
+    write_session_csv(bundle.csv_path, data)
 
     edf_ok = False
     ecg_stream_ok = False

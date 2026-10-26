@@ -16,6 +16,7 @@ from hnh.session_artifacts import (
     SessionBundle,
     _slugify,
     canonicalize_disk_profile_label,
+    session_id_clock,
     write_manifest,
 )
 
@@ -297,12 +298,54 @@ class ProfileStore:
             mapping.pop(next(iter(mapping)))
         self._save_phone_bridge_import_map(key, mapping)
 
-    @staticmethod
-    def _safe_started_at(session_id: str, fallback: datetime) -> str:
-        try:
-            return datetime.strptime(session_id, "%Y%m%d-%H%M%S").isoformat()
-        except ValueError:
-            return fallback.isoformat()
+    def _timing_started_at(
+        self,
+        timing: dict,
+        session_id: str,
+        updated_at: object,
+        fallback: datetime,
+    ) -> str:
+        """Start clock from a manifest.
+
+        The session-id stamp is the recording end for imports named after the
+        session, and the start for live recordings. When that stamp matches
+        ``ended_at``, walk back by ``duration_s`` instead of storing the end
+        as the start.
+        """
+        explicit = str(timing.get("started_at") or "").strip() if isinstance(timing, dict) else ""
+        if explicit:
+            return explicit
+        ended = None
+        duration_s: float | None = None
+        if isinstance(timing, dict):
+            from hnh.report import naive_local_from_iso
+
+            ended = naive_local_from_iso(str(timing.get("ended_at") or ""))
+            try:
+                raw_dur = timing.get("duration_s")
+                duration_s = float(raw_dur) if raw_dur is not None and str(raw_dur).strip() != "" else None
+            except (TypeError, ValueError):
+                duration_s = None
+            if duration_s is not None and (duration_s != duration_s or duration_s < 0):
+                duration_s = None
+        stamp = session_id_clock(session_id)
+        stamp_is_end = (
+            stamp is not None
+            and ended is not None
+            and abs((stamp - ended).total_seconds()) <= 2
+        )
+        if stamp_is_end and ended is not None and duration_s is not None:
+            return (ended - timedelta(seconds=duration_s)).isoformat()
+        updated = str(updated_at or "").strip()
+        if updated and not stamp_is_end:
+            return updated
+        if stamp is not None and not stamp_is_end:
+            return stamp.isoformat()
+        if stamp_is_end and ended is not None:
+            return ended.isoformat()
+        if updated:
+            return updated
+        return fallback.isoformat()
 
     @classmethod
     def _infer_profile_name(cls, session_dir: Path, sessions_root: Path) -> str:
@@ -347,10 +390,11 @@ class ProfileStore:
             )
             state = str(payload.get("state") or "finalized").strip() or "finalized"
             timing = payload.get("timing") if isinstance(payload.get("timing"), dict) else {}
-            started_at = str(
-                timing.get("started_at")
-                or payload.get("updated_at")
-                or self._safe_started_at(session_id, now)
+            started_at = self._timing_started_at(
+                timing if isinstance(timing, dict) else {},
+                session_id,
+                payload.get("updated_at"),
+                now,
             )
             ended_at = timing.get("ended_at") if isinstance(timing, dict) else None
             artifacts = payload.get("artifacts") if isinstance(payload.get("artifacts"), dict) else {}
@@ -1485,10 +1529,11 @@ class ProfileStore:
 
         session_id = str(payload.get("session_id") or session_dir.name).strip() or session_dir.name
         timing = payload.get("timing") if isinstance(payload.get("timing"), dict) else {}
-        started_at = str(
-            timing.get("started_at")
-            or payload.get("updated_at")
-            or self._safe_started_at(session_id, fallback_now)
+        started_at = self._timing_started_at(
+            timing if isinstance(timing, dict) else {},
+            session_id,
+            payload.get("updated_at"),
+            fallback_now,
         )
         ended_at_val = timing.get("ended_at") if isinstance(timing, dict) else None
         ended_at = str(ended_at_val).strip() if ended_at_val else None

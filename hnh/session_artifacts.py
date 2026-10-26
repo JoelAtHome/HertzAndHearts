@@ -104,6 +104,26 @@ def canonicalize_disk_profile_label(name: str) -> str:
     return raw
 
 
+_SESSION_ID_CLOCK_RE = re.compile(r"^(\d{8}-\d{6})(?:_\d{2})?$")
+
+
+def session_id_clock(session_id: str) -> datetime | None:
+    """Parse the YYYYMMDD-HHMMSS stamp in a session id, ignoring a _01 collision suffix."""
+    match = _SESSION_ID_CLOCK_RE.match(str(session_id or "").strip())
+    if not match:
+        return None
+    try:
+        return datetime.strptime(match.group(1), "%Y%m%d-%H%M%S")
+    except ValueError:
+        return None
+
+
+def _naive_local_stamp(value: datetime) -> datetime:
+    if value.tzinfo is not None:
+        return value.astimezone().replace(tzinfo=None)
+    return value
+
+
 def _next_available_dir(path: Path) -> Path:
     if not path.exists():
         return path
@@ -133,15 +153,24 @@ def create_session_bundle(
     profile_id: str = "Admin",
     *,
     include_profile_subpath: bool = True,
+    named_at: datetime | None = None,
 ) -> SessionBundle:
-    now = datetime.now()
+    """Create the session folder.
+
+    ``named_at`` stamps ``YYYY/YYYY-MM-DD/YYYYMMDD-HHMMSS``. Live recordings omit
+    it and use the current time, which is the session start. Imports pass the
+    recording's end time. ``SessionBundle.started_at`` stays the creation clock
+    so a live session's manifest start is unchanged.
+    """
+    created = datetime.now()
+    stamp = _naive_local_stamp(named_at) if isinstance(named_at, datetime) else created
     safe_profile = _slugify(profile_id)
-    date_key = now.strftime("%Y-%m-%d")
-    session_id = now.strftime("%Y%m%d-%H%M%S")
+    date_key = stamp.strftime("%Y-%m-%d")
+    session_id = stamp.strftime("%Y%m%d-%H%M%S")
     if include_profile_subpath:
-        base_dir = root / "Sessions" / safe_profile / now.strftime("%Y") / date_key / session_id
+        base_dir = root / "Sessions" / safe_profile / stamp.strftime("%Y") / date_key / session_id
     else:
-        base_dir = root / now.strftime("%Y") / date_key / session_id
+        base_dir = root / stamp.strftime("%Y") / date_key / session_id
     session_dir = _next_available_dir(base_dir)
     session_dir.mkdir(parents=True, exist_ok=False)
 
@@ -155,7 +184,7 @@ def create_session_bundle(
         manifest_path=session_dir / "session_manifest.json",
         edf_path=session_dir / "session.edf",
         ecg_stream_path=session_dir / "session_ecg.f32",
-        started_at=now,
+        started_at=created,
     )
 
 

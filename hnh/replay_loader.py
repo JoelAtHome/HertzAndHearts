@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -186,6 +187,8 @@ def _load_from_csv(csv_path: Path) -> dict[str, Any]:
     annotations: list[tuple[float, str]] = []
 
     current_elapsed = 0.0
+    started_at: datetime | None = None
+    from hnh.report import naive_local_from_iso
 
     with open(csv_path, encoding="utf-8", newline="") as f:
         reader = csv.DictReader(f)
@@ -197,6 +200,9 @@ def _load_from_csv(csv_path: Path) -> dict[str, Any]:
             event = (row.get("event") or "").strip()
             value_str = (row.get("value") or "").strip()
             elapsed_str = (row.get("elapsed_sec") or "").strip()
+            stamp = naive_local_from_iso((row.get("timestamp") or "").strip())
+            if stamp is not None and (started_at is None or stamp < started_at):
+                started_at = stamp
             parsed_elapsed = None
             if elapsed_str:
                 try:
@@ -251,4 +257,5 @@ def _load_from_csv(csv_path: Path) -> dict[str, Any]:
         "ecg_samples": [],
         "ecg_sample_rate_hz": 130,
         "duration_seconds": duration,
+        "started_at": started_at.isoformat() if started_at is not None else None,
     }
