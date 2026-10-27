@@ -41,6 +41,10 @@ from itertools import islice
 from typing import Optional
 from hnh.utils import get_sensor_address, NamedSignal
 from hnh.ble_diagnostics import ble_diagnostics_log_path
+from hnh.phone_bridge_occupancy import (
+    is_phone_bridge_held_locally_status,
+    local_phone_bridge_holder_status,
+)
 from hnh.sensor import (
     PhoneBridgeClient,
     SensorClient,
@@ -10366,11 +10370,23 @@ class View(QMainWindow):
             port = int(self.bridge_port_spin.value())
             self.phone_bridge.set_client_profile_name(self._session_profile_id)
             self._persist_connection_prefs()
+            if self._is_sensor_connected():
+                self.show_status("Phone Bridge already connected.")
+                return
             self._stop_connect_hints()
             self.connect_button.setEnabled(False)
             self.connect_button.setStyleSheet(self._CONNECT_DISABLED_CSS)
             self.disconnect_button.setEnabled(False)
-            self.sensor.connect_host(host, port)
+            started = bool(self.sensor.connect_host(host, port))
+            if not started:
+                # Companion (or another local program) still has the phone.
+                # Leave Connect available so the user can retry after disconnecting it.
+                self._connect_attempt_timer.stop()
+                self._apply_connect_ready_state()
+                self.disconnect_button.setEnabled(False)
+                self.scan_button.setEnabled(True)
+                self._start_connect_hints()
+                return
             self._connect_attempt_timer.start()
             self._last_data_time = None
             self._data_watchdog.stop()
@@ -12412,6 +12428,19 @@ class View(QMainWindow):
         self._apply_connect_ready_state()
         self._start_connect_hints()
         if self._connection_mode == "phone":
+            host = str(getattr(self.sensor, "_host", "") or "").strip()
+            if not host:
+                host = self._phone_bridge_host_value().strip()
+            try:
+                port = int(getattr(self.sensor, "_port", 0) or 0)
+            except (TypeError, ValueError):
+                port = 0
+            if port < 1 or port > 65535:
+                port = int(self.bridge_port_spin.value())
+            busy = local_phone_bridge_holder_status(host, port)
+            if busy:
+                self.show_status(busy)
+                return
             self.show_status(
                 "Phone Bridge connection timed out. The phone may still be holding "
                 "the last PC session. Force-stop or reopen the phone bridge app, "
@@ -13472,6 +13501,7 @@ class View(QMainWindow):
                 and self._feather_profile_banner_is_sticky(display_status)
             ):
                 self.recording_statusbar.set_idle(display_status)
+        locally_busy = is_phone_bridge_held_locally_status(status)
         if status.startswith("Scanning for BLE sensors..."):
             self._on_scan_state_changed(True)
         elif status.startswith("Found ") or status.startswith("Couldn't find sensors."):
@@ -13513,6 +13543,7 @@ class View(QMainWindow):
             "error" in status.lower()
             or "Disconnecting" in status
             or self._status_indicates_phone_bridge_link_down(status)
+            or locally_busy
         ):
             # If connect failed or link dropped, unblock reconnect immediately.
             self._connect_attempt_timer.stop()
@@ -13548,7 +13579,7 @@ class View(QMainWindow):
             and self._is_phone_discovery_status(status)
         )
         if not self.is_phase_active and not feather_status and not discovery_while_sticky:
-            if "error" in status.lower():
+            if "error" in status.lower() and not locally_busy:
                 self.recording_statusbar.set_error(status)
             else:
                 self.recording_statusbar.set_idle(status)

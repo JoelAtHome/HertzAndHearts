@@ -35,6 +35,7 @@ from hnh.utils import get_sensor_address, get_sensor_remote_address
 from hnh.config import COMPATIBLE_SENSORS, DEBUG, ECG_SAMPLE_RATE, PHONE_BRIDGE_PORT_DEFAULT
 from hnh.perf_probe import get_perf_probe
 from hnh.ble_diagnostics import append_ble_diagnostic
+from hnh.phone_bridge_occupancy import local_phone_bridge_holder_status
 
 PHONE_BRIDGE_CLIENT_APP: Final[str] = "hertz_and_hearts"
 
@@ -786,10 +787,11 @@ class PhoneBridgeClient(QObject):
     def is_link_up(self) -> bool:
         return self.is_connected()
 
-    def connect_host(self, host: str, port: int) -> None:
+    def connect_host(self, host: str, port: int) -> bool:
+        """Open TCP to the phone. Returns False when no socket was started."""
         if self.is_link_up():
             self.status_update.emit("Phone Bridge already connected.")
-            return
+            return False
         # A refused/dropped socket can linger as a non-None QTcpSocket in
         # Unconnected/Closing state. Replace it so Connect works again.
         if self.client is not None:
@@ -797,10 +799,16 @@ class PhoneBridgeClient(QObject):
         host = (host or "").strip()
         if not host:
             self.status_update.emit("Phone Bridge host is empty.")
-            return
+            return False
         if port < 1024 or port > 65535:
             self.status_update.emit("Phone Bridge port must be 1024-65535.")
-            return
+            return False
+        # The phone keeps one PC session. client_info from a new socket replaces
+        # whoever is connected, so do not open TCP when this PC already holds it.
+        busy = local_phone_bridge_holder_status(host, int(port))
+        if busy:
+            self.status_update.emit(busy)
+            return False
         sock = QTcpSocket(self)
         self.client = sock
         self._buffer.clear()
@@ -826,6 +834,7 @@ class PhoneBridgeClient(QObject):
         else:
             sock.connectToHost(host_addr, self._port)
         self.status_update.emit(f"Connecting to Phone Bridge at {host}:{self._port}...")
+        return True
 
     def disconnect_client(self) -> None:
         if self.client is None:
@@ -1140,6 +1149,11 @@ class PhoneBridgeClient(QObject):
         sock = self.client
         if sock is None:
             return
+        host = str(getattr(self, "_host", "") or "")
+        try:
+            port = int(getattr(self, "_port", 0) or 0)
+        except (TypeError, ValueError):
+            port = 0
         msg = sock.errorString()
         try:
             err_code = int(sock.error())
@@ -1147,6 +1161,11 @@ class PhoneBridgeClient(QObject):
         except Exception:
             status = f"Phone Bridge error: {msg}"
         self._drop_socket(emit_status=False)
+        # A local holder explains the failure better than a raw Qt code, and
+        # retrying Connect would kick that program off the phone.
+        busy = local_phone_bridge_holder_status(host, port)
+        if busy:
+            status = busy
         self.status_update.emit(status)
 
     def _on_ready_read(self) -> None:

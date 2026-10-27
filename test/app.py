@@ -79,11 +79,12 @@ class MockSensorClient(QObject):
         self.ecg_ready.emit()
         self.timer.start()
 
-    def connect_host(self, host: str, port: int):
+    def connect_host(self, host: str, port: int) -> bool:
         self.status_update.emit(f"Connecting to Phone Bridge at {host}:{int(port)}...")
         self.client = object()
         self.ecg_ready.emit()
         self.timer.start()
+        return True
 
     def disconnect_client(self):
         self.status_update.emit("Disconnecting from sensor.")
